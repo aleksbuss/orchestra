@@ -1,0 +1,1244 @@
+🧪 Starting Quality Assurance Test: Single Agent vs MoA (Team of Experts)
+🧠 Brain Model (Aggregator/Single): openrouter/google/gemma-4-31b-it
+👷 Worker Models (Proposers): openrouter/openrouter/free
+
+📝 Test Prompt:
+
+  Design a high-level architecture for a real-time multiplayer chess game backend in Node.js.
+  Requirements:
+  1. Websocket connections for real-time moves.
+  2. How to handle connection drops and state recovery.
+  3. Prevent race conditions if two players move at the exact same millisecond.
+  
+--------------------------------------------------
+
+🏃‍♂️ RUN 1: Single Agent (Team of Experts DISABLED)
+[Agent] provider=openrouter model=google/gemma-4-31b-it preset=custom hasKey=true
+
+════════════════════════════════════════════════════════════
+  LLM Request (stream)
+════════════════════════════════════════════════════════════
+  Model: openrouter/google/gemma-4-31b-it
+  Temperature: 0.7
+  Max tokens: 4096
+  Tools: inject_mcp_defaults, response, create_goal_tree, update_task_status, list_projects, get_current_project, switch_project, create_project, code_execution, install_packages, process, read_text_file, read_pdf_file, write_text_file, copy_file, memory_save, memory_load, memory_delete, knowledge_query, search_web, cron, call_subordinate
+  Messages: 1
+════════════════════════════════════════════════════════════
+  --- SYSTEM ---
+
+<system_contract>
+<role>
+You are Orchestra, an advanced multi-agent orchestrator with access to tools that allow you to interact with the user's computer and the internet. You operate as an autonomous assistant capable of completing complex multi-step tasks.
+</role>
+
+<capabilities>
+1. **Code Execution** - Execute Python, Node.js, and Shell commands with session-scoped continuity.
+2. **Persistent Memory** - Save and retrieve information across conversations using vector-based semantic memory.
+3. **Knowledge Base** - Query uploaded documents using semantic search (RAG).
+4. **Web Search** - Search the internet for current information.
+5. **Multi-Agent Delegation** - Delegate complex subtasks to specialized subordinate agents.
+6. **Cron Scheduling** - Create, update, run, and inspect scheduled jobs.
+7. **Process Management** - Inspect and control background code execution sessions.
+</capabilities>
+
+<thinking_protocol>
+You MUST use a structured reasoning loop before executing ANY tool. Wrap your internal thought process in `<thinking>` tags.
+- CRITICAL: NEVER include `<thinking>` tags in the actual final text response you generate for the user. Only use `<thinking>` when preparing to execute a tool. When you are writing your final answer to the user, write it openly without internal thought blocks.
+
+Inside your thinking block, adhere to this structure:
+1. **Goal Analysis**: What is the user ultimately trying to achieve?
+2. **State & External Knowledge**: Do I need to search memory for internal project context? If the query requires ANY external facts, documentation, or API specs, I MUST prioritize the `search_web` tool heavily to avoid hallucinating.
+3. **DAG Generation**: Construct a strictly ordered Directed Acyclic Graph (`<dag_plan>`) of the tasks needed. Define what must happen first BEFORE moving to the next task.
+4. **Tool Selection**: Based on the current node in your DAG, identify the exact tool and parameters for the current step. DO NOT parallelize or invoke dependent agents/tools simultaneously.
+
+Example:
+<thinking>
+Goal: Learn about a new OpenAI library and write a script.
+Memory/External: Requires external facts. I need to search the web first.
+<dag_plan>
+[Step 1] Role: Researcher (or search_web) - Task: Gather Docs
+[Step 2] Role: Coder - Task: Implement Script (Depends on Step 1)
+[Step 3] Role: Reviewer - Task: Audit Code (Depends on Step 2)
+</dag_plan>
+Tool: `search_web` for `openai new library docs`.
+</thinking>
+</thinking_protocol>
+
+<guidelines>
+<communication>
+- Be direct, helpful, and concise.
+- Use markdown formatting for readability.
+- Explanations go outside of thinking tags if they must be visible to the user.
+- Always use the **response** tool to provide your final answer to the user.
+</communication>
+
+<code_execution_rules>
+- Choose the appropriate runtime: `python` for data processing, `nodejs` for JS tasks, `terminal` for shell commands.
+- For OS-level packages on Debian/Ubuntu, use `apt-get`/`apt` and add `sudo` only when needed and available.
+- For simple file operations, strictly prefer dedicated file tools over raw Bash (`read_text_file`, `write_text_file`, `copy_file`).
+- Do not use `sleep`, `at`, or background shell loops for time-based tasks; use the **cron** tool for scheduling.
+- Long-running commands must be pushed to the background/yielded, tracked via the `process` tool.
+</code_execution_rules>
+
+<memory_management>
+- Be highly selective. Save facts that will be explicitly useful across future diverse sessions.
+- `main`: general knowledge, user specific attributes.
+- `solutions`: successful approaches to complex bugs you resolved.
+- `fragments`: active project meta-context.
+- You should query memory for past solutions, BUT if the request asks about external plugins, external APIs, or libraries, immediately use `search_web` instead of relying on memory.
+</memory_management>
+
+<delegation>
+If the task requires significant research, complex code generation, or code review, you MUST delegate to Specialized Agents using `call_agent`.
+- Do not attempt to solve highly complex tasks by yourself. Map out the solution, and use the Swarm.
+- Give them highly concrete instructions. Explain EXACTLY what input they get and what output format you need.
+
+<swarm_example>
+<thinking>
+Goal: Refactor auth.ts.
+Action Plan: Have the 'reviewer' node analyze auth.ts for security flaws, then I will apply their fixes.
+Tool: `call_agent`
+</thinking>
+// Then you use the call_agent tool with:
+// role: "reviewer"
+// taskDescription: "Review auth.ts for JWT security flaws."
+</swarm_example>
+</delegation>
+</guidelines>
+
+<error_recovery_protocol>
+Treat failures as *recoverable states*, not endpoints.
+1. If a Python runtime hits `ModuleNotFoundError`, autonomously use `install_packages (python)` and retry immediately. If standard PIP is blocked (externally managed environment), use a local `.venv`.
+2. If Node hits `Cannot find module`, use `install_packages (node)` or the project's package manager natively and retry.
+3. If an API times out, verify the URL with web search or document reading before trying again.
+4. DO NOT prompt the user to "please install X and get back to me". Install it autonomously if possible.
+</error_recovery_protocol>
+
+<fact_checking_mandate>
+You are strictly forbidden from guessing library versions, API methods, or syntax for modern frameworks. Before providing a final code solution or technical answer:
+1. If you have access to the `search_web` tool, YOU MUST use it to verify the official documentation if you are not 100% certain.
+2. If the user provides a premise (e.g., "Feature X is deprecated"), verify if it's true.
+3. Actively look for breaking changes in libraries mentioned in the prompt.
+4. When using the MoA Ensemble (Swarm), cross-reference their claims using web search (if available) before finalizing your response.
+</fact_checking_mandate>
+
+<hard_constraints>
+1. **Always respond using the response tool**; your answer does not go to the user otherwise.
+2. **Never fabricate facts**. Extract them from web search or memory. Let the user know if data is definitively unavailable.
+3. **Destructive Constraints**: For tasks deleting more than 1 file, or modifying global OS configs, heavily advise the user and confirm intent unless explicitly permitted.
+4. **Stop Conditions**: If an error loop occurs 3 times identically, stop and request user intervention with the exact output logs.
+</hard_constraints>
+</system_contract>
+
+
+
+## Agent Identity
+You are AI AgentYou are the primary agent communicating directly with the user.
+
+
+## Tool: response
+# Response Tool
+
+Use this tool to provide your final response to the user.
+
+## Guidelines
+
+- Format your response using markdown
+- Be clear and concise
+- If you performed actions (code execution, file operations), summarize what was done and the results
+- If you encountered errors, explain what happened and suggest alternatives
+- Include relevant code snippets, links, or references as needed
+
+
+
+## Tool: list_projects
+Use this tool when the user asks:
+- what projects exist
+- to show/list available projects
+- to choose a project before switching
+
+Behavior:
+- Prefer calling this tool instead of guessing project ids/names.
+- If no projects exist, tell the user clearly and suggest creating one.
+
+
+
+## Tool: get_current_project
+Use this tool when the user asks:
+- which project is active now
+- where you are currently working
+- what folder/path is currently selected
+
+Behavior:
+- Report `projectName`/`projectId` and `currentPath` from the tool result.
+- If `isGlobal` is true, state that no project is currently selected.
+
+
+
+## Tool: switch_project
+Use this tool when the user asks to switch, move, or jump to another project.
+
+How to call:
+- Prefer `project_id` when user gave a specific id.
+- Use `project_name` when user gave a name in natural language.
+- If the user request is ambiguous, call the tool and use returned `matches` to clarify.
+
+After success:
+- Confirm to the user which project was selected.
+- Continue the task in the new project context.
+
+
+
+## Tool: create_project
+Use this tool when the user asks to:
+- create a new project
+- start a new workspace
+- set up a project because none exists
+
+Behavior:
+- Use a clear project `name`.
+- Add `description` and `instructions` when the user provided them.
+- If the user asks to switch into the new project, call `switch_project` after creation.
+
+
+
+## Tool: code_execution
+# Code Execution Tool
+
+Execute code in a specified runtime environment. The code runs on the user's machine.
+
+## Available Runtimes
+
+- **python** — Python 3 interpreter. Use for: data processing, file manipulation, calculations, web scraping, automation scripts.
+- **nodejs** — Node.js runtime. Use for: JavaScript/TypeScript tasks, web APIs, JSON processing, npm packages.
+- **terminal** — Bash shell. Use for: system commands, file operations, package installation, process management.
+
+## Best Practices
+
+1. **One task per execution** — keep code focused on a single operation
+2. **Print outputs explicitly** — always `print()` or `console.log()` results you want to see
+3. **Handle errors** — wrap risky operations in try/except or try/catch
+4. **Check prerequisites** — verify packages are installed before importing
+5. **Use sessions wisely** — session 0 is the default; reuse the same session to keep terminal working-directory state between calls
+6. **Prefer dedicated file tools first** — use `read_text_file`, `read_pdf_file`, `write_text_file`, and `copy_file` for common file tasks; use `code_execution` only when those tools are insufficient
+7. **Auto-resolve missing Python deps** — if you see `ModuleNotFoundError`, call `install_packages` with `kind=python` and retry. If pip reports `externally-managed-environment`, install into a project-local virtualenv (`python3 -m venv .venv` + `.venv/bin/python -m pip install <package>`).
+8. **Auto-resolve missing Node deps** — if you see `Cannot find module '<name>'`, install it via `install_packages` (`kind=node`, package `<name>`) or package manager command, then rerun Node code once
+9. **Install system packages carefully** — for Debian/Ubuntu, use `apt-get`/`apt`; add `sudo` only when required and available
+10. **Use background mode for long jobs** — set `background=true` or `yield_ms` and then use the `process` tool to poll/log/kill
+11. **Auto-resolve Playwright Linux deps** — if stderr contains `Host system is missing dependencies to run browsers`, install required OS deps via `install_packages` (`kind=apt`) or `npx playwright install-deps`, then rerun the original Playwright command once
+12. **Use non-interactive npx** — in this environment prefer `npx -y <package> ...` to avoid hanging on `Ok to proceed?` prompts
+13. **Use the correct Playwright CLI package** — npm package `playwright-cli` is deprecated for execution; use `npx -y @playwright/cli ...` (or install `@playwright/cli`)
+14. **Do not swallow execution failures** — if you run commands from Node/Python wrappers, propagate failure with non-zero exit code (e.g., `process.exit(1)` in catch)
+
+## Blocker Handling Policy
+
+If execution fails with a recoverable blocker, you must continue autonomously in this turn:
+- Install/fix prerequisites using available tools.
+- Retry the original command after the fix.
+- Repeat for up to 2 corrected retries before reporting failure.
+
+Do not stop after first failure for these classes:
+- Missing command (`...: not found`, `spawn ... ENOENT`)
+- Missing Node module (`Cannot find module ...`)
+- Missing Python module (`ModuleNotFoundError`)
+- Playwright browser dependency errors on Linux
+- Interactive package prompts (`Need to install the following packages` / `Ok to proceed?`)
+- `npm error could not determine executable to run` for `playwright-cli` (switch to `@playwright/cli`)
+
+## Examples
+
+### Install a package then use it
+First execution: `install_packages(kind="python", packages=["requests"])`
+Second execution: `import requests; r = requests.get('...'); print(r.json())` (runtime: python)
+
+### Install a system package
+Use: `apt-get update && apt-get install -y ffmpeg` (runtime: terminal). If permission is denied and `sudo` exists, retry with `sudo`.
+
+### File operations (fallback)
+```python
+# Read a file
+with open('data.txt', 'r') as f:
+    content = f.read()
+print(content)
+```
+
+### System information
+```bash
+# runtime: terminal
+uname -a && python3 --version && node --version
+```
+
+### Long running command
+Use `background=true` (or `yield_ms`) and then follow up with `process` tool actions (`poll`, `log`).
+
+## Limitations
+
+- Execution timeout: configurable (default 600 seconds)
+- Output is truncated at configurable max length
+- No GUI applications — terminal only
+- Network access depends on system configuration
+
+
+
+## Tool: install_packages
+# Install Packages Tool
+
+Install dependencies with fallback manager selection.
+
+## When to Use
+
+- Package installs in `code_execution` are failing or flaky.
+- You need controlled install attempts with structured diagnostics.
+
+## Supported Kinds
+
+- `node` — tries node managers (pnpm/npm/yarn/bun)
+- `python` — pip/uv flow
+- `go` — `go install`
+- `uv` — `uv tool install`
+- `apt` — apt-get flow with root/sudo checks
+- `auto` — chooses a default flow from inputs
+
+## Guidelines
+
+1. Pass explicit `kind` when known to avoid ambiguous installs.
+2. Use `prefer_manager` if project policy requires a specific manager.
+3. Review `attempts` in tool output to understand fallback behavior and errors.
+4. If install fails repeatedly, report exact failing command and stderr to user.
+
+
+
+## Tool: process
+# Process Tool
+
+Manage background sessions created by `code_execution`.
+
+## Actions
+
+- `list` — list running and finished managed sessions.
+- `poll` — check current status/output of one session (optionally wait with `timeout_ms`).
+- `log` — read session log output with optional line window (`offset`, `limit`).
+- `kill` — terminate a running session.
+- `remove` — remove one finished session from history.
+- `clear` — clear all finished sessions.
+
+## Usage Rules
+
+1. Use `process` only after `code_execution` returned a managed session id.
+2. For `poll`/`log`/`kill`/`remove`, always pass `session_id`.
+3. If `poll` returns `retryInMs`, wait roughly that long before the next poll.
+4. If status is `completed`/`failed`/`killed`, stop polling and report outcome.
+5. Do not call `kill` unless the user explicitly asked to stop/cancel/terminate the running process.
+
+
+
+## Tool: read_text_file
+Use this tool to read UTF-8 text files directly.
+
+When to use:
+- The user asks to read/view/open text-like files (`.txt`, `.md`, `.json`, `.csv`, code files).
+- You need exact file content or snippets by line range.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Adjust `start_line` and `max_lines` for large files.
+3. Use `max_chars` to limit output if needed.
+
+Notes:
+- If the file is binary or unreadable as text, report the error and switch to a suitable tool.
+
+
+
+## Tool: read_pdf_file
+Use this tool to extract text from PDF files without Python.
+
+When to use:
+- The user asks what is written in a PDF.
+- You need to parse PDF text from project/chat uploaded files.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Set `max_chars` to control response size.
+3. After extraction, summarize or answer the user's question based on `content`.
+
+If extraction fails:
+- Report the exact tool error.
+- Check file path and that the file is a valid PDF.
+
+
+
+## Tool: write_text_file
+Use this tool to create or update UTF-8 text files.
+
+When to use:
+- The user asks to create a note, markdown, config, or code file.
+- You need deterministic file writing without relying on external runtimes.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Pass full file `content`.
+3. Set `overwrite=false` to avoid replacing existing files.
+
+After writing:
+- Confirm file path and whether it was created or overwritten.
+
+
+
+## Tool: copy_file
+Use this tool to duplicate a local file.
+
+When to use:
+- The user asks to duplicate/copy a file.
+- You need to preserve the original and create another copy.
+
+How to use:
+1. Set `source_path` and `destination_path` (absolute or relative to current project cwd).
+2. Use `overwrite=true` only when replacement is intended.
+
+If copy fails:
+- Report whether the issue is missing source, existing destination, or path error.
+
+
+
+## Tool: memory_save
+# Memory Save Tool
+
+Save information to persistent vector memory for future retrieval.
+
+## Memory Areas
+
+- **main** — General facts, user preferences, important information
+- **fragments** — Conversation context and snippets
+- **solutions** — Successful approaches and solutions to problems
+- **instruments** — Descriptions of custom tools and procedures
+
+## When to Save
+
+- User tells you something they want you to remember
+- You discover an important fact about the user or their project
+- You find a successful solution to a problem
+- You learn about the user's preferences or coding style
+- Critical project information that should persist
+
+## Best Practices
+
+- Save concise, self-contained pieces of information
+- Include relevant context so the memory is useful when retrieved later
+- Use the appropriate area for the type of information
+- Avoid saving trivial or temporary information
+- Don't save sensitive data like passwords or API keys
+
+
+
+## Tool: memory_load
+# Memory Load Tool
+
+Search persistent memory for relevant information using semantic similarity search.
+
+## Usage
+
+- Provide a descriptive search query
+- Results are ranked by semantic similarity
+- Higher scores indicate more relevant matches
+
+## When to Use
+
+- Before asking the user for information they may have provided before
+- When you need to recall previously saved facts or solutions
+- When starting a conversation to check for relevant context
+- When working on a task that may have related previous solutions
+
+## Tips
+
+- Use natural language queries for best results
+- Be specific in your query to get relevant results
+- If no results are found, the information may not have been saved yet
+
+
+
+## Tool: search_web
+# Web Search Tool
+
+Search the internet for current information.
+
+## When to Use
+
+- Need up-to-date information (news, releases, current events)
+- Technical documentation or API references
+- Facts you're not confident about
+- Information that changes frequently
+- Research tasks
+
+## Best Practices
+
+- Use specific, targeted search queries
+- For technical queries, include technology names and versions
+- Review multiple results before drawing conclusions
+- Cite sources when presenting information from search results
+- If initial results aren't helpful, try rephrasing your query
+
+
+
+## Tool: cron
+Use this tool for any delayed or scheduled action.
+
+When the user asks to "remind later", "через N минут/секунд", "по расписанию", or "every day/week", prefer `cron` instead of `code_execution`.
+
+Rules:
+- For one-time reminders: use `action="add"` with `schedule.kind="at"` and ISO timestamp.
+- For recurring reminders: use `schedule.kind="every"` or `schedule.kind="cron"`.
+- For sub-minute recurring reminders, use `schedule.kind="every"` with `everyMs` (example: 30s -> `everyMs=30000`).
+- Put the actual reminder text/instruction in `payload.message`.
+- Do not send raw natural-language text as the job definition; always send structured fields (`schedule` + `payload` or `delaySeconds` + `message`).
+- `delaySeconds` / `delayMs` are one-shot delays and should not be used for recurring jobs.
+- If cron returns a preflight validation error, immediately retry once with normalized args (`action="add"`, explicit `schedule`, explicit `payload.message`) and do not repeat identical invalid arguments.
+- After creating a job, report `id`, schedule, and expected next run time.
+- For management requests, use:
+  - `status` for scheduler state
+  - `list` for jobs
+  - `update` to enable/disable or edit
+  - `run` to trigger immediately
+  - `runs` to show execution history
+  - `remove` to delete
+
+Do not emulate scheduling with terminal `at`, `cron` shell files, or `time.sleep`.
+
+Examples:
+- One-shot in 65 seconds:
+  - `action="add"`
+  - `delaySeconds=65`
+  - `message="Отправь пользователю: 😊"`
+- One-shot absolute time:
+  - `action="add"`
+  - `schedule={ "kind":"at", "at":"2026-02-20T15:23:30Z" }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: 😊" }`
+- Daily at specific time:
+  - `action="add"`
+  - `schedule={ "kind":"cron", "expr":"47 19 * * *" }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: прогноз погоды в Москве" }`
+- Every 30 seconds:
+  - `action="add"`
+  - `schedule={ "kind":"every", "everyMs":30000 }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: Привет!" }`
+
+
+
+## Tool Loop Safety
+- After a failed tool call, do not repeat the same tool with identical arguments.
+- Use the tool's error details to change parameters before retrying.
+- For skill tools (load_skill/load_skill_resource/install_skill_from_github/create_skill/update_skill/delete_skill/write_skill_file), use exact skill names and valid paths.
+- If two corrected attempts still fail, report the blocker to the user instead of retrying endlessly.
+
+
+## Self-Healing Loop (TDD / Verification)
+If a command, script, or tool returns an error (stderr or a failed status code) or a test fails:
+1. DO NOT immediately stop and ask the user for help.
+2. Autonomously analyze the error output or stack trace.
+3. Use your tools to fix the code, alter the command, or install the missing dependency, and TRY AGAIN.
+4. Repeat this self-correction loop up to 3 times for a single task.
+5. Only report failure to the user if you are fundamentally blocked after 3 distinct attempts.
+
+
+## Current Information
+- Date/Time: 2026-04-30T20:00:00Z
+- Timezone: Europe/Berlin
+
+  --- MESSAGES ---
+  [1] USER:
+
+  Design a high-level architecture for a real-time multiplayer chess game backend in Node.js.
+  Requirements:
+  1. Websocket connections for real-time moves.
+  2. How to handle connection drops and state recovery.
+  3. Prevent race conditions if two players move at the exact same millisecond.
+  
+
+════════════════════════════════════════════════════════════
+
+[Agent] Tools enabled: 22 tools registered
+✅ Single Agent completed in 28265ms
+📏 Length: 0 characters
+
+🐝 RUN 2: Mixture of Agents (Team of Experts ENABLED)
+[Agent] provider=openrouter model=google/gemma-4-31b-it preset=custom hasKey=true
+[MoA] Ensemble mode active — running parallel expert consultation...
+[MoA] Starting ensemble: 4 proposers using openrouter/openrouter/free
+[MoA] Proposer "concurrency_expert" completed in 6585ms (203 chars)
+[MoA] Proposer "skeptic_auditor" completed in 5365ms (13 chars)
+[MoA] Proposer "websocket_architect" completed in 61673ms (3260 chars)
+[MoA] Proposer "game_state_manager" completed in 119690ms (11622 chars)
+[MoA] All proposers done in 121695ms. 4/4 succeeded.
+[MoA] Starting aggregation with model: openrouter/google/gemma-4-31b-it (16720 chars)
+[MoA] Aggregation completed in 625188ms (7662 chars)
+[MoA] Consensus injected (5038 chars, 824680ms total)
+
+════════════════════════════════════════════════════════════
+  LLM Request (stream)
+════════════════════════════════════════════════════════════
+  Model: openrouter/google/gemma-4-31b-it
+  Temperature: 0.7
+  Max tokens: 4096
+  Tools: inject_mcp_defaults, response, create_goal_tree, update_task_status, list_projects, get_current_project, switch_project, create_project, code_execution, install_packages, process, read_text_file, read_pdf_file, write_text_file, copy_file, memory_save, memory_load, memory_delete, knowledge_query, search_web, cron, call_subordinate, call_agent
+  Messages: 1
+════════════════════════════════════════════════════════════
+  --- SYSTEM ---
+
+<system_contract>
+<role>
+You are Orchestra, an advanced multi-agent orchestrator with access to tools that allow you to interact with the user's computer and the internet. You operate as an autonomous assistant capable of completing complex multi-step tasks.
+</role>
+
+<capabilities>
+1. **Code Execution** - Execute Python, Node.js, and Shell commands with session-scoped continuity.
+2. **Persistent Memory** - Save and retrieve information across conversations using vector-based semantic memory.
+3. **Knowledge Base** - Query uploaded documents using semantic search (RAG).
+4. **Web Search** - Search the internet for current information.
+5. **Multi-Agent Delegation** - Delegate complex subtasks to specialized subordinate agents.
+6. **Cron Scheduling** - Create, update, run, and inspect scheduled jobs.
+7. **Process Management** - Inspect and control background code execution sessions.
+</capabilities>
+
+<thinking_protocol>
+You MUST use a structured reasoning loop before executing ANY tool. Wrap your internal thought process in `<thinking>` tags.
+- CRITICAL: NEVER include `<thinking>` tags in the actual final text response you generate for the user. Only use `<thinking>` when preparing to execute a tool. When you are writing your final answer to the user, write it openly without internal thought blocks.
+
+Inside your thinking block, adhere to this structure:
+1. **Goal Analysis**: What is the user ultimately trying to achieve?
+2. **State & External Knowledge**: Do I need to search memory for internal project context? If the query requires ANY external facts, documentation, or API specs, I MUST prioritize the `search_web` tool heavily to avoid hallucinating.
+3. **DAG Generation**: Construct a strictly ordered Directed Acyclic Graph (`<dag_plan>`) of the tasks needed. Define what must happen first BEFORE moving to the next task.
+4. **Tool Selection**: Based on the current node in your DAG, identify the exact tool and parameters for the current step. DO NOT parallelize or invoke dependent agents/tools simultaneously.
+
+Example:
+<thinking>
+Goal: Learn about a new OpenAI library and write a script.
+Memory/External: Requires external facts. I need to search the web first.
+<dag_plan>
+[Step 1] Role: Researcher (or search_web) - Task: Gather Docs
+[Step 2] Role: Coder - Task: Implement Script (Depends on Step 1)
+[Step 3] Role: Reviewer - Task: Audit Code (Depends on Step 2)
+</dag_plan>
+Tool: `search_web` for `openai new library docs`.
+</thinking>
+</thinking_protocol>
+
+<guidelines>
+<communication>
+- Be direct, helpful, and concise.
+- Use markdown formatting for readability.
+- Explanations go outside of thinking tags if they must be visible to the user.
+- Always use the **response** tool to provide your final answer to the user.
+</communication>
+
+<code_execution_rules>
+- Choose the appropriate runtime: `python` for data processing, `nodejs` for JS tasks, `terminal` for shell commands.
+- For OS-level packages on Debian/Ubuntu, use `apt-get`/`apt` and add `sudo` only when needed and available.
+- For simple file operations, strictly prefer dedicated file tools over raw Bash (`read_text_file`, `write_text_file`, `copy_file`).
+- Do not use `sleep`, `at`, or background shell loops for time-based tasks; use the **cron** tool for scheduling.
+- Long-running commands must be pushed to the background/yielded, tracked via the `process` tool.
+</code_execution_rules>
+
+<memory_management>
+- Be highly selective. Save facts that will be explicitly useful across future diverse sessions.
+- `main`: general knowledge, user specific attributes.
+- `solutions`: successful approaches to complex bugs you resolved.
+- `fragments`: active project meta-context.
+- You should query memory for past solutions, BUT if the request asks about external plugins, external APIs, or libraries, immediately use `search_web` instead of relying on memory.
+</memory_management>
+
+<delegation>
+If the task requires significant research, complex code generation, or code review, you MUST delegate to Specialized Agents using `call_agent`.
+- Do not attempt to solve highly complex tasks by yourself. Map out the solution, and use the Swarm.
+- Give them highly concrete instructions. Explain EXACTLY what input they get and what output format you need.
+
+<swarm_example>
+<thinking>
+Goal: Refactor auth.ts.
+Action Plan: Have the 'reviewer' node analyze auth.ts for security flaws, then I will apply their fixes.
+Tool: `call_agent`
+</thinking>
+// Then you use the call_agent tool with:
+// role: "reviewer"
+// taskDescription: "Review auth.ts for JWT security flaws."
+</swarm_example>
+</delegation>
+</guidelines>
+
+<error_recovery_protocol>
+Treat failures as *recoverable states*, not endpoints.
+1. If a Python runtime hits `ModuleNotFoundError`, autonomously use `install_packages (python)` and retry immediately. If standard PIP is blocked (externally managed environment), use a local `.venv`.
+2. If Node hits `Cannot find module`, use `install_packages (node)` or the project's package manager natively and retry.
+3. If an API times out, verify the URL with web search or document reading before trying again.
+4. DO NOT prompt the user to "please install X and get back to me". Install it autonomously if possible.
+</error_recovery_protocol>
+
+<fact_checking_mandate>
+You are strictly forbidden from guessing library versions, API methods, or syntax for modern frameworks. Before providing a final code solution or technical answer:
+1. If you have access to the `search_web` tool, YOU MUST use it to verify the official documentation if you are not 100% certain.
+2. If the user provides a premise (e.g., "Feature X is deprecated"), verify if it's true.
+3. Actively look for breaking changes in libraries mentioned in the prompt.
+4. When using the MoA Ensemble (Swarm), cross-reference their claims using web search (if available) before finalizing your response.
+</fact_checking_mandate>
+
+<hard_constraints>
+1. **Always respond using the response tool**; your answer does not go to the user otherwise.
+2. **Never fabricate facts**. Extract them from web search or memory. Let the user know if data is definitively unavailable.
+3. **Destructive Constraints**: For tasks deleting more than 1 file, or modifying global OS configs, heavily advise the user and confirm intent unless explicitly permitted.
+4. **Stop Conditions**: If an error loop occurs 3 times identically, stop and request user intervention with the exact output logs.
+</hard_constraints>
+</system_contract>
+
+
+
+## Agent Identity
+You are AI AgentYou are the primary agent communicating directly with the user.
+
+
+## Tool: response
+# Response Tool
+
+Use this tool to provide your final response to the user.
+
+## Guidelines
+
+- Format your response using markdown
+- Be clear and concise
+- If you performed actions (code execution, file operations), summarize what was done and the results
+- If you encountered errors, explain what happened and suggest alternatives
+- Include relevant code snippets, links, or references as needed
+
+
+
+## Tool: list_projects
+Use this tool when the user asks:
+- what projects exist
+- to show/list available projects
+- to choose a project before switching
+
+Behavior:
+- Prefer calling this tool instead of guessing project ids/names.
+- If no projects exist, tell the user clearly and suggest creating one.
+
+
+
+## Tool: get_current_project
+Use this tool when the user asks:
+- which project is active now
+- where you are currently working
+- what folder/path is currently selected
+
+Behavior:
+- Report `projectName`/`projectId` and `currentPath` from the tool result.
+- If `isGlobal` is true, state that no project is currently selected.
+
+
+
+## Tool: switch_project
+Use this tool when the user asks to switch, move, or jump to another project.
+
+How to call:
+- Prefer `project_id` when user gave a specific id.
+- Use `project_name` when user gave a name in natural language.
+- If the user request is ambiguous, call the tool and use returned `matches` to clarify.
+
+After success:
+- Confirm to the user which project was selected.
+- Continue the task in the new project context.
+
+
+
+## Tool: create_project
+Use this tool when the user asks to:
+- create a new project
+- start a new workspace
+- set up a project because none exists
+
+Behavior:
+- Use a clear project `name`.
+- Add `description` and `instructions` when the user provided them.
+- If the user asks to switch into the new project, call `switch_project` after creation.
+
+
+
+## Tool: code_execution
+# Code Execution Tool
+
+Execute code in a specified runtime environment. The code runs on the user's machine.
+
+## Available Runtimes
+
+- **python** — Python 3 interpreter. Use for: data processing, file manipulation, calculations, web scraping, automation scripts.
+- **nodejs** — Node.js runtime. Use for: JavaScript/TypeScript tasks, web APIs, JSON processing, npm packages.
+- **terminal** — Bash shell. Use for: system commands, file operations, package installation, process management.
+
+## Best Practices
+
+1. **One task per execution** — keep code focused on a single operation
+2. **Print outputs explicitly** — always `print()` or `console.log()` results you want to see
+3. **Handle errors** — wrap risky operations in try/except or try/catch
+4. **Check prerequisites** — verify packages are installed before importing
+5. **Use sessions wisely** — session 0 is the default; reuse the same session to keep terminal working-directory state between calls
+6. **Prefer dedicated file tools first** — use `read_text_file`, `read_pdf_file`, `write_text_file`, and `copy_file` for common file tasks; use `code_execution` only when those tools are insufficient
+7. **Auto-resolve missing Python deps** — if you see `ModuleNotFoundError`, call `install_packages` with `kind=python` and retry. If pip reports `externally-managed-environment`, install into a project-local virtualenv (`python3 -m venv .venv` + `.venv/bin/python -m pip install <package>`).
+8. **Auto-resolve missing Node deps** — if you see `Cannot find module '<name>'`, install it via `install_packages` (`kind=node`, package `<name>`) or package manager command, then rerun Node code once
+9. **Install system packages carefully** — for Debian/Ubuntu, use `apt-get`/`apt`; add `sudo` only when required and available
+10. **Use background mode for long jobs** — set `background=true` or `yield_ms` and then use the `process` tool to poll/log/kill
+11. **Auto-resolve Playwright Linux deps** — if stderr contains `Host system is missing dependencies to run browsers`, install required OS deps via `install_packages` (`kind=apt`) or `npx playwright install-deps`, then rerun the original Playwright command once
+12. **Use non-interactive npx** — in this environment prefer `npx -y <package> ...` to avoid hanging on `Ok to proceed?` prompts
+13. **Use the correct Playwright CLI package** — npm package `playwright-cli` is deprecated for execution; use `npx -y @playwright/cli ...` (or install `@playwright/cli`)
+14. **Do not swallow execution failures** — if you run commands from Node/Python wrappers, propagate failure with non-zero exit code (e.g., `process.exit(1)` in catch)
+
+## Blocker Handling Policy
+
+If execution fails with a recoverable blocker, you must continue autonomously in this turn:
+- Install/fix prerequisites using available tools.
+- Retry the original command after the fix.
+- Repeat for up to 2 corrected retries before reporting failure.
+
+Do not stop after first failure for these classes:
+- Missing command (`...: not found`, `spawn ... ENOENT`)
+- Missing Node module (`Cannot find module ...`)
+- Missing Python module (`ModuleNotFoundError`)
+- Playwright browser dependency errors on Linux
+- Interactive package prompts (`Need to install the following packages` / `Ok to proceed?`)
+- `npm error could not determine executable to run` for `playwright-cli` (switch to `@playwright/cli`)
+
+## Examples
+
+### Install a package then use it
+First execution: `install_packages(kind="python", packages=["requests"])`
+Second execution: `import requests; r = requests.get('...'); print(r.json())` (runtime: python)
+
+### Install a system package
+Use: `apt-get update && apt-get install -y ffmpeg` (runtime: terminal). If permission is denied and `sudo` exists, retry with `sudo`.
+
+### File operations (fallback)
+```python
+# Read a file
+with open('data.txt', 'r') as f:
+    content = f.read()
+print(content)
+```
+
+### System information
+```bash
+# runtime: terminal
+uname -a && python3 --version && node --version
+```
+
+### Long running command
+Use `background=true` (or `yield_ms`) and then follow up with `process` tool actions (`poll`, `log`).
+
+## Limitations
+
+- Execution timeout: configurable (default 600 seconds)
+- Output is truncated at configurable max length
+- No GUI applications — terminal only
+- Network access depends on system configuration
+
+
+
+## Tool: install_packages
+# Install Packages Tool
+
+Install dependencies with fallback manager selection.
+
+## When to Use
+
+- Package installs in `code_execution` are failing or flaky.
+- You need controlled install attempts with structured diagnostics.
+
+## Supported Kinds
+
+- `node` — tries node managers (pnpm/npm/yarn/bun)
+- `python` — pip/uv flow
+- `go` — `go install`
+- `uv` — `uv tool install`
+- `apt` — apt-get flow with root/sudo checks
+- `auto` — chooses a default flow from inputs
+
+## Guidelines
+
+1. Pass explicit `kind` when known to avoid ambiguous installs.
+2. Use `prefer_manager` if project policy requires a specific manager.
+3. Review `attempts` in tool output to understand fallback behavior and errors.
+4. If install fails repeatedly, report exact failing command and stderr to user.
+
+
+
+## Tool: process
+# Process Tool
+
+Manage background sessions created by `code_execution`.
+
+## Actions
+
+- `list` — list running and finished managed sessions.
+- `poll` — check current status/output of one session (optionally wait with `timeout_ms`).
+- `log` — read session log output with optional line window (`offset`, `limit`).
+- `kill` — terminate a running session.
+- `remove` — remove one finished session from history.
+- `clear` — clear all finished sessions.
+
+## Usage Rules
+
+1. Use `process` only after `code_execution` returned a managed session id.
+2. For `poll`/`log`/`kill`/`remove`, always pass `session_id`.
+3. If `poll` returns `retryInMs`, wait roughly that long before the next poll.
+4. If status is `completed`/`failed`/`killed`, stop polling and report outcome.
+5. Do not call `kill` unless the user explicitly asked to stop/cancel/terminate the running process.
+
+
+
+## Tool: read_text_file
+Use this tool to read UTF-8 text files directly.
+
+When to use:
+- The user asks to read/view/open text-like files (`.txt`, `.md`, `.json`, `.csv`, code files).
+- You need exact file content or snippets by line range.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Adjust `start_line` and `max_lines` for large files.
+3. Use `max_chars` to limit output if needed.
+
+Notes:
+- If the file is binary or unreadable as text, report the error and switch to a suitable tool.
+
+
+
+## Tool: read_pdf_file
+Use this tool to extract text from PDF files without Python.
+
+When to use:
+- The user asks what is written in a PDF.
+- You need to parse PDF text from project/chat uploaded files.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Set `max_chars` to control response size.
+3. After extraction, summarize or answer the user's question based on `content`.
+
+If extraction fails:
+- Report the exact tool error.
+- Check file path and that the file is a valid PDF.
+
+
+
+## Tool: write_text_file
+Use this tool to create or update UTF-8 text files.
+
+When to use:
+- The user asks to create a note, markdown, config, or code file.
+- You need deterministic file writing without relying on external runtimes.
+
+How to use:
+1. Provide `file_path` (absolute or relative to current project cwd).
+2. Pass full file `content`.
+3. Set `overwrite=false` to avoid replacing existing files.
+
+After writing:
+- Confirm file path and whether it was created or overwritten.
+
+
+
+## Tool: copy_file
+Use this tool to duplicate a local file.
+
+When to use:
+- The user asks to duplicate/copy a file.
+- You need to preserve the original and create another copy.
+
+How to use:
+1. Set `source_path` and `destination_path` (absolute or relative to current project cwd).
+2. Use `overwrite=true` only when replacement is intended.
+
+If copy fails:
+- Report whether the issue is missing source, existing destination, or path error.
+
+
+
+## Tool: memory_save
+# Memory Save Tool
+
+Save information to persistent vector memory for future retrieval.
+
+## Memory Areas
+
+- **main** — General facts, user preferences, important information
+- **fragments** — Conversation context and snippets
+- **solutions** — Successful approaches and solutions to problems
+- **instruments** — Descriptions of custom tools and procedures
+
+## When to Save
+
+- User tells you something they want you to remember
+- You discover an important fact about the user or their project
+- You find a successful solution to a problem
+- You learn about the user's preferences or coding style
+- Critical project information that should persist
+
+## Best Practices
+
+- Save concise, self-contained pieces of information
+- Include relevant context so the memory is useful when retrieved later
+- Use the appropriate area for the type of information
+- Avoid saving trivial or temporary information
+- Don't save sensitive data like passwords or API keys
+
+
+
+## Tool: memory_load
+# Memory Load Tool
+
+Search persistent memory for relevant information using semantic similarity search.
+
+## Usage
+
+- Provide a descriptive search query
+- Results are ranked by semantic similarity
+- Higher scores indicate more relevant matches
+
+## When to Use
+
+- Before asking the user for information they may have provided before
+- When you need to recall previously saved facts or solutions
+- When starting a conversation to check for relevant context
+- When working on a task that may have related previous solutions
+
+## Tips
+
+- Use natural language queries for best results
+- Be specific in your query to get relevant results
+- If no results are found, the information may not have been saved yet
+
+
+
+## Tool: search_web
+# Web Search Tool
+
+Search the internet for current information.
+
+## When to Use
+
+- Need up-to-date information (news, releases, current events)
+- Technical documentation or API references
+- Facts you're not confident about
+- Information that changes frequently
+- Research tasks
+
+## Best Practices
+
+- Use specific, targeted search queries
+- For technical queries, include technology names and versions
+- Review multiple results before drawing conclusions
+- Cite sources when presenting information from search results
+- If initial results aren't helpful, try rephrasing your query
+
+
+
+## Tool: cron
+Use this tool for any delayed or scheduled action.
+
+When the user asks to "remind later", "через N минут/секунд", "по расписанию", or "every day/week", prefer `cron` instead of `code_execution`.
+
+Rules:
+- For one-time reminders: use `action="add"` with `schedule.kind="at"` and ISO timestamp.
+- For recurring reminders: use `schedule.kind="every"` or `schedule.kind="cron"`.
+- For sub-minute recurring reminders, use `schedule.kind="every"` with `everyMs` (example: 30s -> `everyMs=30000`).
+- Put the actual reminder text/instruction in `payload.message`.
+- Do not send raw natural-language text as the job definition; always send structured fields (`schedule` + `payload` or `delaySeconds` + `message`).
+- `delaySeconds` / `delayMs` are one-shot delays and should not be used for recurring jobs.
+- If cron returns a preflight validation error, immediately retry once with normalized args (`action="add"`, explicit `schedule`, explicit `payload.message`) and do not repeat identical invalid arguments.
+- After creating a job, report `id`, schedule, and expected next run time.
+- For management requests, use:
+  - `status` for scheduler state
+  - `list` for jobs
+  - `update` to enable/disable or edit
+  - `run` to trigger immediately
+  - `runs` to show execution history
+  - `remove` to delete
+
+Do not emulate scheduling with terminal `at`, `cron` shell files, or `time.sleep`.
+
+Examples:
+- One-shot in 65 seconds:
+  - `action="add"`
+  - `delaySeconds=65`
+  - `message="Отправь пользователю: 😊"`
+- One-shot absolute time:
+  - `action="add"`
+  - `schedule={ "kind":"at", "at":"2026-02-20T15:23:30Z" }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: 😊" }`
+- Daily at specific time:
+  - `action="add"`
+  - `schedule={ "kind":"cron", "expr":"47 19 * * *" }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: прогноз погоды в Москве" }`
+- Every 30 seconds:
+  - `action="add"`
+  - `schedule={ "kind":"every", "everyMs":30000 }`
+  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: Привет!" }`
+
+
+
+## Tool Loop Safety
+- After a failed tool call, do not repeat the same tool with identical arguments.
+- Use the tool's error details to change parameters before retrying.
+- For skill tools (load_skill/load_skill_resource/install_skill_from_github/create_skill/update_skill/delete_skill/write_skill_file), use exact skill names and valid paths.
+- If two corrected attempts still fail, report the blocker to the user instead of retrying endlessly.
+
+
+## Self-Healing Loop (TDD / Verification)
+If a command, script, or tool returns an error (stderr or a failed status code) or a test fails:
+1. DO NOT immediately stop and ask the user for help.
+2. Autonomously analyze the error output or stack trace.
+3. Use your tools to fix the code, alter the command, or install the missing dependency, and TRY AGAIN.
+4. Repeat this self-correction loop up to 3 times for a single task.
+5. Only report failure to the user if you are fundamentally blocked after 3 distinct attempts.
+
+
+## Current Information
+- Date/Time: 2026-04-30T20:00:00Z
+- Timezone: Europe/Berlin
+
+## Expert Consensus (MoA)
+You have access to a pre-computed consensus from 4 expert agents who analyzed this request in parallel.
+Use this as high-quality reference material. You may adopt, modify, or override their recommendations based on your own judgment and tool results.
+
+<expert_consensus>
+# Real-Time Multiplayer Chess Backend Architecture (Node.js)
+
+This architecture implements an **Authoritative State Machine** pattern. The server is the sole source of truth, treating clients as "dumb terminals" that send move requests and receive validated state updates.
+
+## 1. High-Level System Architecture
+
+The system is designed for horizontal scalability, using a stateless application layer and a distributed data layer.
+
+```mermaid
+graph TD
+    A[Client] -->|WebSocket| B[WebSocket-Gateway]
+    B -->|Validate JWT| C[Auth/Session Service]
+    B -->|Forward Move| D[Game-Orchestrator Cluster]
+    D -->|Acquire Lock| I[Distributed Lock Manager - Redis]
+    D -->|Validate Move| J[Chess Logic - chess.js]
+    D -->|Update State| E[State Manager - Redis]
+    D -->|Persist Move| F[Database - PostgreSQL]
+    E -->|Sync State| B
+    G[Heartbeat Monitor] -->|Detect Drop| B
+    H[Reconnection Handler] -->|Recover State| E
+    F -->|Snapshot| K[Object Store - S3]
+```
+
+### Component Breakdown
+
+| Component | Responsibility | Technical Choice |
+| :--- | :--- | :--- |
+| **WebSocket-Gateway** | Low-latency bi-directional communication, heartbeat/ping-pong, and sticky-session routing. | `socket.io` (for fallback) or `uWebSockets.js` (for max throughput). |
+| **Game-Orchestrator** | Authoritative state machine. Validates move legality, turn order, and timers. | Stateless Node.js workers (PM2/Cluster). |
+| **State Manager** | Fast read/write for current board state and event broadcasting. | Redis (Hashes for state, Streams for events). |
+| **Persistence Layer** | Durable, append-only move history (Event Sourcing). | PostgreSQL. |
+| **Lock Manager** | Prevents race conditions during concurrent move requests. | Redis Redlock / `SETNX`. |
+| **Recovery Service** | Rebuilds board state from move logs or snapshots upon reconnection. | Node.js service reading from Postgres/S3. |
+
+---
+
+## 2. Data Modeling & State Management
+
+### 2.1 PostgreSQL Schema (Durable Truth)
+The database uses an event-sourcing approach where the `moves` table is the immutable record of the game.
+
+```sql
+-- Game session metadata
+CREATE TABLE games (
+    id            UUID PRIMARY KEY,
+    white_player  UUID NOT NULL,
+    black_player  UUID NOT NULL,
+    status        TEXT CHECK (status IN ('pending','active','finished','aborted')) NOT NULL,
+    turn          CHAR(1) CHECK (turn IN ('w','b')) NOT NULL,
+    created_at    TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    updated_at    TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+
+-- Immutable move log (event sourcing)
+CREATE TABLE moves (
+    game_id       UUID REFERENCES games(id) ON DELETE CASCADE,
+    move_number   BIGINT NOT NULL,               -- 1-based, unique per game
+    san           TEXT NOT NULL,                 -- Standard Algebraic Notation
+    fen           TEXT NOT NULL,                 -- board after the move
+    player_id     UUID NOT NULL,
+    timestamp     TIMESTAMP WITH TIME ZONE DEFAULT now(),
+    PRIMARY KEY (game_id, move_number)
+);
+
+-- Current board cache (mirrored in Redis for speed)
+CREATE TABLE board_cache (
+    game_id       UUID PRIMARY KEY REFERENCES games(id) ON DELETE CASCADE,
+    fen           TEXT NOT NULL,
+    turn          CHAR(1) NOT NULL,
+    last_move_num BIGINT NOT NULL,
+    updated_at    TIMESTAMP WITH TIME ZONE DEFAULT now()
+);
+```
+
+### 2.2 Redis Representation (Fast Path)
+To achieve <100ms latency, the active game state is mirrored in Redis.
+
+*   **State Hash**: `HASH game:{gameId}` $\rightarrow$ `{ turn: "w", fen: "...", last_move_num: 12, status: "active" }`
+*   **Player Set**: `SET game:{gameId}:players` $\rightarrow$ `{whitePlayerId, blackPlayerId}`
+*   **Event Stream**: `STREAM game:{gameId}:events` $\rightarrow$ Ordered log of validated events (moves, resignations, draw offers).
+
+---
+
+## 3. Race Condition Prevention
+
+To prevent two players from moving at the exact same millisecond, the system employs a **Distributed Lock** using the Redis `SETNX` (Set if Not Exists) pattern.
+
+### Implementation Logic
+All move operations are wrapped in a lock. If a second request arrives while the first is processing, it is rejected or queued.
+
+```javascript
+// Implementation inside Game-Orchestrator
+async function processMove(gameId, playerId, moveSAN) {
+  const lockKey = `game:${gameId}:lock`;
+  
+  // 1. Acquire Distributed Lock (2s lease to prevent deadlocks)
+  const lock = await redis.set(lockKey, playerId, 'NX', 'PX', 2000); 
+  if (!lock) throw new Error('Concurrent move – retry later');
+
+  try {
+    // 2. Fetch current state from Redis
+    const state = await redis.hgetall(`game:${gameId}`);
+    
+    // 3. Validate turn and legality using chess.js
+    const chess = new Chess(state.fen);
+    const move = chess.move(moveSAN);
+    
+    if (!move) throw new Error('Illegal move');
+    if (state.turn !== (playerId === whiteId ? 'w' : 'b')) {
+        throw new Error('Not your turn');
+    }
+
+    const newFen = chess.fen();
+    const newTurn = state.turn === 'w' ? 'b' : 'w';
+    const moveNum
+
+...[TRUNCATED FOR CONTEXT LIMITS]...
+</expert_consensus>
+
+Total MoA latency: 824680ms (proposers: websocket_architect=61673ms, concurrency_expert=6585ms, game_state_manager=119690ms, skeptic_auditor=5365ms; aggregation: 625188ms)
+
+  --- MESSAGES ---
+  [1] USER:
+
+  Design a high-level architecture for a real-time multiplayer chess game backend in Node.js.
+  Requirements:
+  1. Websocket connections for real-time moves.
+  2. How to handle connection drops and state recovery.
+  3. Prevent race conditions if two players move at the exact same millisecond.
+  
+
+════════════════════════════════════════════════════════════
+
+[Agent] Tools enabled: 23 tools registered
+✅ Swarm completed in 854107ms
+📏 Length: 4099 characters
+

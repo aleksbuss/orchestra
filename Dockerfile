@@ -15,7 +15,7 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV PYTHON_VENV=/opt/eggent-python
+ENV PYTHON_VENV=/opt/orchestra-python
 ENV PATH="${PYTHON_VENV}/bin:${PATH}"
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 ENV PIP_NO_CACHE_DIR=1
@@ -58,8 +58,8 @@ RUN apt-get update \
   && "${PYTHON_VENV}/bin/python3" -m pip --version \
   && rm -rf /var/lib/apt/lists/*
 
-RUN echo "node ALL=(root) NOPASSWD: ALL" > /etc/sudoers.d/eggent-node \
-  && chmod 440 /etc/sudoers.d/eggent-node
+RUN echo "node ALL=(root) NOPASSWD: ALL" > /etc/sudoers.d/orchestra-node \
+  && chmod 440 /etc/sudoers.d/orchestra-node
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev

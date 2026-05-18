@@ -81,9 +81,12 @@ OPENAI_API_KEY=sk-...
 | `OPENAI_API_KEY` | One of | OpenAI API key |
 | `OPENROUTER_API_KEY` | One of | OpenRouter API key (recommended — access to 200+ models) |
 | `ANTHROPIC_API_KEY` | One of | Anthropic API key |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | One of | Google AI API key |
+| `GOOGLE_API_KEY` | One of | Google Generative AI (Gemini) API key |
 | `ORCHESTRA_AUTH_SECRET` | Production | Session signing secret (`openssl rand -base64 48`) |
-| `TAVILY_API_KEY` | No | Tavily API key for enhanced web search |
+| `TAVILY_API_KEY` | No | Tavily API key for enhanced web search (commercial, optional) |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token if you want to expose the agent over Telegram |
+| `ORCHESTRA_AUTH_COOKIE_SECURE` | No | Force `Secure` cookie attribute (default: auto-detect HTTPS) |
+| `ORCHESTRA_LOG_TO_FILE` | No | If set, write structured logs to `data/logs/` |
 
 ## Tech Stack
 
@@ -107,10 +110,12 @@ Coverage is highest in security-critical paths (`lib/security`, `lib/auth`, `lib
 
 ## Documentation
 
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — **start here** if you want to understand what Orchestra is, why it exists, and how the pieces fit together. Includes component and request-flow diagrams.
 - [`SECURITY.md`](./SECURITY.md) — security model and reporting process
 - [`POST_MORTEMS.md`](./POST_MORTEMS.md) — registry of architectural bugs found in development, with root causes and regression-test pointers
-- [`docs/request-flow.md`](./docs/request-flow.md) — end-to-end lifecycle of a user message from API entry through MoA to response stream
+- [`docs/request-flow.md`](./docs/request-flow.md) — narrative walkthrough of the request lifecycle
 - [`docs/observability.md`](./docs/observability.md) — logging, tracing, and on-disk audit trail
+- [`NOTICE.md`](./NOTICE.md) — per-directory licensing for the bundled-skills collection
 
 ## Security Model
 

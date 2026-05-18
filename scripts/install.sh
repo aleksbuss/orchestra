@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${EGGENT_REPO_URL:-https://github.com/eggent-ai/eggent.git}"
-BRANCH="${EGGENT_BRANCH:-main}"
-INSTALL_DIR="${EGGENT_INSTALL_DIR:-$HOME/.eggent}"
-AUTO_INSTALL_DOCKER="${EGGENT_AUTO_INSTALL_DOCKER:-1}"
+# NOTE: ORCHESTRA_REPO_URL defaults to the canonical public mirror. If you
+# fork this repo to a different namespace, override the env var when
+# running this installer:
+#   ORCHESTRA_REPO_URL=https://github.com/yourorg/orchestra.git ./install.sh
+REPO_URL="${ORCHESTRA_REPO_URL:-https://github.com/aleksbuss/orchestra.git}"
+BRANCH="${ORCHESTRA_BRANCH:-main}"
+INSTALL_DIR="${ORCHESTRA_INSTALL_DIR:-$HOME/.orchestra}"
+AUTO_INSTALL_DOCKER="${ORCHESTRA_AUTO_INSTALL_DOCKER:-1}"
 
 log() {
   printf '%s\n' "$*"
@@ -190,7 +194,7 @@ ensure_repo() {
 }
 
 main() {
-  log "==> Eggent one-command installer"
+  log "==> Orchestra one-command installer"
   log "Repo: $REPO_URL"
   log "Branch: $BRANCH"
   log "Install dir: $INSTALL_DIR"
@@ -207,7 +211,7 @@ main() {
     # One-command installs are often used on VPS hosts where the app should be reachable remotely.
     default_bind_host="0.0.0.0"
   fi
-  app_bind_host="${EGGENT_APP_BIND_HOST:-$default_bind_host}"
+  app_bind_host="${ORCHESTRA_APP_BIND_HOST:-$default_bind_host}"
 
   docker_bin="$(pick_docker_bin)"
 

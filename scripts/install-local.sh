@@ -145,10 +145,10 @@ if looks_placeholder "$TELEGRAM_WEBHOOK_SECRET_VALUE"; then
   echo "Generated TELEGRAM_WEBHOOK_SECRET in .env"
 fi
 
-EGGENT_AUTH_SECRET_VALUE="$(get_env_value "$ENV_FILE" "EGGENT_AUTH_SECRET")"
-if looks_placeholder "$EGGENT_AUTH_SECRET_VALUE"; then
-  upsert_env "$ENV_FILE" "EGGENT_AUTH_SECRET" "$(random_hex 32)"
-  echo "Generated EGGENT_AUTH_SECRET in .env"
+ORCHESTRA_AUTH_SECRET_VALUE="$(get_env_value "$ENV_FILE" "ORCHESTRA_AUTH_SECRET")"
+if looks_placeholder "$ORCHESTRA_AUTH_SECRET_VALUE"; then
+  upsert_env "$ENV_FILE" "ORCHESTRA_AUTH_SECRET" "$(random_hex 32)"
+  echo "Generated ORCHESTRA_AUTH_SECRET in .env"
 fi
 
 chmod 600 "$ENV_FILE" 2>/dev/null || true

@@ -1,6 +1,6 @@
 Use this tool for any delayed or scheduled action.
 
-When the user asks to "remind later", "через N минут/секунд", "по расписанию", or "every day/week", prefer `cron` instead of `code_execution`.
+When the user asks to "remind later", "in N minutes/seconds" ("через N минут/секунд"), "on a schedule" ("по расписанию"), or "every day/week", prefer `cron` instead of `code_execution`. Both English and Russian phrasings should trigger this tool.
 
 Rules:
 - For one-time reminders: use `action="add"` with `schedule.kind="at"` and ISO timestamp.
@@ -25,16 +25,16 @@ Examples:
 - One-shot in 65 seconds:
   - `action="add"`
   - `delaySeconds=65`
-  - `message="Отправь пользователю: 😊"`
+  - `message="Send to the user: 😊"`
 - One-shot absolute time:
   - `action="add"`
   - `schedule={ "kind":"at", "at":"2026-02-20T15:23:30Z" }`
-  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: 😊" }`
+  - `payload={ "kind":"agentTurn", "message":"Send to the user: 😊" }`
 - Daily at specific time:
   - `action="add"`
   - `schedule={ "kind":"cron", "expr":"47 19 * * *" }`
-  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: прогноз погоды в Москве" }`
+  - `payload={ "kind":"agentTurn", "message":"Send to the user: weather forecast for Riga" }`
 - Every 30 seconds:
   - `action="add"`
   - `schedule={ "kind":"every", "everyMs":30000 }`
-  - `payload={ "kind":"agentTurn", "message":"Отправь пользователю: Привет!" }`
+  - `payload={ "kind":"agentTurn", "message":"Send to the user: hello!" }`

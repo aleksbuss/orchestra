@@ -123,3 +123,8 @@ Alpha. The architecture is end-to-end functional but not battle-tested under loa
 ## License
 
 [MIT](./LICENSE) — do whatever you want, just keep the notice.
+
+**Important:** [`bundled-skills/`](./bundled-skills/) contains components under
+their own licenses (some proprietary, some MIT, some unlicensed). See
+[`NOTICE.md`](./NOTICE.md) for a per-directory breakdown. The MIT grant on
+Orchestra does NOT extend to those skills.

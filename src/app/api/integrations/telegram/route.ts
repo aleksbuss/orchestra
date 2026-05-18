@@ -416,7 +416,7 @@ function extractAccessCodeCandidate(text: string): string | null {
 
 function normalizeOutgoingText(text: string): string {
   const value = text.trim();
-  if (!value) return "Пустой ответ от агента.";
+  if (!value) return "Agent produced no output.";
   if (value.length <= TELEGRAM_TEXT_LIMIT) return value;
   return `${value.slice(0, TELEGRAM_TEXT_LIMIT - 1)}…`;
 }
@@ -567,7 +567,7 @@ export async function POST(req: NextRequest) {
         await sendTelegramMessage(
           botToken,
           chatId,
-          "Доступ выдан. Теперь можно отправлять сообщения агенту.",
+          "Access granted. You can now send messages to the agent.",
           messageId
         );
         return Response.json({
@@ -581,9 +581,9 @@ export async function POST(req: NextRequest) {
         botToken,
         chatId,
         [
-          "Доступ запрещён: ваш user_id не в списке разрешённых.",
-          "Отправьте код активации командой /code <код> или /start <код>.",
-          `Ваш user_id: ${fromUserId}`,
+          "Access denied: your user_id is not on the allow-list.",
+          "Send an activation code with /code <code> or /start <code>.",
+          `Your user_id: ${fromUserId}`,
         ].join("\n"),
         messageId
       );
@@ -629,7 +629,7 @@ export async function POST(req: NextRequest) {
       await sendTelegramMessage(
         botToken,
         chatId,
-        "Начал новый диалог. Контекст очищен для следующего сообщения.",
+        "Started a new conversation. Context cleared for the next message.",
         messageId
       );
       return Response.json({ ok: true, command });
@@ -712,8 +712,8 @@ export async function POST(req: NextRequest) {
         const errorMessage =
           typeof error.payload.error === "string"
             ? error.payload.error
-            : "Не удалось обработать сообщение.";
-        await sendTelegramMessage(botToken, chatId, `Ошибка: ${errorMessage}`, messageId);
+            : "Could not process the message.";
+        await sendTelegramMessage(botToken, chatId, `Error: ${errorMessage}`, messageId);
         return Response.json({ ok: true, handledError: true, status: error.status });
       }
       throw error;

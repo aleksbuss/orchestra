@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Eggent Swarm Intelligence & Background Daemon', () => {
+test.describe('Orchestra Swarm Intelligence & Background Daemon', () => {
   test('Agent config (Swarm & Daemon) toggles work and emit events', async ({ page }) => {
     // 1. Navigate to the main application
     await page.goto('/');

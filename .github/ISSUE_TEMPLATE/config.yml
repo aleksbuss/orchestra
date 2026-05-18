@@ -1,8 +1,10 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions and discussions
-    url: https://github.com/eggent-ai/eggent/discussions
+    # TODO: replace <YOUR_USERNAME>/orchestra with your actual GitHub
+    # repo path once you push. Default placeholder uses aleksbuss/orchestra.
+    url: https://github.com/aleksbuss/orchestra/discussions
     about: Ask usage questions and discuss ideas.
   - name: Security vulnerability report
-    url: https://github.com/eggent-ai/eggent/security/advisories/new
+    url: https://github.com/aleksbuss/orchestra/security/advisories/new
     about: Report sensitive vulnerabilities privately.

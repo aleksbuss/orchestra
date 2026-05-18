@@ -1,11 +1,11 @@
-name: eggent
+name: orchestra
 
 services:
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    image: eggent:local
+    image: orchestra:local
     restart: unless-stopped
     init: true
     env_file:

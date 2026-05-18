@@ -12,7 +12,7 @@ This is the doc for the operator and for any future contributor who needs to deb
 
 JSON-per-line output to:
 
-- **stdout** — captured by the Docker log driver, visible via `docker logs eggent-app-1`. Always on.
+- **stdout** — captured by the Docker log driver, visible via `docker logs orchestra-app-1`. Always on.
 - **`data/logs/orchestra-YYYY-MM-DD.jsonl`** — durable, JQ-friendly, daily-rotated. Enabled in production by `ORCHESTRA_LOG_TO_FILE=1` (set in `docker-compose.yml`). The MCP server below reads from these files.
 
 Every line carries `{ts, level, event}` minimum, and `{traceId, chatId, projectId, module}` when an `withLogContext` block was active. Sensitive field names (`apiKey`, `passwordHash`, `token`, `secret`, `authorization`, `cookie`) are redacted at emit time.
@@ -136,7 +136,7 @@ You should see the `tools/list` response listing all six `orchestra_*` tools.
 The user reports: "Рой запускается, но потом всё пропадает."
 
 Old loop (pre-Sprint-3):
-1. Ask user for `docker logs --tail 400 eggent-app-1` output.
+1. Ask user for `docker logs --tail 400 orchestra-app-1` output.
 2. User pastes it.
 3. Grep for `error|MoA|generateText`.
 4. Find the failure, but no way to correlate it to a specific chat.

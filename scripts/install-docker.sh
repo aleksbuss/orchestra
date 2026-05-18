@@ -120,15 +120,15 @@ prepare_data_dir() {
 ensure_data_dir_writable_for_runtime() {
   local data_dir="$ROOT_DIR/data"
 
-  if docker_cmd run --rm --user 1000:1000 -v "$data_dir:/target" eggent:local \
+  if docker_cmd run --rm --user 1000:1000 -v "$data_dir:/target" orchestra:local \
     sh -lc "mkdir -p /target/tmp /target/ms-playwright /target/npm-cache /target/.cache && test -w /target && test -w /target/tmp && test -w /target/ms-playwright && test -w /target/npm-cache && test -w /target/.cache" >/dev/null 2>&1; then
     return 0
   fi
 
-  docker_cmd run --rm --user 0:0 -v "$data_dir:/target" eggent:local \
+  docker_cmd run --rm --user 0:0 -v "$data_dir:/target" orchestra:local \
     sh -lc "chown -R 1000:1000 /target" >/dev/null 2>&1 || true
 
-  if docker_cmd run --rm --user 1000:1000 -v "$data_dir:/target" eggent:local \
+  if docker_cmd run --rm --user 1000:1000 -v "$data_dir:/target" orchestra:local \
     sh -lc "mkdir -p /target/tmp /target/ms-playwright /target/npm-cache /target/.cache && test -w /target && test -w /target/tmp && test -w /target/ms-playwright && test -w /target/npm-cache && test -w /target/.cache" >/dev/null 2>&1; then
     return 0
   fi
@@ -169,10 +169,10 @@ if looks_placeholder "$TELEGRAM_WEBHOOK_SECRET_VALUE"; then
   echo "Generated TELEGRAM_WEBHOOK_SECRET in .env"
 fi
 
-EGGENT_AUTH_SECRET_VALUE="$(get_env_value "$ENV_FILE" "EGGENT_AUTH_SECRET")"
-if looks_placeholder "$EGGENT_AUTH_SECRET_VALUE"; then
-  upsert_env "$ENV_FILE" "EGGENT_AUTH_SECRET" "$(random_hex 32)"
-  echo "Generated EGGENT_AUTH_SECRET in .env"
+ORCHESTRA_AUTH_SECRET_VALUE="$(get_env_value "$ENV_FILE" "ORCHESTRA_AUTH_SECRET")"
+if looks_placeholder "$ORCHESTRA_AUTH_SECRET_VALUE"; then
+  upsert_env "$ENV_FILE" "ORCHESTRA_AUTH_SECRET" "$(random_hex 32)"
+  echo "Generated ORCHESTRA_AUTH_SECRET in .env"
 fi
 
 chmod 600 "$ENV_FILE" 2>/dev/null || true

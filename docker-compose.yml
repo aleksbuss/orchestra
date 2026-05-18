@@ -1,0 +1,44 @@
+name: eggent
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: eggent:local
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      HOSTNAME: 0.0.0.0
+      PORT: "3000"
+      TMPDIR: ${APP_TMP_DIR:-/app/data/tmp}
+      PLAYWRIGHT_BROWSERS_PATH: ${PLAYWRIGHT_BROWSERS_PATH:-/app/data/ms-playwright}
+      npm_config_cache: ${NPM_CONFIG_CACHE:-/app/data/npm-cache}
+      XDG_CACHE_HOME: ${XDG_CACHE_HOME:-/app/data/.cache}
+      # Sprint 3 / PM #17 — durable structured-log sink. The logger writes
+      # one JSON line per event to stdout (Docker captures it) AND appends
+      # to a daily-rotated `data/logs/orchestra-YYYY-MM-DD.jsonl` file.
+      # The JSONL file is the canonical input for Sprint-4's MCP server
+      # (`orchestra_tail_logs` etc.) and survives `docker compose down`.
+      # Disable by setting to anything other than "1".
+      ORCHESTRA_LOG_TO_FILE: "1"
+    ports:
+      - "${APP_BIND_HOST:-127.0.0.1}:${APP_PORT:-3000}:3000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s

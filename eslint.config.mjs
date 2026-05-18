@@ -1,0 +1,59 @@
+import { dirname } from "path";
+import { fileURLToPath } from "url";
+import { FlatCompat } from "@eslint/eslintrc";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const compat = new FlatCompat({
+  baseDirectory: __dirname,
+});
+
+const eslintConfig = [
+  {
+    ignores: [
+      ".next/**",
+      "node_modules/**",
+      "data/**",
+      "playwright-report/**",
+      "test-results/**",
+      "bundled-skills/**",
+      "scripts/**",
+      // Vendored third-party code — not ours to lint.
+      "src/lib/vendor/**",
+      // Next.js auto-generated.
+      "next-env.d.ts",
+      // Ad-hoc one-off scripts at repo root.
+      "refactor-wizards.js",
+      "test-key-validation.ts",
+    ],
+  },
+  ...compat.extends("next/core-web-vitals", "next/typescript"),
+  {
+    // Project-wide rule tuning. Rationale:
+    //   - no-explicit-any: vendor SDK surfaces (AI SDK, Vercel, Next handlers)
+    //     leak `any` through chains we don't control. Treating each instance
+    //     as a CI-blocking error punishes intent without changing reality.
+    //     Warning keeps it visible without turning CI red on legacy debt.
+    //   - prefer-const / ban-ts-comment / no-unescaped-entities: same logic —
+    //     keep visible, do not block CI. Tighten incrementally as the codebase
+    //     gets cleaned up.
+    rules: {
+      "@typescript-eslint/no-explicit-any": "warn",
+      "prefer-const": "warn",
+      "@typescript-eslint/ban-ts-comment": "warn",
+      "react/no-unescaped-entities": "warn",
+    },
+  },
+  {
+    // Test files routinely have unused destructuring (mock signatures) and
+    // `any` for stub data. Loosen there so the rules are signal in app code.
+    files: ["**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": "off",
+      "@typescript-eslint/no-explicit-any": "off",
+    },
+  },
+];
+
+export default eslintConfig;

@@ -177,7 +177,7 @@ describe("installSkillFromGitHub — ref resolution", () => {
 
     // The /repos endpoint (default-branch lookup) MUST NOT have been called.
     const calls = fetchSpy.mock.calls.map((c: any[]) => String(c[0]));
-    expect(calls.some((u) => /\/repos\/o\/r$/.test(u))).toBe(false);
+    expect(calls.some((u: string) => /\/repos\/o\/r$/.test(u))).toBe(false);
   });
 
   it("looks up the default branch when no ref is in the URL", async () => {

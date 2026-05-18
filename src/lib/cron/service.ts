@@ -590,19 +590,19 @@ async function executeCronJob(job: CronJob): Promise<RunResult> {
 
   const normalizeOutgoingTelegramText = (text: string): string => {
     const value = text.trim();
-    if (!value) return "Пустой ответ от cron-задачи.";
+    if (!value) return "Cron task produced no output.";
     if (value.length <= TELEGRAM_TEXT_LIMIT) return value;
     return `${value.slice(0, TELEGRAM_TEXT_LIMIT - 1)}…`;
   };
 
   const formatTelegramCronResult = (result: RunResult): string => {
     if (result.status === "ok") {
-      return `Cron "${job.name}" выполнен.\n\n${result.summary ?? "Без текста ответа."}`;
+      return `Cron "${job.name}" completed.\n\n${result.summary ?? "(no output)"}`;
     }
     if (result.status === "skipped") {
-      return `Cron "${job.name}" пропущен.\n\n${result.error ?? "Пустой ответ."}`;
+      return `Cron "${job.name}" skipped.\n\n${result.error ?? "(empty response)"}`;
     }
-    return `Cron "${job.name}" завершился с ошибкой.\n\n${result.error ?? "Unknown error."}`;
+    return `Cron "${job.name}" failed.\n\n${result.error ?? "Unknown error."}`;
   };
 
   const sendTelegramMessage = async (chatIdValue: string, text: string): Promise<void> => {

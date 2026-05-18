@@ -1,0 +1,200 @@
+/**
+ * Tests for the structured logger.
+ *
+ * Pinned invariants:
+ *   - Output is one JSON line per call, valid JSON, with required fields
+ *     (ts, level, event).
+ *   - `withLogContext` propagates fields across awaits via AsyncLocalStorage;
+ *     parent + child contexts merge, child overrides on collision.
+ *   - Sensitive field names are redacted (defense-in-depth — callers must
+ *     not log secrets in the first place, but a typo shouldn't ship hashes).
+ *   - Errors get their `.message` and `.stack` lifted into the entry.
+ *   - The file sink stays disabled unless `ORCHESTRA_LOG_TO_FILE=1` (so
+ *     tests and dev scripts don't touch disk).
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  log,
+  withLogContext,
+  getCurrentTraceId,
+  __resetFileStreamForTests,
+} from "./logger";
+
+let stdoutSpy: any;
+let stderrSpy: any;
+
+beforeEach(() => {
+  __resetFileStreamForTests();
+  vi.unstubAllEnvs();
+  // Force-disable the file sink in tests, regardless of the host env.
+  vi.stubEnv("ORCHESTRA_LOG_TO_FILE", "");
+  stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+});
+
+afterEach(() => {
+  stdoutSpy?.mockRestore();
+  stderrSpy?.mockRestore();
+});
+
+function lastJsonOn(spy: any): Record<string, unknown> {
+  const calls = spy.mock.calls;
+  expect(calls.length, "expected at least one write").toBeGreaterThan(0);
+  const last = calls.at(-1)?.[0];
+  expect(typeof last).toBe("string");
+  return JSON.parse((last as string).trimEnd());
+}
+
+describe("log.* — emits one structured JSON line per call", () => {
+  it("info() writes to stdout with required fields", () => {
+    log.info("agent_started", { chatId: "c1" });
+    const entry = lastJsonOn(stdoutSpy);
+
+    expect(entry.level).toBe("info");
+    expect(entry.event).toBe("agent_started");
+    expect(entry.chatId).toBe("c1");
+    expect(typeof entry.ts).toBe("string");
+    // ISO 8601 sanity
+    expect(new Date(entry.ts as string).toISOString()).toBe(entry.ts);
+  });
+
+  it("warn() and error() route to stderr (so docker logs color-codes them)", () => {
+    log.warn("near_quota", { remaining: 100 });
+    log.error("upstream_404", { url: "https://example/api" });
+
+    expect(stderrSpy.mock.calls.length).toBe(2);
+    expect(stdoutSpy.mock.calls.length).toBe(0);
+  });
+
+  it("output is exactly one JSON line per emit (no embedded newlines, single trailing \\n)", () => {
+    log.info("evt_a", { msg: "hello" });
+    const raw = stdoutSpy.mock.calls.at(-1)?.[0] as string;
+    expect(raw.endsWith("\n")).toBe(true);
+    const inner = raw.slice(0, -1);
+    expect(inner.includes("\n")).toBe(false);
+    JSON.parse(inner); // would throw if not a valid JSON line
+  });
+});
+
+describe("withLogContext — AsyncLocalStorage propagation", () => {
+  it("attaches context fields to every log inside the callback", async () => {
+    await withLogContext({ traceId: "T1", chatId: "c1" }, async () => {
+      log.info("inner_event");
+    });
+
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.traceId).toBe("T1");
+    expect(entry.chatId).toBe("c1");
+  });
+
+  it("survives awaits — context lives for the entire microtask chain", async () => {
+    await withLogContext({ traceId: "T2" }, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      await Promise.resolve();
+      log.info("after_awaits");
+    });
+
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.traceId).toBe("T2");
+  });
+
+  it("nested contexts merge; children override on key collision", async () => {
+    await withLogContext({ traceId: "outer", chatId: "c-outer" }, async () => {
+      await withLogContext({ chatId: "c-inner" }, async () => {
+        log.info("nested");
+      });
+    });
+
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.traceId).toBe("outer");      // inherited from parent
+    expect(entry.chatId).toBe("c-inner");     // overridden by child
+  });
+
+  it("getCurrentTraceId() returns the active trace id, undefined outside any context", () => {
+    expect(getCurrentTraceId()).toBeUndefined();
+
+    let captured: string | undefined;
+    withLogContext({ traceId: "T-current" }, () => {
+      captured = getCurrentTraceId();
+    });
+    expect(captured).toBe("T-current");
+
+    expect(getCurrentTraceId()).toBeUndefined(); // restored after exit
+  });
+
+  it("explicit fields on log.info() override context-supplied ones", async () => {
+    await withLogContext({ chatId: "from-ctx" }, async () => {
+      log.info("override_test", { chatId: "from-args" });
+    });
+
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.chatId).toBe("from-args");
+  });
+});
+
+describe("redaction — sensitive field names never reach the wire", () => {
+  it("redacts apiKey, passwordHash, token, secret, authorization, cookie", () => {
+    log.info("evt", {
+      apiKey: "sk-real-secret",
+      passwordHash: "scrypt$abc$def",
+      token: "ghp_xyz",
+      secret: "shh",
+      authorization: "Bearer xxx",
+      cookie: "session=zzz",
+      benignField: "this should pass through",
+    });
+
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.apiKey).toBe("[REDACTED]");
+    expect(entry.passwordHash).toBe("[REDACTED]");
+    expect(entry.token).toBe("[REDACTED]");
+    expect(entry.secret).toBe("[REDACTED]");
+    expect(entry.authorization).toBe("[REDACTED]");
+    expect(entry.cookie).toBe("[REDACTED]");
+    expect(entry.benignField).toBe("this should pass through");
+
+    // Verify the raw bytes too — we never want the actual hash anywhere
+    // in the line, even reflected back in some other field.
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).not.toContain("scrypt$abc$def");
+    expect(raw).not.toContain("sk-real-secret");
+  });
+
+  it("redaction is case-insensitive on field names", () => {
+    log.info("evt", { APIKey: "x", Password_Hash: "y" });
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.APIKey).toBe("[REDACTED]");
+    expect(entry.Password_Hash).toBe("[REDACTED]");
+  });
+});
+
+describe("Error capture — message + stack lifted automatically", () => {
+  it("serializes Error instances into message + stack fields", () => {
+    const err = new Error("boom");
+    log.error("upstream_failed", { err });
+
+    const entry = lastJsonOn(stderrSpy);
+    expect(entry.err).toBe("boom");
+    expect(typeof entry.stack).toBe("string");
+    expect(entry.stack as string).toContain("Error: boom");
+  });
+
+  it("does not crash on cyclic references via Error chains", () => {
+    const a: Error & { related?: unknown } = new Error("a-fail");
+    a.related = a;
+    expect(() => log.error("evt", { err: a })).not.toThrow();
+  });
+});
+
+describe("file sink — disabled unless ORCHESTRA_LOG_TO_FILE=1 is set", () => {
+  it("does not attempt to write to data/logs/ when the env is unset", () => {
+    // The mocks for stdout/stderr never see a separate file write —
+    // because we never open one. We assert by NOT seeing any error
+    // path being hit; if we tried to open the file inside a test
+    // worker it would either work (and we'd need to clean up) or
+    // throw (and the test would surface it). Either way, this test
+    // depends on `ORCHESTRA_LOG_TO_FILE` being unset (set by beforeEach).
+    log.info("evt", { foo: 1 });
+    expect(stdoutSpy.mock.calls.length).toBe(1);
+  });
+});

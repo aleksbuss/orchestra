@@ -1,0 +1,1809 @@
+import {
+  streamText,
+  generateText,
+  stepCountIs,
+  hasToolCall,
+  type ModelMessage,
+  type ToolExecutionOptions,
+  type ToolSet,
+} from "ai";
+import { createModel } from "@/lib/providers/llm-provider";
+import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
+import { classifyChatError } from "@/lib/observability/classify-error";
+import { getCurrentTraceId, log } from "@/lib/observability/logger";
+import { dumpPostmortem } from "@/lib/observability/postmortem";
+import { buildSystemPrompt } from "@/lib/agent/prompts";
+import { getSettings } from "@/lib/storage/settings-store";
+import { getChat, updateChat } from "@/lib/storage/chat-store";
+import { createAgentTools } from "@/lib/tools/tool";
+import { getProjectMcpTools } from "@/lib/mcp/client";
+import { agentSemaphore } from "./semaphore";
+import type { AgentContext } from "@/lib/agent/types";
+import { History, mergeConsecutiveSameRole } from "@/lib/agent/history";
+import { truncateToolOutputForHistory } from "@/lib/tools/output-truncate";
+import type { ChatMessage, AppSettings } from "@/lib/types";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
+import { createCallAgentTool } from "@/lib/swarm/tools";
+import { getSwarmSystemPrompt } from "@/lib/swarm/prompts";
+import type { SwarmRole } from "@/lib/swarm/types";
+import { compressChatHistory, estimateTokenCount } from "@/lib/agent/compressor";
+import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
+import { runMoAEnsemble } from "@/lib/agent/moa";
+import { insertMemory, searchMemory } from "@/lib/memory/memory";
+import { resolveWorkDirForProject } from "@/lib/storage/project-store";
+
+const LLM_LOG_BORDER = "═".repeat(60);
+const MAX_TOOL_STEPS_PER_TURN = 30;
+const MAX_TOOL_STEPS_SUBORDINATE = 15;
+const POLL_NO_PROGRESS_BLOCK_THRESHOLD = 16;
+const POLL_BACKOFF_SCHEDULE_MS = [5000, 10000, 30000, 60000] as const;
+
+// ── Swarm DAG Completion Guard ────────────────────────────────────────────────
+// Guarantees that the orchestrator node always transitions out of "running"
+// even when the SSE stream disconnects mid-response or onFinish throws.
+function publishOrchestratorFinished(
+  chatId: string,
+  projectId: string | null | undefined,
+  status: "completed" | "error",
+  reason?: string
+) {
+  publishUiSyncEvent({
+    topic: "chat",
+    projectId: projectId ?? null,
+    chatId,
+    reason: reason ?? "agent_turn_finished",
+  });
+  publishUiSyncEvent({
+    topic: "chat",
+    projectId: projectId ?? null,
+    chatId,
+    nodeType: "agent_node",
+    swarmNode: {
+      nodeId: chatId,
+      role: "orchestrator",
+      taskSummary: status === "completed" ? "Finished." : "Error.",
+      status,
+      completedAt: new Date().toISOString(),
+    },
+  });
+}
+
+function resolveModelProviderOptions(provider: string) {
+  if (provider === "codex-cli") {
+    return {
+      openai: {
+        store: false as const,
+        instructions: "You are Orchestra, an AI coding assistant.",
+      },
+    };
+  }
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function toStableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => toStableValue(item));
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+  return Object.keys(record)
+    .sort()
+    .reduce<Record<string, unknown>>((acc, key) => {
+      acc[key] = toStableValue(record[key]);
+      return acc;
+    }, {});
+}
+
+function stableSerialize(value: unknown): string {
+  try {
+    return JSON.stringify(toStableValue(value));
+  } catch {
+    return String(value);
+  }
+}
+
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    return asRecord(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function getOutputTextForRecovery(output: unknown): string {
+  if (typeof output === "string") {
+    return output;
+  }
+  const record = asRecord(output);
+  if (!record) {
+    return "";
+  }
+  const out = typeof record.output === "string" ? record.output : "";
+  const err = typeof record.error === "string" ? record.error : "";
+  return [out, err].filter(Boolean).join("\n");
+}
+
+function extractNodeMissingModule(text: string): string | null {
+  const match = text.match(/Cannot find module ['"]([^'"\n]+)['"]/i);
+  const mod = match?.[1]?.trim();
+  return mod ? mod : null;
+}
+
+function extractPythonMissingModule(text: string): string | null {
+  const match = text.match(/ModuleNotFoundError:\s*No module named ['"]([^'"\n]+)['"]/i);
+  const mod = match?.[1]?.trim();
+  return mod ? mod : null;
+}
+
+function extractMissingCommand(text: string): string | null {
+  const shellMatch = text.match(/(?:^|\n)(?:\/bin\/sh:\s*\d+:\s*)?([a-zA-Z0-9._-]+):\s*not found(?:\n|$)/i);
+  if (shellMatch?.[1]) {
+    return shellMatch[1];
+  }
+  const spawnMatch = text.match(/spawn\s+([a-zA-Z0-9._/-]+)\s+ENOENT/i);
+  if (spawnMatch?.[1]) {
+    const command = spawnMatch[1].split("/").pop();
+    return command ?? null;
+  }
+  return null;
+}
+
+function buildAutoRecoveryHint(toolName: string, output: unknown): string | null {
+  if (toolName !== "code_execution" && toolName !== "process") {
+    return null;
+  }
+
+  const text = getOutputTextForRecovery(output);
+  if (!text) {
+    return null;
+  }
+
+  if (
+    /Need to install the following packages/i.test(text) &&
+    /Ok to proceed\?/i.test(text)
+  ) {
+    return [
+      "Recoverable blocker detected: interactive npx prompt is waiting for confirmation.",
+      "Next action: rerun with non-interactive form using `npx -y ...`, then continue polling/retrying in this turn.",
+      "Do not stop on this blocker.",
+    ].join("\n");
+  }
+
+  if (
+    /npm error could not determine executable to run/i.test(text) &&
+    /playwright-cli/i.test(text)
+  ) {
+    return [
+      "Recoverable blocker detected: deprecated `playwright-cli` npm package does not expose an executable.",
+      "Next action: run the command with `npx -y @playwright/cli ...` (or install `@playwright/cli` via install_packages and retry).",
+      "Do not stop on this blocker.",
+    ].join("\n");
+  }
+
+  if (text.includes("Host system is missing dependencies to run browsers")) {
+    return [
+      "Recoverable blocker detected: Playwright browser system dependencies are missing.",
+      "Next action: run install_packages with kind=\"apt\" for the required libs (or run `npx playwright install-deps` in terminal runtime), then retry the same Playwright command in this turn.",
+      "Do not stop and do not ask the user to run commands manually unless installation keeps failing after corrected retries.",
+    ].join("\n");
+  }
+
+  const missingNodeModule = extractNodeMissingModule(text);
+  if (missingNodeModule) {
+    return [
+      `Recoverable blocker detected: missing Node module "${missingNodeModule}".`,
+      `Next action: call install_packages with kind="node" and packages=["${missingNodeModule}"], then retry the same command in this turn.`,
+      "Do not stop after this error.",
+    ].join("\n");
+  }
+
+  const missingPythonModule = extractPythonMissingModule(text);
+  if (missingPythonModule) {
+    return [
+      `Recoverable blocker detected: missing Python module "${missingPythonModule}".`,
+      `Next action: call install_packages with kind="python" and packages=["${missingPythonModule}"], then retry the same command in this turn.`,
+      "Do not stop after this error.",
+    ].join("\n");
+  }
+
+  if (/playwright-cli:\s*not found/i.test(text)) {
+    return [
+      "Recoverable blocker detected: playwright-cli is not installed/in PATH.",
+      "Next action: first try running the same command via `npx -y @playwright/cli ...`.",
+      "If npx path is unavailable, call install_packages with kind=\"node\" and packages=[\"@playwright/cli\"], then retry in this turn.",
+      "Do not end the turn on this error.",
+    ].join("\n");
+  }
+
+  const missingCommand = extractMissingCommand(text);
+  if (missingCommand && missingCommand !== "node" && missingCommand !== "python3") {
+    return [
+      `Recoverable blocker detected: command "${missingCommand}" is missing.`,
+      `Next action: install it via install_packages (kind depends on ecosystem, e.g. apt for system commands), then retry the original command in this turn.`,
+      "Only report blocker after corrected install attempts fail.",
+    ].join("\n");
+  }
+
+  return null;
+}
+
+function appendRecoveryHint(output: unknown, hint: string | null): unknown {
+  if (!hint) {
+    return output;
+  }
+
+  const block = `\n\n[Auto-recovery hint]\n${hint}`;
+  if (typeof output === "string") {
+    return `${output}${block}`;
+  }
+
+  const record = asRecord(output);
+  if (!record) {
+    return output;
+  }
+
+  const current = typeof record.output === "string" ? record.output : "";
+  return {
+    ...record,
+    output: current ? `${current}${block}` : block.trim(),
+    recoverable: true,
+    recoveryHint: hint,
+  };
+}
+
+function extractDeterministicFailureSignature(output: unknown): string | null {
+  const outputRecord = asRecord(output);
+  if (outputRecord && outputRecord.success === false) {
+    const errorText =
+      typeof outputRecord.error === "string"
+        ? outputRecord.error
+        : "Tool returned success=false";
+    const codeText = typeof outputRecord.code === "string" ? outputRecord.code : "";
+    return [errorText, codeText].filter(Boolean).join(" | ");
+  }
+
+  if (typeof output !== "string") {
+    return null;
+  }
+
+  const trimmed = output.trim();
+  const parsed = parseJsonObject(trimmed);
+  if (parsed && parsed.success === false) {
+    const errorText =
+      typeof parsed.error === "string" ? parsed.error : "Tool returned success=false";
+    const codeText = typeof parsed.code === "string" ? parsed.code : "";
+    return [errorText, codeText].filter(Boolean).join(" | ");
+  }
+
+  const isExplicitFailure =
+    trimmed.startsWith("[MCP tool error]") ||
+    trimmed.startsWith("[Preflight error]") ||
+    trimmed.startsWith("[Loop guard]") ||
+    trimmed.includes("Process error:") ||
+    trimmed.includes("[Process killed after timeout]") ||
+    /Exit code:\s*-?[1-9]\d*/.test(trimmed) ||
+    /^Failed\b/i.test(trimmed) ||
+    /^Skill ".+" not found\./i.test(trimmed) ||
+    (/\bnot found\b/i.test(trimmed) &&
+      !/No relevant memories found\./i.test(trimmed));
+
+  if (!isExplicitFailure) {
+    return null;
+  }
+
+  return trimmed.length > 400 ? `${trimmed.slice(0, 400)}...` : trimmed;
+}
+
+function isPollLikeCall(toolName: string, input: unknown): boolean {
+  if (toolName !== "process") {
+    return false;
+  }
+  const record = asRecord(input);
+  if (!record) {
+    return false;
+  }
+  const action = typeof record.action === "string" ? record.action : "";
+  return action === "poll" || action === "log";
+}
+
+function normalizeNoProgressValue(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 1000 ? `${trimmed.slice(0, 1000)}...` : trimmed;
+  }
+
+  if (Array.isArray(value)) {
+    return value.slice(0, 8).map((item) => normalizeNoProgressValue(item));
+  }
+
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(record)) {
+    if (key === "output" && typeof raw === "string") {
+      out[key] = raw.length > 1000 ? `${raw.slice(0, 1000)}...` : raw;
+      continue;
+    }
+    if (key === "attempts" && Array.isArray(raw)) {
+      out[key] = raw.slice(0, 3).map((item) => normalizeNoProgressValue(item));
+      continue;
+    }
+    out[key] = normalizeNoProgressValue(raw);
+  }
+
+  return out;
+}
+
+function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: string; parentNodeId?: string }): ToolSet {
+  let lastDeterministicFailure: { callKey: string; signature: string } | null = null;
+  const noProgressByCall = new Map<string, { hash: string; count: number }>();
+  const wrappedTools: ToolSet = {};
+
+  for (const [toolName, toolDef] of Object.entries(tools)) {
+    if (toolName === "response" || typeof toolDef.execute !== "function") {
+      wrappedTools[toolName] = toolDef;
+      continue;
+    }
+
+    wrappedTools[toolName] = {
+      ...toolDef,
+      execute: async (input: unknown, options: ToolExecutionOptions) => {
+        const callKey = `${toolName}:${stableSerialize(input)}`;
+        const previousNoProgress = noProgressByCall.get(callKey);
+        if (
+          previousNoProgress &&
+          previousNoProgress.count >= POLL_NO_PROGRESS_BLOCK_THRESHOLD &&
+          isPollLikeCall(toolName, input)
+        ) {
+          const scheduleIdx = Math.min(
+            previousNoProgress.count - POLL_NO_PROGRESS_BLOCK_THRESHOLD,
+            POLL_BACKOFF_SCHEDULE_MS.length - 1
+          );
+          const retryInMs = POLL_BACKOFF_SCHEDULE_MS[scheduleIdx] ?? 60000;
+          return (
+            `[Loop guard] Detected no-progress polling loop for "${toolName}".\n` +
+            `Repeated identical result ${previousNoProgress.count} times.\n` +
+            `Back off for ~${retryInMs}ms or report the background task as stuck.`
+          );
+        }
+
+        if (lastDeterministicFailure?.callKey === callKey) {
+          return (
+            `[Loop guard] Blocked repeated tool call "${toolName}" with identical arguments.\n` +
+            `Previous deterministic error: ${lastDeterministicFailure.signature}\n` +
+            "Change arguments based on the tool error before retrying."
+          );
+        }
+
+        // DAG: publish tool_node start event
+        const toolNodeId = dagContext ? crypto.randomUUID() : undefined;
+        if (dagContext && toolName !== "call_agent" && toolName !== "process") {
+          const inputRecord = asRecord(input);
+          const summary = inputRecord
+            ? (typeof inputRecord.code === "string" ? inputRecord.code.slice(0, 80) : typeof inputRecord.query === "string" ? inputRecord.query.slice(0, 80) : typeof inputRecord.message === "string" ? inputRecord.message.slice(0, 80) : toolName)
+            : toolName;
+          publishUiSyncEvent({
+            topic: "chat",
+            chatId: dagContext.chatId,
+            nodeType: "tool_node",
+            swarmNode: {
+              nodeId: toolNodeId!,
+              parentNodeId: dagContext.parentNodeId,
+              role: "tool",
+              taskSummary: summary,
+              status: "running",
+              startedAt: new Date().toISOString(),
+              toolName,
+            },
+          });
+        }
+
+        let outputWithHint: unknown;
+        let isError = false;
+
+        try {
+          const output = await toolDef.execute!(input as never, options as never);
+          const recoveryHint = buildAutoRecoveryHint(toolName, output);
+          outputWithHint = appendRecoveryHint(output, recoveryHint);
+        } catch (err) {
+          isError = true;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.error(`[agent:Self-Healing] Tool ${toolName} failed:`, errMsg);
+          outputWithHint = `[Tool Execution Failed]: ${errMsg}\n[Self-Healing Prompt]: Your previous tool call crashed. Check your arguments (e.g. missing required fields, wrong enums, syntax errors) and try calling the tool again correctly. Do not repeat the exact same mistake.`;
+        }
+
+        const failureSignature = extractDeterministicFailureSignature(outputWithHint);
+        const finalStatus = (isError || failureSignature) ? "error" : "completed";
+
+        // DAG: publish tool_node completion or error
+        if (dagContext && toolNodeId) {
+          publishUiSyncEvent({
+            topic: "chat",
+            chatId: dagContext.chatId,
+            nodeType: "tool_node",
+            swarmNode: {
+              nodeId: toolNodeId,
+              parentNodeId: dagContext.parentNodeId,
+              role: "tool",
+              taskSummary: toolName,
+              status: finalStatus,
+              completedAt: new Date().toISOString(),
+              toolName,
+            },
+          });
+        }
+
+        if (failureSignature) {
+          lastDeterministicFailure = {
+            callKey,
+            signature: failureSignature,
+          };
+        } else {
+          lastDeterministicFailure = null;
+        }
+
+        if (isPollLikeCall(toolName, input)) {
+          const outputHash = stableSerialize(normalizeNoProgressValue(outputWithHint));
+          const previous = noProgressByCall.get(callKey);
+          if (previous && previous.hash === outputHash) {
+            noProgressByCall.set(callKey, {
+              hash: outputHash,
+              count: previous.count + 1,
+            });
+          } else {
+            noProgressByCall.set(callKey, {
+              hash: outputHash,
+              count: 1,
+            });
+          }
+        } else {
+          noProgressByCall.delete(callKey);
+        }
+
+        return outputWithHint;
+      },
+    } as typeof toolDef;
+  }
+
+  return wrappedTools;
+}
+
+/**
+ * Convert stored ChatMessages to AI SDK ModelMessage format
+ */
+function convertChatMessagesToModelMessages(messages: ChatMessage[]): ModelMessage[] {
+  const result: ModelMessage[] = [];
+  let systemArchiveCount = 0;
+
+  for (const m of messages) {
+    if (m.role === "system") {
+      // System messages include compressed memory archives and MCP instructions.
+      // These MUST be forwarded to the model as user-role context so the agent
+      // retains knowledge from earlier in the conversation.
+      result.push({
+        role: "user",
+        content: `[System Context — Conversation Memory]\n${m.content}`,
+      });
+      systemArchiveCount++;
+    } else if (m.role === "tool") {
+      // Tool result message - AI SDK uses 'output' not 'result'
+      result.push({
+        role: "tool",
+        content: [{
+          type: "tool-result",
+          toolCallId: m.toolCallId!,
+          toolName: m.toolName!,
+          output: { type: "json", value: m.toolResult as import("@ai-sdk/provider").JSONValue },
+        }],
+      });
+    } else if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      // Assistant message with tool calls - AI SDK uses 'input' not 'args'
+      const content: Array<
+        | { type: "text"; text: string }
+        | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
+      > = [];
+      if (m.content) {
+        content.push({ type: "text", text: m.content });
+      }
+      for (const tc of m.toolCalls) {
+        content.push({
+          type: "tool-call",
+          toolCallId: tc.toolCallId,
+          toolName: tc.toolName,
+          input: tc.args,
+        });
+      }
+      result.push({ role: "assistant", content });
+    } else if (m.role === "user" || m.role === "assistant") {
+      // Regular user or assistant message
+      result.push({ role: m.role, content: m.content });
+    }
+  }
+
+  if (systemArchiveCount > 0) {
+    console.log(`[Memory] Loaded ${systemArchiveCount} compressed memory archive(s) into context.`);
+  }
+
+  return result;
+}
+
+/**
+ * Strip thinking block from text to prevent leaking it to the user UI
+ */
+function stripThinkingTags(text: string): string {
+  if (!text) return text;
+  return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
+}
+
+/**
+ * Convert AI SDK ModelMessage to our ChatMessage format for storage.
+ * Tool messages can contain multiple tool results, so this returns an array.
+ */
+function convertModelMessageToChatMessages(msg: ModelMessage, now: string): ChatMessage[] {
+  if (msg.role === "tool") {
+    // Tool result - AI SDK may include multiple tool-result parts in one message.
+    const content = Array.isArray(msg.content) ? msg.content : [];
+    const toolMessages: ChatMessage[] = [];
+
+    for (const part of content) {
+      if (!(typeof part === "object" && part !== null && "type" in part && part.type === "tool-result")) {
+        continue;
+      }
+
+      const tr = part as {
+        toolCallId: string;
+        toolName: string;
+        output?: { type: string; value: unknown } | unknown;
+        result?: unknown;
+      };
+
+      const outputContainer = tr.output ?? tr.result;
+      const outputValue =
+        typeof outputContainer === "object" &&
+        outputContainer !== null &&
+        "value" in outputContainer
+          ? (outputContainer as { value: unknown }).value
+          : outputContainer;
+
+      // Cap chat-persisted tool output to prevent the chat-store
+      // re-serialization storm and runaway prompt growth on the next turn.
+      // The full output was already visible to the agent during execution;
+      // only the chat archive is bounded.
+      const truncated = truncateToolOutputForHistory(outputValue);
+      const persistedResult = truncated.truncated
+        ? truncated.content
+        : outputValue;
+
+      toolMessages.push({
+        id: crypto.randomUUID(),
+        role: "tool",
+        content: truncated.content,
+        toolCallId: tr.toolCallId,
+        toolName: tr.toolName,
+        toolResult: persistedResult,
+        createdAt: now,
+      });
+    }
+
+    return toolMessages;
+  }
+
+  if (msg.role === "assistant") {
+    const content = msg.content;
+    if (Array.isArray(content)) {
+      // Extract text and tool calls - AI SDK uses 'input' not 'args'
+      let textContent = "";
+      const toolCalls: ChatMessage["toolCalls"] = [];
+
+      for (const part of content) {
+        if (typeof part === "object" && part !== null) {
+          if ("type" in part && part.type === "text" && "text" in part) {
+            textContent += (part as { text: string }).text;
+          } else if ("type" in part && part.type === "tool-call") {
+            const tc = part as { toolCallId: string; toolName: string; input: unknown };
+            toolCalls.push({
+              toolCallId: tc.toolCallId,
+              toolName: tc.toolName,
+              args: tc.input as Record<string, unknown>,
+            });
+          }
+        }
+      }
+
+      return [{
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: stripThinkingTags(textContent),
+        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+        createdAt: now,
+      }];
+    }
+    // String content
+    return [{
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: typeof content === "string" ? stripThinkingTags(content) : "",
+      createdAt: now,
+    }];
+  }
+
+  // User or other
+  return [{
+    id: crypto.randomUUID(),
+    role: msg.role as "user" | "assistant" | "system" | "tool",
+    content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+    createdAt: now,
+  }];
+}
+
+function logLLMRequest(options: {
+  model: string;
+  system: string;
+  messages: ModelMessage[];
+  toolNames: string[];
+  temperature?: number;
+  maxTokens?: number;
+  label?: string;
+}) {
+  const { model, system, messages, toolNames, temperature, maxTokens, label = "LLM Request" } = options;
+  console.log(`\n${LLM_LOG_BORDER}`);
+  console.log(`  ${label}`);
+  console.log(LLM_LOG_BORDER);
+  console.log(`  Model: ${model}`);
+  console.log(`  Temperature: ${temperature ?? "default"}`);
+  console.log(`  Max tokens: ${maxTokens ?? "default"}`);
+  console.log(`  Tools: ${toolNames.length ? toolNames.join(", ") : "none"}`);
+  console.log(`  Messages: ${messages.length}`);
+  console.log(LLM_LOG_BORDER);
+  console.log("  --- SYSTEM ---\n");
+  console.log(system);
+  console.log("\n  --- MESSAGES ---");
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const role = m.role.toUpperCase();
+    const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+    const preview = content.length > 500 ? content.slice(0, 500) + "…" : content;
+    console.log(`  [${i + 1}] ${role}:\n${preview}`);
+  }
+  console.log(`\n${LLM_LOG_BORDER}\n`);
+}
+
+function extractAssistantText(msg: ModelMessage): string {
+  if (msg.role !== "assistant") return "";
+  const content = msg.content;
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+  let text = "";
+  for (const part of content) {
+    if (
+      typeof part === "object" &&
+      part !== null &&
+      "type" in part &&
+      part.type === "text" &&
+      "text" in part &&
+      typeof (part as { text?: unknown }).text === "string"
+    ) {
+      text += (part as { text: string }).text;
+    }
+  }
+  return text;
+}
+
+function getLastAssistantText(messages: ModelMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const text = extractAssistantText(msg).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function extractToolResultOutputText(output: unknown): string {
+  if (typeof output === "string") {
+    return output;
+  }
+  const record = asRecord(output);
+  if (!record) {
+    if (output === null || output === undefined) {
+      return "";
+    }
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  }
+
+  const value = "value" in record ? record.value : undefined;
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value !== undefined) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  if (typeof record.message === "string") {
+    return record.message;
+  }
+
+  try {
+    return JSON.stringify(record);
+  } catch {
+    return String(record);
+  }
+}
+
+function getLastResponseToolText(messages: ModelMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+
+    if (msg.role === "tool" && Array.isArray(msg.content)) {
+      for (let j = msg.content.length - 1; j >= 0; j -= 1) {
+        const part = msg.content[j];
+        if (!(typeof part === "object" && part !== null)) continue;
+        if (!("type" in part) || part.type !== "tool-result") continue;
+        const toolName =
+          "toolName" in part && typeof (part as { toolName?: unknown }).toolName === "string"
+            ? ((part as { toolName: string }).toolName as string)
+            : "";
+        if (toolName !== "response") continue;
+
+        const output =
+          "output" in part ? (part as { output?: unknown }).output : (part as { result?: unknown }).result;
+        const text = extractToolResultOutputText(output).trim();
+        if (text) return text;
+      }
+    }
+
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (let j = msg.content.length - 1; j >= 0; j -= 1) {
+        const part = msg.content[j];
+        if (!(typeof part === "object" && part !== null)) continue;
+        if (!("type" in part) || part.type !== "tool-call") continue;
+        const toolName =
+          "toolName" in part && typeof (part as { toolName?: unknown }).toolName === "string"
+            ? ((part as { toolName: string }).toolName as string)
+            : "";
+        if (toolName !== "response") continue;
+        const input =
+          "input" in part ? (part as { input?: unknown }).input : undefined;
+        const inputRecord = asRecord(input);
+        const message = typeof inputRecord?.message === "string" ? inputRecord.message.trim() : "";
+        if (message) return message;
+      }
+    }
+  }
+  return "";
+}
+
+function shouldAutoContinueAssistant(
+  text: string,
+  finishReason?: string
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  const reason = (finishReason || "").toLowerCase();
+  if (reason === "length" || reason === "max_tokens") {
+    return true;
+  }
+
+  // Common abrupt cutoff pattern from prompt-generation turns.
+  if (/(?:here is (?:the )?prompt|вот (?:твой )?(?:промпт|prompt))[:：]?\s*$/i.test(trimmed)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Executes a subsidiary agent with a specialized role (Swarm).
+ */
+async function runSubAgent(
+  role: SwarmRole,
+  taskDescription: string,
+  extraContext: string | undefined,
+  parentContext: AgentContext,
+  settings: AppSettings,
+  providerOptions: any,
+  model: any // Pass the actual resolved model instance from Orchestrator!
+): Promise<string> {
+  const nodeId = crypto.randomUUID();
+
+  const baseTools = createAgentTools(parentContext, settings);
+  let tools = baseTools;
+  if (parentContext.projectId) {
+    const mcp = await getProjectMcpTools(parentContext.projectId);
+    if (mcp) {
+      tools = { ...baseTools, ...mcp.tools };
+    }
+  }
+
+  // --- Swarm Tool Pruning (Scoping) ---
+  // Read-only tools safe for all sub-agent roles
+  const readOnlyMatch = (key: string) =>
+    key.includes("search") || key.includes("read") || key.includes("list") ||
+    key.includes("view") || key.includes("blackboard") || key === "knowledge_query" ||
+    key === "memory_load" || key === "response";
+
+  if (role === "researcher") {
+    const filteredTools: Record<string, any> = {};
+    for (const key of Object.keys(tools)) {
+      if (readOnlyMatch(key)) {
+        filteredTools[key] = tools[key];
+      }
+    }
+    tools = filteredTools;
+  } else if (role === "reviewer") {
+    const filteredTools: Record<string, any> = {};
+    for (const key of Object.keys(tools)) {
+      if (readOnlyMatch(key) || key.includes("grep")) {
+        filteredTools[key] = tools[key];
+      }
+    }
+    tools = filteredTools;
+  }
+  // "coder" retains all structural and OS execution tools.
+  // ------------------------------------
+  tools = applyGlobalToolLoopGuard(tools, { chatId: parentContext.chatId, parentNodeId: nodeId });
+
+  const systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
+  const promptText = extraContext 
+    ? `Task:\n${taskDescription}\n\nContext/Constraints:\n${extraContext}` 
+    : `Task:\n${taskDescription}`;
+
+  // DAG: publish agent_node start
+  publishUiSyncEvent({
+    topic: "chat",
+    chatId: parentContext.chatId,
+    reason: `[Swarm] Orchestrator delegated task to specialized agent "${role}": ${taskDescription}`,
+    parentId: parentContext.chatId,
+    nodeType: "agent_node",
+    swarmNode: {
+      nodeId,
+      parentNodeId: parentContext.chatId,
+      role,
+      taskSummary: taskDescription.slice(0, 120),
+      status: "running",
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  try {
+    const result = await generateText({
+      model,
+      system: systemPrompt,
+      providerOptions,
+      messages: [{ role: "user", content: promptText }],
+      tools,
+      maxRetries: 3,
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
+      temperature: settings.chatModel.temperature ?? 0.7,
+      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    });
+    const responseText = getLastResponseToolText(result.response.messages) || result.text;
+    const outputText = responseText.trim() || "Agent finished but returned no text.";
+    
+    // DAG: publish agent_node completed
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId: parentContext.chatId,
+      reason: `[Swarm] Agent "${role}" completed its task.`,
+      parentId: parentContext.chatId,
+      nodeType: "agent_node",
+      swarmNode: {
+        nodeId,
+        role,
+        taskSummary: taskDescription.slice(0, 120),
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      },
+    });
+
+    return outputText;
+  } catch (err) {
+    // DAG: publish agent_node error
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId: parentContext.chatId,
+      nodeType: "agent_node",
+      swarmNode: {
+        nodeId,
+        role,
+        taskSummary: taskDescription.slice(0, 120),
+        status: "error",
+        completedAt: new Date().toISOString(),
+      },
+    });
+    console.error(`[Swarm] Sub-agent "${role}" error:`, err instanceof Error ? err.message : err);
+    return `[Swarm] Sub-agent Error: ${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+/**
+ * Run the agent for a given chat context and return a streamable result.
+ * Uses Vercel AI SDK's streamText with stopWhen for automatic tool loop.
+ */
+export interface RunAgentOptions {
+  chatId: string;
+  userMessage: string;
+  projectId?: string;
+  currentPath?: string;
+  agentNumber?: number;
+  swarmEnabled?: boolean;
+  isBackground?: boolean;
+  abortSignal?: AbortSignal;
+  preset?: PresetTier;
+}
+
+export async function runAgent(options: RunAgentOptions) {
+  const settings = await getSettings();
+
+  // Resolve model config: if a preset is active, use its brain config;
+  // otherwise fall back to the user's manual settings.
+  const resolvedModelConfig = options.preset
+    ? getBrainConfig(options.preset, settings.chatModel)
+    : settings.chatModel;
+
+  // Smart API key resolution for presets:
+  // 1. If the preset itself has a key → use it (shouldn't happen, presets don't store keys)
+  // 2. If there's a key in the provider-specific vault → use it
+  // 3. If the user's chatModel uses the SAME provider → inherit its key
+  // 4. Fall through to env vars (handled by createModel)
+  if (options.preset && options.preset !== "custom" && !resolvedModelConfig.apiKey) {
+    const provider = resolvedModelConfig.provider;
+    const vaultKey = settings.providerApiKeys?.[provider];
+    if (vaultKey) {
+      resolvedModelConfig.apiKey = vaultKey;
+      console.log(`[KeyResolver] ${provider}: using vault key`);
+    } else if (settings.chatModel.provider === provider && settings.chatModel.apiKey) {
+      resolvedModelConfig.apiKey = settings.chatModel.apiKey;
+      console.log(`[KeyResolver] ${provider}: inherited from chatModel`);
+    } else {
+      console.warn(`[KeyResolver] ${provider}: no key found in vault or chatModel`);
+    }
+  }
+
+  const providerOptions = resolveModelProviderOptions(resolvedModelConfig.provider);
+  const model = createModel(resolvedModelConfig, {
+    projectId: options.projectId,
+    currentPath: options.currentPath,
+  });
+
+  console.log(`[Agent] provider=${resolvedModelConfig.provider} model=${resolvedModelConfig.model} preset=${options.preset ?? "custom"} hasKey=${!!resolvedModelConfig.apiKey}`);
+
+  // Build context. workDir resolves the project's effective filesystem root
+  // (linked projects honor `absoluteRoot`; sandbox projects fall back to
+  // `data/projects/<id>/`). Pre-resolving here avoids an async lookup on
+  // every tool call inside resolveContextCwd.
+  const workDir = await resolveWorkDirForProject(options.projectId);
+  const context: AgentContext = {
+    chatId: options.chatId,
+    projectId: options.projectId,
+    currentPath: options.currentPath,
+    workDir,
+    memorySubdir: options.projectId
+      ? `${options.projectId}`
+      : "main",
+    knowledgeSubdirs: options.projectId
+      ? [`${options.projectId}`, "main"]
+      : ["main"],
+    history: [],
+    agentNumber: options.agentNumber ?? 0,
+    data: {
+      currentUserMessage: options.userMessage,
+    },
+  };
+
+  // Immediate Persistence: Save the user message BEFORE starting the LLM stream.
+  // This ensures the chat history is consistent even if the network fails mid-turn.
+  await updateChat(options.chatId, (c) => {
+    const alreadyExists = c.messages.some(m => m.role === "user" && m.content === options.userMessage && (Date.now() - new Date(m.createdAt).getTime() < 5000));
+    if (!alreadyExists) {
+      c.messages.push({
+        id: crypto.randomUUID(),
+        role: "user",
+        content: options.userMessage,
+        createdAt: new Date().toISOString(),
+      });
+    }
+    return c;
+  });
+
+  // Load existing chat history
+  let chat = await getChat(options.chatId);
+  if (chat) {
+    const rawModelMessages = convertChatMessagesToModelMessages(chat.messages);
+    const estimatedTokens = estimateTokenCount(rawModelMessages);
+    
+    // Semantic Context Compaction threshold — raised to 12000 tokens for modern
+    // long-context models (Gemini 3 Flash, 2.5 Pro, etc.). This gives the agent
+    // much more room before compression kicks in.
+
+    // Phase 1: Dynamic Thresholds
+    const modelIdForLimits = resolvedModelConfig.model?.toLowerCase() ?? "";
+    let contextLimit = 8000; // safe default for unknown/small models
+    if (modelIdForLimits.includes("gpt-4") || modelIdForLimits.includes("claude-3") || modelIdForLimits.includes("gemini") || modelIdForLimits.includes("128k") || modelIdForLimits.includes("qwen2.5-coder-32b")) {
+      contextLimit = 100000; // Giant context models
+    } else if (modelIdForLimits.includes("32k")) {
+      contextLimit = 30000;
+    } else if (modelIdForLimits.includes("8b") || modelIdForLimits.includes("7b") || modelIdForLimits.includes("llama3") || modelIdForLimits.includes("gemma")) {
+      contextLimit = 6000; // conservative for small local models to prevent hallucination collapses
+    }
+
+    if (estimatedTokens > contextLimit && chat.messages.length > 12) {
+      console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
+      publishUiSyncEvent({
+        topic: "chat",
+        chatId: options.chatId,
+        projectId: options.projectId ?? null,
+        reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
+      });
+
+      const cutoff = chat.messages.length - 8; // keep last 8 fresh for better continuity
+      const olderMessages = chat.messages.slice(0, cutoff);
+      const newerMessages = chat.messages.slice(cutoff);
+
+      const summary = await compressChatHistory(olderMessages, settings, options.projectId);
+      
+      // Phase 2: RAG Vector Database Archival
+      const memorySubdir = options.projectId ? `${options.projectId}` : "main";
+      try {
+        await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings);
+        console.log(`[Memory] History successfully vector-archived.`);
+      } catch (err) {
+        console.error(`[Memory] Failed to vector-archive history:`, err);
+      }
+
+      const updated = await updateChat(options.chatId, (c) => {
+        c.messages = newerMessages;
+        return c;
+      });
+      if (updated) chat = updated;
+    }
+
+    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const history = new History(80);
+    history.addMany(allMessages);
+    context.history = history.getAll();
+    console.log(`[Memory] Agent context loaded: ${context.history.length} messages (from ${chat.messages.length} stored).`);
+  }
+
+  // Build tools: base + optional MCP tools from project .meta/mcp
+  const baseTools = createAgentTools(context, settings);
+  let mcpCleanup: (() => Promise<void>) | undefined;
+  let tools = baseTools;
+  if (options.projectId) {
+    const mcp = await getProjectMcpTools(options.projectId);
+    if (mcp) {
+      tools = { ...baseTools, ...mcp.tools };
+      mcpCleanup = mcp.cleanup;
+    }
+  }
+  const orchestratorNodeId = options.chatId;
+  const dagContext = options.swarmEnabled !== false
+    ? { chatId: options.chatId, parentNodeId: orchestratorNodeId }
+    : undefined;
+  tools = applyGlobalToolLoopGuard(tools, dagContext);
+
+  // Inject Swarm P2P call_agent tool if swarm is enabled
+  if (options.swarmEnabled !== false) {
+    // ── Swarm Reset: Clear stale UI nodes from previous turns ──────────
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId: options.chatId,
+      projectId: options.projectId ?? null,
+      reason: "swarm_reset",
+    });
+
+    // DAG: publish orchestrator node
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId: options.chatId,
+      nodeType: "agent_node",
+      swarmNode: {
+        nodeId: orchestratorNodeId,
+        role: "orchestrator",
+        taskSummary: options.userMessage.slice(0, 120),
+        status: "running",
+        startedAt: new Date().toISOString(),
+      },
+    });
+
+    tools.call_agent = createCallAgentTool((role, desc, extra) => {
+      publishUiSyncEvent({
+        topic: "chat",
+        chatId: options.chatId,
+        projectId: options.projectId ?? null,
+        reason: `[Swarm] Queued delegation for specialized agent "${role}" (Waiting for GPU...)`,
+        nodeType: "agent_node",
+        swarmNode: {
+          nodeId: crypto.randomUUID(),
+          parentNodeId: orchestratorNodeId,
+          role,
+          taskSummary: desc.slice(0, 120),
+          status: "queued",
+        },
+      });
+
+      return agentSemaphore.run(() => 
+        runSubAgent(role, desc, extra, context, settings, providerOptions, model)
+      );
+    });
+  }
+
+  const toolNames = Object.keys(tools);
+
+  // Build system prompt
+  let systemPrompt = await buildSystemPrompt({
+    projectId: options.projectId,
+    chatId: options.chatId,
+    agentNumber: options.agentNumber,
+    tools: toolNames,
+  });
+
+  // Phase 3: "Deep Memory" System Prompt Injection
+  try {
+    const memorySubdir = options.projectId ? `${options.projectId}` : "main";
+      const similarityThreshold = settings.memory?.similarityThreshold ?? 0.7;
+      const ragResults = await searchMemory(options.userMessage, 3, similarityThreshold, memorySubdir, settings);
+      
+      if (ragResults && ragResults.length > 0) {
+        const ragFormatted = ragResults.map((r) => `[Relevance Score: ${r.score.toFixed(2)}] (Area: ${r.metadata.area})\n${r.text}`).join("\n\n");
+        systemPrompt += `\n\n<deep_memory_recall>\nYou have subconscious access to past archived conversations and vectors matching the user's current query. Use this to maintain perfect context continuity:\n\n${ragFormatted}\n</deep_memory_recall>`;
+        console.log(`[RAG] Deep Memory Recall injected (${ragResults.length} chunks).`);
+      }
+    } catch (err) {
+      console.warn(`[RAG] Failed to extract deep memory:`, err);
+    }
+
+  // Append user message to history.
+  // mergeConsecutiveSameRole prevents POST_MORTEM #2 (Gemma 4 / strict-role
+  // providers reject consecutive same-role messages — easy to trigger by a
+  // double Send before the assistant has replied).
+  const messages: ModelMessage[] = mergeConsecutiveSameRole([
+    ...context.history,
+    { role: "user", content: options.userMessage },
+  ]);
+
+  // ── MoA Ensemble: Collective Intelligence Layer ───────────────────────
+  // The UI toggle (`swarmEnabled`) is the single source of truth here.
+  // When the user enabled Swarm, we ALWAYS run the MoA flow — the Router
+  // inside `runMoAEnsemble` decides whether to actually spin up 3–5 expert
+  // proposers (`requiresSwarm: true`) or do a direct single-model answer
+  // (`requiresSwarm: false`) based on the prompt complexity.
+  //
+  // Historical note: an earlier `queryNeedsMoA` regex acted as a second gate
+  // here and silently overrode the UI for messages whose verbs weren't on a
+  // hard-coded list ("ищи", "нашёл", "сделай", "помоги" — all rejected). It
+  // defied the explicit user intent expressed by the toggle. Removed in the
+  // 2026-05 fix tracked as PM #9. Routing decisions belong to the Router,
+  // not to a brittle regex on the entry path.
+  if (options.swarmEnabled !== false) {
+    try {
+      console.log(`[MoA] Ensemble mode active — running parallel expert consultation...`);
+      const moaResult = await runMoAEnsemble({
+        chatId: options.chatId,
+        userMessage: options.userMessage,
+        projectId: options.projectId,
+        currentPath: options.currentPath,
+        preset: options.preset,
+        history: context.history,
+        settings,
+        abortSignal: options.abortSignal,
+      });
+
+      if (moaResult.text && !moaResult.text.startsWith("All MoA proposer agents failed")) {
+        const truncatedConsensus = moaResult.text.length > 5000
+          ? moaResult.text.substring(0, 5000) + "\n\n...[TRUNCATED FOR CONTEXT LIMITS]..."
+          : moaResult.text;
+
+        systemPrompt += `\n\n## Expert Consensus (MoA)
+You have access to a pre-computed consensus from ${moaResult.drafts.length} expert agents who analyzed this request in parallel.
+Use this as high-quality reference material. You may adopt, modify, or override their recommendations based on your own judgment and tool results.
+
+<expert_consensus>
+${truncatedConsensus}
+</expert_consensus>
+
+Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.map(d => `${d.proposerId}=${d.latencyMs}ms`).join(', ')}; aggregation: ${moaResult.aggregationLatencyMs}ms)`;
+
+        console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total)`);
+      }
+    } catch (err) {
+      console.warn(`[MoA] Ensemble failed, continuing with single-agent mode:`, err);
+      // Tell the UI that the Swarm toggle was honored but the ensemble
+      // crashed — without this event the user sees a single-agent answer
+      // and assumes Swarm just decided to skip. This is observability for
+      // a silent fallback path that was previously invisible.
+      publishUiSyncEvent({
+        topic: "chat",
+        chatId: options.chatId,
+        projectId: options.projectId ?? null,
+        reason: `[MoA] Ensemble failed (${err instanceof Error ? err.message : "unknown error"}); continuing with single-agent mode.`,
+      });
+    }
+  }
+
+  logLLMRequest({
+    model: `${settings.chatModel.provider}/${settings.chatModel.model}`,
+    system: systemPrompt,
+    messages,
+    toolNames,
+    temperature: settings.chatModel.temperature,
+    maxTokens: settings.chatModel.maxTokens,
+    label: "LLM Request (stream)",
+  });
+
+  // ── Tool Capability Detection ─────────────────────────────────────────
+  // Some models (deepseek-r1, gemma3, phi4, etc.) don't support tool calling.
+  // Detect this and fall back to plain chat mode gracefully.
+  //
+  // PM #17 — Before the audit, the OpenRouter branch only checked for
+  // `deepseek-r1` while the Ollama branch consulted the broader pattern
+  // list. A user picking `google/gemma-4-31b-it` via OpenRouter got 63
+  // tools forwarded → 404 from OpenRouter → agent died silently after MoA
+  // had already succeeded. The shared `modelSupportsTools` helper
+  // (`@/lib/providers/tool-support`) is now the single source of truth for
+  // every non-Ollama provider; the Ollama branch keeps its live `/api/show`
+  // probe and falls back to the same helper on probe failure.
+  const isOllamaProvider = resolvedModelConfig.provider === "ollama";
+
+  let supportsTools: boolean;
+  if (isOllamaProvider) {
+    let detectedFromTemplate: boolean | null = null;
+    try {
+      const ollamaBase = (resolvedModelConfig.baseUrl || "http://localhost:11434").replace(/\/v1\/?$/, "");
+      const showRes = await fetch(`${ollamaBase}/api/show`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: resolvedModelConfig.model }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (showRes.ok) {
+        const showData = await showRes.json() as { template?: string };
+        const template = showData.template || "";
+        detectedFromTemplate = template.toLowerCase().includes("tools") || template.includes(".Tools");
+      }
+    } catch {
+      // probe failed — fall through to the shared pattern list below.
+    }
+    supportsTools = detectedFromTemplate ?? modelSupportsTools(
+      resolvedModelConfig.provider,
+      resolvedModelConfig.model ?? ""
+    );
+  } else {
+    supportsTools = modelSupportsTools(
+      resolvedModelConfig.provider,
+      resolvedModelConfig.model ?? ""
+    );
+  }
+
+  // Apply tool mode decision
+  const useTools = supportsTools;
+  const effectiveTools = useTools ? tools : {};
+
+  if (!useTools) {
+    console.log(`[Agent] ⚠ Model "${resolvedModelConfig.model}" does not support tools → running in plain chat mode`);
+  } else {
+    console.log(`[Agent] Tools enabled: ${Object.keys(tools).length} tools registered`);
+  }
+
+  try {
+    // Run the agent with streaming
+    const result = streamText({
+    model,
+    system: systemPrompt,
+    messages,
+    providerOptions,
+    tools: effectiveTools,
+    maxRetries: 3,
+    ...(useTools
+      ? { 
+          maxSteps: MAX_TOOL_STEPS_PER_TURN,
+          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")] 
+        }
+      : {}),
+    temperature: settings.chatModel.temperature ?? 0.7,
+    maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    abortSignal: options.abortSignal,
+    onFinish: async (event) => {
+      // ── Guaranteed DAG completion — even if this callback itself throws ──
+      // This is the single source of truth for "agent turn done". All paths
+      // (normal finish, tool-call finish, length truncation) converge here.
+      let dagFinalized = false;
+      const finalizeDag = (status: "completed" | "error") => {
+        if (dagFinalized) return;
+        dagFinalized = true;
+        publishOrchestratorFinished(
+          options.chatId,
+          options.projectId,
+          status,
+          status === "completed" ? "agent_turn_finished" : "agent_turn_error"
+        );
+        publishUiSyncEvent({
+          topic: "files",
+          projectId: options.projectId ?? null,
+          reason: "agent_turn_finished",
+        });
+      };
+
+      try {
+        const finishReason =
+          typeof (event as unknown as { finishReason?: unknown }).finishReason === "string"
+            ? ((event as unknown as { finishReason?: string }).finishReason as string)
+            : undefined;
+
+        const responseMessages = event.response.messages;
+        const lastAssistantText = getLastAssistantText(responseMessages);
+        let continuationText = "";
+
+        if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
+          try {
+            const continuation = await generateText({
+              model,
+              system: systemPrompt,
+              messages: mergeConsecutiveSameRole([
+                ...messages,
+                ...responseMessages,
+                {
+                  role: "user",
+                  content:
+                    "Continue your previous answer from exactly where it stopped. " +
+                    "Output only the continuation text, without repeating earlier content.",
+                },
+              ]),
+              providerOptions,
+              temperature: settings.chatModel.temperature ?? 0.7,
+              maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
+              abortSignal: options.abortSignal,
+            });
+            continuationText = (continuation.text || "").trim();
+          } catch (error) {
+            console.warn("Auto-continuation failed:", error);
+          }
+        }
+
+        if (mcpCleanup) {
+          try { await mcpCleanup(); } catch { /* non-critical */ }
+        }
+
+        try {
+          await updateChat(options.chatId, (chat) => {
+            const now = new Date().toISOString();
+            for (const msg of responseMessages) {
+              chat.messages.push(...convertModelMessageToChatMessages(msg, now));
+            }
+            if (continuationText) {
+              chat.messages.push({
+                id: crypto.randomUUID(),
+                role: "assistant",
+                content: stripThinkingTags(continuationText),
+                createdAt: now,
+              });
+            }
+            chat.updatedAt = now;
+            const userMessageCount = chat.messages.filter(m => m.role === "user").length;
+            if (userMessageCount === 1 && chat.title === "New Chat") {
+              chat.title =
+                options.userMessage.slice(0, 60) +
+                (options.userMessage.length > 60 ? "..." : "");
+            }
+            return chat;
+          });
+        } catch (saveErr) {
+          console.error("[Agent] Failed to save chat after turn:", saveErr);
+          // Non-critical: don't block DAG finalization
+        }
+
+        finalizeDag("completed");
+      } catch (onFinishErr) {
+        // onFinish itself crashed — still must finalize the DAG
+        console.error("[Agent] onFinish error:", onFinishErr);
+        finalizeDag("error");
+      }
+    },
+    onError: ({ error }) => {
+      // Called when the stream itself errors (network cut, provider timeout, etc.)
+      // This fires even when SSE disconnects mid-stream, so we guarantee DAG cleanup.
+      //
+      // PM #17 / Sprint 3 — this is the path that previously left the user
+      // staring at a blank chat pane. The Vercel SDK's `streamText` swallowed
+      // the upstream 404 (no endpoints support tool use) into the stream
+      // and the frontend never rendered anything. Now we ALSO publish a
+      // structured `chat-error` event so the UI knows what happened.
+      const payload = classifyChatError(error, getCurrentTraceId());
+      log.error("agent_stream_error", {
+        chatId: options.chatId,
+        projectId: options.projectId,
+        kind: payload.kind,
+        message: payload.message,
+        err: error instanceof Error ? error : new Error(String(error)),
+      });
+      publishChatErrorEvent({
+        chatId: options.chatId,
+        projectId: options.projectId,
+        payload,
+      });
+      // Sprint 5 — durable forensic snapshot. Best-effort, never throws.
+      // The .catch is belt-and-braces around a function whose own contract
+      // already guarantees no-throw; we keep it so a regression in the
+      // contract can't poison the SSE stream's onError path.
+      const traceId = getCurrentTraceId();
+      if (traceId) {
+        void dumpPostmortem({
+          traceId,
+          chatId: options.chatId,
+          projectId: options.projectId,
+          request: {
+            userMessage: options.userMessage,
+            swarmEnabled: options.swarmEnabled !== false,
+            preset: options.preset,
+            currentPath: options.currentPath,
+          },
+          settings,
+          errorClassification: payload,
+          err: error,
+        }).catch(() => undefined);
+      }
+      publishOrchestratorFinished(
+        options.chatId,
+        options.projectId,
+        "error",
+        "agent_stream_error"
+      );
+      publishUiSyncEvent({
+        topic: "files",
+        projectId: options.projectId ?? null,
+        reason: "agent_turn_finished",
+      });
+    },
+  });
+
+  return result;
+
+  } catch (error) {
+    // PM #17 / Sprint 3 — same surface contract as the `onError` path above:
+    // (1) structured log line carrying the trace-id, (2) structured chat
+    // error event so the UI shows something actionable, (3) DAG cleanup,
+    // (4) re-throw so the route handler can return a non-200.
+    const payload = classifyChatError(error, getCurrentTraceId());
+    log.error("agent_fatal_error", {
+      chatId: options.chatId,
+      projectId: options.projectId,
+      kind: payload.kind,
+      message: payload.message,
+      err: error instanceof Error ? error : new Error(String(error)),
+    });
+    publishChatErrorEvent({
+      chatId: options.chatId,
+      projectId: options.projectId,
+      payload,
+    });
+    // Sprint 5 — durable forensic snapshot for the fatal-catch path.
+    // Awaited (not fire-and-forget) here because we're inside a regular
+    // try/catch and the `await` cannot prevent the rethrow below.
+    const fatalTraceId = getCurrentTraceId();
+    if (fatalTraceId) {
+      try {
+        await dumpPostmortem({
+          traceId: fatalTraceId,
+          chatId: options.chatId,
+          projectId: options.projectId,
+          request: {
+            userMessage: options.userMessage,
+            swarmEnabled: options.swarmEnabled !== false,
+            preset: options.preset,
+            currentPath: options.currentPath,
+          },
+          settings,
+          errorClassification: payload,
+          err: error,
+        });
+      } catch {
+        // dumpPostmortem already swallows internally; this catch is the
+        // outer belt-and-braces against a future regression of that
+        // contract.
+      }
+    }
+
+    if (mcpCleanup) {
+      try { await mcpCleanup(); } catch { /* non-critical */ }
+    }
+
+    if (options.swarmEnabled !== false) {
+      publishUiSyncEvent({
+        topic: "chat",
+        chatId: options.chatId,
+        nodeType: "agent_node",
+        swarmNode: {
+          nodeId: options.chatId,
+          role: "orchestrator",
+          status: "error",
+          taskSummary: `Fatal error: ${error instanceof Error ? error.message : String(error)}`,
+          completedAt: new Date().toISOString(),
+        },
+      });
+    }
+
+    throw error;
+  }
+}
+
+/**
+ * Non-streaming agent turn for background tasks (cron/scheduler).
+ */
+export async function runAgentText(options: {
+  chatId: string;
+  userMessage: string;
+  projectId?: string;
+  currentPath?: string;
+  agentNumber?: number;
+  runtimeData?: Record<string, unknown>;
+}): Promise<string> {
+  const settings = await getSettings();
+  const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
+  const model = createModel(settings.chatModel, {
+    projectId: options.projectId,
+    currentPath: options.currentPath,
+  });
+
+  const workDir = await resolveWorkDirForProject(options.projectId);
+  const context: AgentContext = {
+    chatId: options.chatId,
+    projectId: options.projectId,
+    currentPath: options.currentPath,
+    workDir,
+    memorySubdir: options.projectId ? `${options.projectId}` : "main",
+    knowledgeSubdirs: options.projectId ? [`${options.projectId}`, "main"] : ["main"],
+    history: [],
+    agentNumber: options.agentNumber ?? 0,
+    data: {
+      ...(options.runtimeData ?? {}),
+      currentUserMessage: options.userMessage,
+    },
+  };
+
+  const chat = await getChat(options.chatId);
+  if (chat) {
+    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const history = new History(80);
+    history.addMany(allMessages);
+    context.history = history.getAll();
+  }
+
+  const baseTools = createAgentTools(context, settings);
+  let mcpCleanup: (() => Promise<void>) | undefined;
+  let tools = baseTools;
+  if (options.projectId) {
+    const mcp = await getProjectMcpTools(options.projectId);
+    if (mcp) {
+      tools = { ...baseTools, ...mcp.tools };
+      mcpCleanup = mcp.cleanup;
+    }
+  }
+  tools = applyGlobalToolLoopGuard(tools);
+  const toolNames = Object.keys(tools);
+
+  const systemPrompt = await buildSystemPrompt({
+    projectId: options.projectId,
+    chatId: options.chatId,
+    agentNumber: options.agentNumber,
+    tools: toolNames,
+  });
+
+  const messages: ModelMessage[] = mergeConsecutiveSameRole([
+    ...context.history,
+    { role: "user", content: options.userMessage },
+  ]);
+
+  logLLMRequest({
+    model: `${settings.chatModel.provider}/${settings.chatModel.model}`,
+    system: systemPrompt,
+    messages,
+    toolNames,
+    temperature: settings.chatModel.temperature,
+    maxTokens: settings.chatModel.maxTokens,
+    label: "LLM Request (non-stream)",
+  });
+
+  try {
+    const generated = await generateText({
+      model,
+      system: systemPrompt,
+      messages,
+      providerOptions,
+      tools,
+      maxRetries: 3,
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
+      temperature: settings.chatModel.temperature ?? 0.7,
+      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    });
+
+    const responseMessages = (
+      generated as unknown as { response?: { messages?: ModelMessage[] } }
+    ).response?.messages;
+
+    const text = generated.text ?? "";
+    const fallbackReply =
+      Array.isArray(responseMessages) && responseMessages.length > 0
+        ? getLastResponseToolText(responseMessages) || getLastAssistantText(responseMessages)
+        : "";
+    const finalText = text.trim() ? text : fallbackReply;
+
+    try {
+      await updateChat(options.chatId, (latest) => {
+        const now = new Date().toISOString();
+        latest.messages.push({
+          id: crypto.randomUUID(),
+          role: "user",
+          content: options.userMessage,
+          createdAt: now,
+        });
+
+        if (Array.isArray(responseMessages) && responseMessages.length > 0) {
+          for (const msg of responseMessages) {
+            latest.messages.push(...convertModelMessageToChatMessages(msg, now));
+          }
+        } else {
+          latest.messages.push({
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: stripThinkingTags(finalText),
+            createdAt: now,
+          });
+        }
+
+        latest.updatedAt = now;
+        return latest;
+      });
+    } catch {
+      // Non-critical for background runs.
+    }
+
+    publishUiSyncEvent({
+      topic: "files",
+      projectId: options.projectId ?? null,
+      reason: "agent_turn_finished",
+    });
+
+    return finalText;
+  } finally {
+    if (mcpCleanup) {
+      try {
+        await mcpCleanup();
+      } catch {
+        // non-critical
+      }
+    }
+  }
+}
+
+/**
+ * Run agent for subordinate delegation (non-streaming, returns result)
+ */
+export async function runSubordinateAgent(options: {
+  task: string;
+  projectId?: string;
+  parentAgentNumber: number;
+  parentHistory: ModelMessage[];
+}): Promise<string> {
+  const settings = await getSettings();
+  const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
+  const model = createModel(settings.chatModel, {
+    projectId: options.projectId,
+  });
+
+  const workDir = await resolveWorkDirForProject(options.projectId);
+  const context: AgentContext = {
+    chatId: `subordinate-${Date.now()}`,
+    projectId: options.projectId,
+    workDir,
+    memorySubdir: options.projectId
+      ? `projects/${options.projectId}`
+      : "main",
+    knowledgeSubdirs: options.projectId
+      ? [`projects/${options.projectId}`, "main"]
+      : ["main"],
+    history: [],
+    agentNumber: options.parentAgentNumber + 1,
+    data: {},
+  };
+
+  let tools = createAgentTools(context, settings);
+  let mcpCleanupSub: (() => Promise<void>) | undefined;
+  if (options.projectId) {
+    const mcp = await getProjectMcpTools(options.projectId);
+    if (mcp) {
+      tools = { ...tools, ...mcp.tools };
+      mcpCleanupSub = mcp.cleanup;
+    }
+  }
+  tools = applyGlobalToolLoopGuard(tools);
+  const toolNames = Object.keys(tools);
+
+  const systemPrompt = await buildSystemPrompt({
+    projectId: options.projectId,
+    agentNumber: context.agentNumber,
+    tools: toolNames,
+  });
+
+  // Include relevant parent history for context
+  const relevantHistory = options.parentHistory.slice(-6);
+
+  const messages: ModelMessage[] = mergeConsecutiveSameRole([
+    ...relevantHistory,
+    {
+      role: "user",
+      content: `You are a subordinate agent. Complete this task and report back:\n\n${options.task}`,
+    },
+  ]);
+
+  logLLMRequest({
+    model: `${settings.chatModel.provider}/${settings.chatModel.model}`,
+    system: systemPrompt,
+    messages,
+    toolNames,
+    temperature: settings.chatModel.temperature,
+    maxTokens: settings.chatModel.maxTokens,
+    label: "LLM Request (subordinate)",
+  });
+
+  try {
+    const result = await generateText({
+      model,
+      system: systemPrompt,
+      messages,
+      providerOptions,
+      tools,
+      maxRetries: 3,
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
+      temperature: settings.chatModel.temperature ?? 0.7,
+      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    });
+    const responseMessages = (
+      result as unknown as { response?: { messages?: ModelMessage[] } }
+    ).response?.messages;
+
+    const responseText = (Array.isArray(responseMessages) && responseMessages.length > 0)
+      ? getLastResponseToolText(responseMessages) || result.text
+      : result.text;
+
+    return responseText.trim() || "Subordinate agent finished but returned no text.";
+  } finally {
+    if (mcpCleanupSub) {
+      try {
+        await mcpCleanupSub();
+      } catch {
+        // non-critical
+      }
+    }
+  }
+}

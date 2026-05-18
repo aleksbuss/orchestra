@@ -71,7 +71,7 @@ describe("Goal Store", () => {
   it("saveGoal should throw if chatId is missing", async () => {
     const { saveGoal } = await import("@/lib/storage/goal-store");
     const badGoal = makeGoal("will-be-removed");
-    (badGoal as Record<string, unknown>).chatId = "";
+    (badGoal as unknown as Record<string, unknown>).chatId = "";
 
     await expect(saveGoal(badGoal)).rejects.toThrow("Cannot save goal without a chatId");
   });

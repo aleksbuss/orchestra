@@ -359,10 +359,10 @@ function explainAddInputFailure(source: UnknownRecord): string {
   }
 
   problems.push(
-    "Example: {\"action\":\"add\",\"delaySeconds\":30,\"message\":\"Отправь пользователю: привет\"}"
+    "Example: {\"action\":\"add\",\"delaySeconds\":30,\"message\":\"Send to the user: hello\"}"
   );
   problems.push(
-    "Recurring example: {\"action\":\"add\",\"schedule\":{\"kind\":\"every\",\"everyMs\":30000},\"payload\":{\"kind\":\"agentTurn\",\"message\":\"Отправь пользователю: привет\"}}"
+    "Recurring example: {\"action\":\"add\",\"schedule\":{\"kind\":\"every\",\"everyMs\":30000},\"payload\":{\"kind\":\"agentTurn\",\"message\":\"Send to the user: hello\"}}"
   );
   return problems.join(" ");
 }

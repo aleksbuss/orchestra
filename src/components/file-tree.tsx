@@ -10,6 +10,8 @@ import {
   FileCode,
   File,
   Download,
+  FileArchive,
+  Loader2,
 } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
 import { cn } from "@/lib/utils";
@@ -232,10 +234,58 @@ interface FileTreeProps {
 export function FileTree({ projectId }: FileTreeProps) {
   const { currentPath, setCurrentPath } = useAppStore();
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
+  const [exporting, setExporting] = useState(false);
   const refreshToken = useBackgroundSync({
     topics: ["files", "projects", "global"],
     projectId: projectId === "none" ? null : projectId,
   });
+
+  // Disabled for the "no project" sandbox view — the export endpoint
+  // requires a real project id. The button is hidden in that case.
+  const canExport = projectId !== "none" && Boolean(projectId);
+
+  const handleDownloadZip = useCallback(async () => {
+    if (!canExport || exporting) return;
+    setExporting(true);
+    try {
+      const response = await fetch(`/api/projects/${projectId}/export`);
+      if (!response.ok) {
+        const message = await response
+          .json()
+          .then((b) => b?.error)
+          .catch(() => null);
+        throw new Error(message || `Export failed (HTTP ${response.status})`);
+      }
+      // Extract the server-suggested filename from Content-Disposition;
+      // fall back to a synthetic name if the header is missing or malformed.
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const filename = match?.[1] ?? `${projectId}-export.zip`;
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      // Free the object URL on the next animation frame — Safari occasionally
+      // races with the download initiation if you revoke synchronously.
+      requestAnimationFrame(() => URL.revokeObjectURL(url));
+    } catch (err) {
+      console.error("Project export failed:", err);
+      // No toast layer here yet — surface via alert as a last resort so the
+      // user knows the click didn't silently fail.
+      window.alert(
+        err instanceof Error
+          ? err.message
+          : "Could not export project."
+      );
+    } finally {
+      setExporting(false);
+    }
+  }, [canExport, exporting, projectId]);
 
   useEffect(() => {
     setRootEntries(null);
@@ -262,17 +312,44 @@ export function FileTree({ projectId }: FileTreeProps) {
 
   return (
     <div className="text-xs">
-      {/* Project root button */}
-      <button
-        onClick={() => setCurrentPath("")}
+      {/* Project root row — navigation button + optional "download all" action */}
+      <div
         className={cn(
-          "flex items-center gap-1 w-full text-left text-xs py-1 px-1 rounded-sm hover:bg-accent/50 transition-colors",
+          "flex items-center w-full text-xs py-1 px-1 rounded-sm hover:bg-accent/50 transition-colors group/root",
           currentPath === "" && "bg-accent text-accent-foreground font-medium"
         )}
       >
-        <FolderOpen className="size-3.5 shrink-0 text-blue-500" />
-        <span className="truncate font-medium">/</span>
-      </button>
+        <button
+          type="button"
+          onClick={() => setCurrentPath("")}
+          className="flex items-center gap-1 flex-1 text-left min-w-0"
+          aria-label="Project root"
+        >
+          <FolderOpen className="size-3.5 shrink-0 text-blue-500" />
+          <span className="truncate font-medium">/</span>
+        </button>
+        {canExport && (
+          <button
+            type="button"
+            onClick={handleDownloadZip}
+            disabled={exporting}
+            title="Download entire project as ZIP"
+            aria-label="Download entire project as ZIP"
+            className={cn(
+              "shrink-0 inline-flex items-center justify-center size-5 rounded",
+              "text-muted-foreground hover:text-foreground hover:bg-accent",
+              "transition-colors disabled:opacity-50 disabled:cursor-wait",
+              "opacity-0 group-hover/root:opacity-100 focus-visible:opacity-100"
+            )}
+          >
+            {exporting ? (
+              <Loader2 className="size-3 animate-spin" />
+            ) : (
+              <FileArchive className="size-3" />
+            )}
+          </button>
+        )}
+      </div>
 
       {rootEntries === null ? (
         <span className="text-[10px] text-muted-foreground block pl-4 py-1">

@@ -438,7 +438,7 @@ All 4 tests passing as of 2026-05-03.
 
 ## 5. SSE Stream Persisted, UI Showed Empty Response
 **Date:** 2026-05
-**Status:** RESOLVED (regression test pending — see Regression Coverage)
+**Status:** RESOLVED
 **Severity:** P1
 **Symptoms:** A long-running generation (translation request) completed end-to-end on the backend. `data/chats/<chatId>.json` contained the full assistant message with valid JSON, no pending tool parts, no zombie state. The user observed text starting to stream and then vanishing; the chat appeared frozen. Reloading the tab restored the message.
 **Root Cause:** `src/hooks/use-background-sync.ts` maintained a single shared `EventSource` per tab with no `onerror` recovery and no resync on reconnect. When the browser tab was backgrounded (laptop sleep, OS network drop, tab discard, Wi-Fi switch) the SSE connection silently dropped. On return (`visibilitychange === "visible"`) the hook bumped subscribers, but if the EventSource was in `CLOSED` state it was never re-created, and `publishUiSyncEvent` calls emitted during the gap were lost forever — the bus is fire-and-forget, with no replay. Backend state was correct (the JSON file on disk is the source of truth); the frontend snapshot was stale.
@@ -448,7 +448,11 @@ All 4 tests passing as of 2026-05-03.
 2. `visibilitychange === "visible"` and `window.focus` now call `ensureSharedEventSource()`, which is idempotent on healthy connections and forces a fresh socket if the previous one was dropped.
 3. On every `ready` event from the server (initial connect or post-reconnect), the hook broadcasts a synthetic `{ topic: "global", reason: "reconnect-resync" }` event to all subscribers. This bumps `syncTick` in `useBackgroundSync`, which `chat-panel.tsx:365` already listens to and refetches `GET /api/chat/history?id=<chatId>` from. Reconciliation is last-write-wins against the canonical on-disk store — safe because backend writes go through `safeWriteFile`.
 4. Removed the 30s `setInterval(bump)` polling fallback that was masking the real bug. Critical Rule §2 in `CLAUDE.md` is once again the single source of truth ("no `setInterval` polling on the frontend").
-**Regression Coverage:** none yet — TODO. Required Playwright scenario: start a long generation, programmatically trigger `visibilitychange === "hidden"` then `"visible"` mid-stream (or `offline`/`online`), assert final message renders without page reload.
+**Regression Coverage:** Two layers:
+- **Unit (happy-dom)** — [`src/hooks/use-background-sync.dom.test.tsx`](src/hooks/use-background-sync.dom.test.tsx). 9 tests pin every branch of the fix: single shared EventSource, server `ready` → broadcast → tick bump on ALL subscribers (regardless of topic scope — Defect #1), regular sync events still respect scope, `visibilitychange === "visible"` forces immediate reconnect + tick bump, `window.focus` does the same, CLOSED EventSource on visibility return → fresh connection, `onerror` doesn't crash the React tree, chat-panel scope receives the global resync (the actual user-visible bug).
+- **Browser smoke (Playwright)** — [`tests/e2e/pm-5-visibility-resync.spec.ts`](tests/e2e/pm-5-visibility-resync.spec.ts). 4 tests verify the browser-level primitives the fix depends on: `EventSource` constructor present in Chromium, `visibilitychange` + `focus` events dispatchable without breaking the page, `/api/events` correctly rejects anonymous requests (401), and a real `EventSource` against a rejected endpoint doesn't explode the React tree.
+
+Not yet covered: the full end-to-end "long generation + mid-stream visibility toggle + assert final message renders" scenario. That requires either a real LLM call (slow/flaky/costly) or a deterministic mock-LLM streaming over a known duration (test-only API route — production code change). Deferred until LLM mocking infrastructure lands separately.
 **Doc Updates:** `CLAUDE.md` → "🔄 Realtime & Frontend Resilience Contract" (target items moved to "Already implemented"); Critical Rule §2 simplified back to no-exception form.
 **Rule:** SSE reconnect without state resync is not reconnect. After any connection gap, always reconcile against the canonical store — never trust that the bus replayed missed events.
 

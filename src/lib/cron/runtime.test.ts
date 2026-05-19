@@ -28,6 +28,7 @@ vi.mock("@/lib/cron/service", () => ({
     start: vi.fn(),
     stop: vi.fn(),
   })),
+  recoverStaleCronRunMarkers: vi.fn(),
 }));
 
 vi.mock("@/lib/storage/queue-store", () => ({
@@ -42,7 +43,7 @@ vi.mock("@/lib/agent/ghost-sweeper", () => ({
   sweepGhostTasks: vi.fn(),
 }));
 
-import { CronScheduler } from "@/lib/cron/service";
+import { CronScheduler, recoverStaleCronRunMarkers } from "@/lib/cron/service";
 import { getPendingJobs } from "@/lib/storage/queue-store";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
 import { sweepGhostTasks } from "@/lib/agent/ghost-sweeper";
@@ -51,6 +52,7 @@ const mockedScheduler = vi.mocked(CronScheduler);
 const mockedPending = vi.mocked(getPendingJobs);
 const mockedDispatch = vi.mocked(dispatchAgentJob);
 const mockedSweep = vi.mocked(sweepGhostTasks);
+const mockedRecover = vi.mocked(recoverStaleCronRunMarkers);
 
 let processOnceSpy: any;
 
@@ -66,6 +68,7 @@ beforeEach(() => {
   mockedPending.mockResolvedValue([]);
   mockedDispatch.mockResolvedValue(undefined as any);
   mockedSweep.mockResolvedValue(undefined as any);
+  mockedRecover.mockResolvedValue({ scannedProjects: 0, clearedJobs: 0 });
 });
 
 afterEach(() => {
@@ -129,6 +132,31 @@ describe("ensureCronSchedulerStarted — first boot", () => {
     await ensureCronSchedulerStarted();
     await new Promise((r) => setImmediate(r));
     expect(mockedSweep).toHaveBeenCalledOnce();
+  });
+
+  it("clears stale cron runningAtMs markers via recoverStaleCronRunMarkers", async () => {
+    // Boot recovery for the STUCK_RUN_MS blind spot — jobs from a previous
+    // (crashed) process should have their `runningAtMs` cleared so the UI
+    // doesn't show them as "running" for 2 hours until the inline sanitizer
+    // catches up.
+    mockedRecover.mockResolvedValue({ scannedProjects: 2, clearedJobs: 3 });
+    const { ensureCronSchedulerStarted } = await freshImport();
+    await ensureCronSchedulerStarted();
+    await new Promise((r) => setImmediate(r));
+    expect(mockedRecover).toHaveBeenCalledOnce();
+  });
+
+  it("scheduler still starts when recoverStaleCronRunMarkers throws", async () => {
+    // The recovery is fire-and-forget; a failure must NOT prevent the
+    // scheduler from booting (worst case the 2-hour sanitizer cleans up).
+    mockedRecover.mockRejectedValue(new Error("disk full"));
+    const { ensureCronSchedulerStarted } = await freshImport();
+    await ensureCronSchedulerStarted();
+    expect(mockedScheduler).toHaveBeenCalledTimes(1);
+    const instance = mockedScheduler.mock.results[0].value as {
+      start: ReturnType<typeof vi.fn>;
+    };
+    expect(instance.start).toHaveBeenCalledOnce();
   });
 
   it("skips ghost-sweeper when recovery was aborted before .finally()", async () => {

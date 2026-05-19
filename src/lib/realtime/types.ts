@@ -34,7 +34,48 @@ export type ChatErrorKind =
   | "upstream_4xx"
   | "upstream_5xx"
   | "abort"
-  | "internal";
+  | "internal"
+  /**
+   * Auto-recovery: the configured chat model was unavailable (404 / deprecated /
+   * tool-incompatible) and the agent automatically switched to a fallback. The
+   * UI should render this as an INFO toast, not an error — the chat turn
+   * succeeded. The payload's `modelFallback` field carries the details.
+   */
+  | "model_fallback";
+
+/**
+ * Details of an automatic model fallback event. Attached to a `model_fallback`
+ * chat error so the UI can render a focused "we switched providers" toast
+ * rather than the generic upstream-error banner.
+ *
+ * Pricing is informational only — if the fallback model has a different cost,
+ * we surface it so the user knows their next invoice may differ. We do NOT
+ * compute or track actual costs here; that's a separate billing surface.
+ */
+export interface ModelFallbackDetails {
+  originalModel: string;
+  newModel: string;
+  /** Which provider both models belong to (e.g. "openrouter"). */
+  provider: string;
+  /**
+   * Where the replacement came from:
+   *   - `openrouter_catalog` — queried OpenRouter `/models` and picked the
+   *     cheapest tool-capable entry.
+   *   - `static_chain` — hardcoded fallback chain for providers that don't
+   *     expose pricing via API (OpenAI, Anthropic, Google).
+   *   - `ollama_local` — picked from locally-installed Ollama models.
+   */
+  source: "openrouter_catalog" | "static_chain" | "ollama_local";
+  /** Best-effort pricing for the new model, when available. */
+  pricing?: {
+    promptUsdPerMillion?: number;
+    completionUsdPerMillion?: number;
+    /** True if the new model is free-tier (e.g. OpenRouter `:free` variant). */
+    isFree?: boolean;
+  };
+  /** Why the original model failed. Surfaced in the UI as context. */
+  reason: "model_not_found" | "no_tool_support" | "unknown_4xx";
+}
 
 export interface ChatErrorPayload {
   /** Server-side trace id — copy/pasteable into logs for postmortem grep. */
@@ -46,6 +87,8 @@ export interface ChatErrorPayload {
   hint?: string;
   /** True if the agent might succeed on retry (e.g., transient 5xx). */
   recoverable: boolean;
+  /** Set when `kind === "model_fallback"`. */
+  modelFallback?: ModelFallbackDetails;
 }
 
 export interface UiSyncEvent {

@@ -55,6 +55,16 @@ describe("styleForKind — color semantics", () => {
   it("slate (muted) for abort — user-initiated, not a system error", () => {
     expect(styleForKind("abort").container).toContain("slate");
   });
+
+  it("emerald for model_fallback — system recovered, not an error", () => {
+    // The agent auto-switched models on a deprecated/unavailable model.
+    // It's a notification, not an alarm — emerald reads as "all good,
+    // here's what changed" rather than amber's "something's off".
+    const style = styleForKind("model_fallback");
+    expect(style.container).toContain("emerald");
+    expect(style.label).toMatch(/switched/i);
+    expect(style.label).not.toMatch(/error|failed/i);
+  });
 });
 
 describe("styleForKind — forward-compat default branch", () => {

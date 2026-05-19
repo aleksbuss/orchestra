@@ -16,7 +16,7 @@
  * toast pattern that already lives here. A future second consumer would
  * be a fine reason to promote it to `components/ui/` later.
  */
-import { AlertTriangle, Copy, X } from "lucide-react";
+import { AlertTriangle, Copy, X, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import type {
   ChatErrorKind,
@@ -41,6 +41,15 @@ interface BannerStyle {
  */
 export function styleForKind(kind: ChatErrorKind): BannerStyle {
   switch (kind) {
+    case "model_fallback":
+      // INFO-level, not error. The agent already auto-switched models;
+      // user just needs to know. Emerald to read as "system recovered"
+      // rather than "something broke".
+      return {
+        container: "bg-emerald-500/10 border-emerald-500/20 text-emerald-200",
+        icon: "text-emerald-400",
+        label: "Switched model",
+      };
     case "upstream_no_tools":
       // Actionable — user MUST switch model. Amber draws attention without
       // alarming as much as red, since the system isn't broken, just
@@ -115,7 +124,11 @@ export function ChatErrorBanner({ error, onDismiss }: ChatErrorBannerProps) {
     >
       <div className={`flex items-start gap-3 rounded-xl border px-4 py-2.5 ${style.container}`}>
         <div className="flex items-center justify-center size-7 rounded-full bg-current/10 shrink-0 mt-0.5">
-          <AlertTriangle className={`size-3.5 ${style.icon}`} />
+          {error.kind === "model_fallback" ? (
+            <RefreshCw className={`size-3.5 ${style.icon}`} />
+          ) : (
+            <AlertTriangle className={`size-3.5 ${style.icon}`} />
+          )}
         </div>
 
         <div className="flex-1 min-w-0">

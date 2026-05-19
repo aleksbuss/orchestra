@@ -236,6 +236,43 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
   return computeNextCronRunAtMs(expr, nowMs, schedule.tz);
 }
 
+/**
+ * Format an instant as a "YYYY-MM-DD HH:MM" local-time bucket in the
+ * supplied timezone. Used for DST fall-back dedup — see CronJobState.
+ * lastFireLocalBucket for the full rationale.
+ *
+ * Bucket granularity matches cron's minute resolution. Two UTC instants
+ * that map to the same local wall-clock minute (DST fall-back) produce
+ * the same bucket; two distinct local minutes always produce different
+ * buckets.
+ */
+export function formatLocalCronBucket(ms: number, tz?: string): string {
+  const timezone = resolveCronTimezone(tz);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    hour12: false,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const parts = formatter.formatToParts(new Date(ms));
+  let year = "0000";
+  let month = "00";
+  let day = "00";
+  let hour = "00";
+  let minute = "00";
+  for (const part of parts) {
+    if (part.type === "year") year = part.value;
+    if (part.type === "month") month = part.value;
+    if (part.type === "day") day = part.value;
+    if (part.type === "hour") hour = part.value === "24" ? "00" : part.value;
+    if (part.type === "minute") minute = part.value;
+  }
+  return `${year}-${month}-${day} ${hour}:${minute}`;
+}
+
 export function validateCronExpression(expr: string): string | null {
   if (!expr.trim()) {
     return "Cron expression is required.";

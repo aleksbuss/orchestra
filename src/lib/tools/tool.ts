@@ -43,6 +43,12 @@ import {
 import { saveGoal, updateGoal } from "@/lib/storage/goal-store";
 import { snapshotBeforeWrite } from "@/lib/storage/snapshots";
 import type { GoalTaskStatus } from "@/lib/types";
+import {
+  inferLanguageFromPath,
+  parseLocalMarkdownLinks,
+  parseRequiredSkillResourceLinks,
+  slugifyProjectId,
+} from "@/lib/tools/text-helpers";
 
 const SKILL_RESOURCE_LIST_LIMIT = 60;
 const SKILL_RESOURCE_READ_MAX_CHARS = 24000;
@@ -215,16 +221,6 @@ function normalizeContextPathForOutput(rawPath: string | null | undefined): stri
   return normalized === "." ? "" : normalized;
 }
 
-function slugifyProjectId(value: string): string {
-  return (
-    value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "") || crypto.randomUUID().slice(0, 8)
-  );
-}
-
 async function allocateProjectId(baseId: string): Promise<string> {
   const normalizedBase = slugifyProjectId(baseId);
   let candidate = normalizedBase;
@@ -234,84 +230,6 @@ async function allocateProjectId(baseId: string): Promise<string> {
     counter += 1;
   }
   return candidate;
-}
-
-function parseLocalMarkdownLinks(markdown: string): string[] {
-  const result: string[] = [];
-  const seen = new Set<string>();
-  const regex = /!?\[[^\]]*\]\(([^)]+)\)/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(markdown)) !== null) {
-    const cleaned = normalizeLocalMarkdownLinkTarget(match[1] ?? "");
-    if (!cleaned || seen.has(cleaned)) continue;
-    seen.add(cleaned);
-    result.push(cleaned);
-  }
-
-  return result;
-}
-
-function normalizeLocalMarkdownLinkTarget(rawTarget: string): string | null {
-  const trimmed = rawTarget.trim();
-  if (!trimmed) return null;
-
-  let target = trimmed;
-  if (target.startsWith("<") && target.endsWith(">")) {
-    target = target.slice(1, -1).trim();
-  }
-
-  const spaceQuoteIdx = target.search(/\s+["']/);
-  if (spaceQuoteIdx >= 0) {
-    target = target.slice(0, spaceQuoteIdx).trim();
-  }
-
-  const lower = target.toLowerCase();
-  if (
-    lower.startsWith("http://") ||
-    lower.startsWith("https://") ||
-    lower.startsWith("mailto:") ||
-    lower.startsWith("#")
-  ) {
-    return null;
-  }
-
-  const cleaned = target.split("#")[0].split("?")[0].trim();
-  return cleaned || null;
-}
-
-function parseRequiredSkillResourceLinks(markdown: string): string[] {
-  // Contract: every local markdown link in SKILL.md is treated as required context.
-  return parseLocalMarkdownLinks(markdown);
-}
-
-function inferLanguageFromPath(filePath: string): string {
-  const ext = path.extname(filePath).toLowerCase();
-  switch (ext) {
-    case ".md":
-      return "markdown";
-    case ".json":
-      return "json";
-    case ".ts":
-      return "typescript";
-    case ".tsx":
-      return "tsx";
-    case ".js":
-      return "javascript";
-    case ".jsx":
-      return "jsx";
-    case ".py":
-      return "python";
-    case ".sh":
-      return "bash";
-    case ".yml":
-    case ".yaml":
-      return "yaml";
-    case ".sql":
-      return "sql";
-    default:
-      return "text";
-  }
 }
 
 async function resolveSkillLocalFile(

@@ -1,4 +1,4 @@
-import { CronScheduler } from "@/lib/cron/service";
+import { CronScheduler, recoverStaleCronRunMarkers } from "@/lib/cron/service";
 import { sweepGhostTasks } from "@/lib/agent/ghost-sweeper";
 import { getPendingJobs } from "@/lib/storage/queue-store";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
@@ -52,6 +52,16 @@ export async function ensureCronSchedulerStarted(): Promise<void> {
     const recoveryController = getBootRecoveryController();
     installShutdownHandlers(recoveryController);
     const recoverySignal = recoveryController.signal;
+
+    // 0. Cron job recovery — clear any `runningAtMs` markers left over from
+    //    a previous process. Without this, jobs that were running at the
+    //    time of a crash stay "running" in the UI until the 2-hour
+    //    STUCK_RUN_MS sanitizer clears them. Fire-and-forget; we don't
+    //    block the scheduler boot on this (worst case the 2-hour sanitizer
+    //    catches whatever we miss).
+    void recoverStaleCronRunMarkers().catch(err => {
+      console.error("[CronRecovery] Failed to recover stale run markers:", err);
+    });
 
     // 1. Recover and resume pending background jobs from the robust queue.
     //    Abort gate: bail out of the loop on SIGTERM/SIGINT so we don't keep

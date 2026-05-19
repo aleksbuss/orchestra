@@ -33,6 +33,20 @@ export type CronJobState = {
    * Cleared by `applyPatch` whenever `patch.schedule` is set.
    */
   unresolvable?: boolean;
+  /**
+   * Local-time bucket of the most recent successful fire, formatted as
+   * "YYYY-MM-DD HH:MM" in the job's schedule timezone. Used to dedupe
+   * DST fall-back double-fires: when clocks go back, the same local
+   * wall-clock time happens twice (e.g., America/New_York 2026-11-01
+   * 01:30 occurs at both UTC 05:30 and UTC 06:30). Without dedup, a
+   * cron `30 1 * * *` would fire twice that day. With dedup, the
+   * second occurrence is skipped because its bucket matches the
+   * first. Spring-forward gaps (02:30 NYC on 2026-03-08) are
+   * inherently skipped because `getZonedDateParts` never produces
+   * that bucket — no special handling needed.
+   * Only set for `cron`-kind schedules; not used for `at` / `every`.
+   */
+  lastFireLocalBucket?: string;
 };
 
 export type CronJob = {

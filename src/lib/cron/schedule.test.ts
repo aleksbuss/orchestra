@@ -25,7 +25,11 @@
  *             on invalid ones.
  */
 import { describe, it, expect } from "vitest";
-import { computeNextRunAtMs, validateCronExpression } from "./schedule";
+import {
+  computeNextRunAtMs,
+  formatLocalCronBucket,
+  validateCronExpression,
+} from "./schedule";
 
 // Anchor "now" deterministically so we can assert future timestamps.
 // 2026-05-16 12:00:00 UTC.
@@ -289,6 +293,48 @@ describe("computeNextRunAtMs — 'cron' schedule (named tz)", () => {
       NOW_MS
     );
     expect(next).toBe(Date.UTC(2026, 4, 17, 6, 0, 0));
+  });
+});
+
+describe("formatLocalCronBucket", () => {
+  it("formats a UTC instant in UTC timezone as YYYY-MM-DD HH:MM", () => {
+    expect(formatLocalCronBucket(Date.UTC(2026, 4, 17, 12, 30, 0), "UTC")).toBe(
+      "2026-05-17 12:30"
+    );
+  });
+
+  it("shifts to the supplied timezone (Europe/Riga +3 in May)", () => {
+    // Date.UTC(2026, 4, 17, 12, 0, 0) — May 17 12:00 UTC = 15:00 Riga (EEST).
+    expect(formatLocalCronBucket(Date.UTC(2026, 4, 17, 12, 0, 0), "Europe/Riga"))
+      .toBe("2026-05-17 15:00");
+  });
+
+  it("DST fall-back: identical bucket for the two ambiguous local 01:30 NYC instants", () => {
+    // America/New_York 2026-11-01 — clocks fall back from 02:00 EDT to 01:00 EST.
+    // 01:30 local happens TWICE that day:
+    //   - First (EDT, UTC-4): 2026-11-01 01:30 local = 2026-11-01 05:30 UTC
+    //   - Second (EST, UTC-5): 2026-11-01 01:30 local = 2026-11-01 06:30 UTC
+    // Both must produce the SAME bucket so dedup can recognise the duplicate.
+    const firstUtc = Date.UTC(2026, 10, 1, 5, 30, 0);
+    const secondUtc = Date.UTC(2026, 10, 1, 6, 30, 0);
+    const firstBucket = formatLocalCronBucket(firstUtc, "America/New_York");
+    const secondBucket = formatLocalCronBucket(secondUtc, "America/New_York");
+    expect(firstBucket).toBe("2026-11-01 01:30");
+    expect(secondBucket).toBe("2026-11-01 01:30");
+    expect(firstBucket).toBe(secondBucket);
+  });
+
+  it("DST spring-forward: 03:00 NYC has its own bucket (02:30 never exists)", () => {
+    // America/New_York 2026-03-08 — clocks spring forward from 02:00 EST to 03:00 EDT.
+    // 02:30 local doesn't exist that day. We verify 03:00 is just a normal bucket.
+    const utc = Date.UTC(2026, 2, 8, 7, 0, 0); // 07:00 UTC = 03:00 EDT
+    expect(formatLocalCronBucket(utc, "America/New_York")).toBe("2026-03-08 03:00");
+  });
+
+  it("pads single-digit hours and minutes (defends ordering by string)", () => {
+    expect(formatLocalCronBucket(Date.UTC(2026, 0, 1, 5, 7, 0), "UTC")).toBe(
+      "2026-01-01 05:07"
+    );
   });
 });
 

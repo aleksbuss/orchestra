@@ -5,7 +5,11 @@ import { runAgentText } from "@/lib/agent/agent";
 import { parseAbsoluteTimeMs } from "@/lib/cron/parse";
 import { resolveCronRunLogPath, resolveCronStorePath, GLOBAL_CRON_PROJECT_ID } from "@/lib/cron/paths";
 import { appendCronRunLog, readCronRunLogEntries } from "@/lib/cron/run-log";
-import { computeNextRunAtMs, validateCronExpression } from "@/lib/cron/schedule";
+import {
+  computeNextRunAtMs,
+  formatLocalCronBucket,
+  validateCronExpression,
+} from "@/lib/cron/schedule";
 import { loadCronStore, saveCronStore, withCronStoreLock } from "@/lib/cron/store";
 import type {
   CronJob,
@@ -196,7 +200,46 @@ function computeJobNextRunAtMs(job: CronJob, nowMs: number): number | undefined 
     return computeNextRunAtMs({ ...job.schedule, anchorMs }, nowMs);
   }
 
-  return computeNextRunAtMs(job.schedule, nowMs);
+  // cron — apply DST fall-back dedup if we have a prior fire bucket.
+  return computeNextCronRunWithDstDedup(job, nowMs);
+}
+
+/**
+ * Cron-only next-run resolver that dedupes against the previously-fired
+ * local-time bucket. Without this, a `30 1 * * *` America/New_York cron
+ * fires TWICE on fall-back Sunday — once before DST ends (UTC 05:30 =
+ * 01:30 EDT) and once after (UTC 06:30 = 01:30 EST). Both UTC instants
+ * are valid matches for `30 1 * * *`, but they share the same local
+ * wall-clock minute. Users expect "fire at 01:30 daily" to mean "once
+ * per day", so we treat the duplicate bucket as a re-fire and skip it.
+ *
+ * Algorithm: ask schedule.ts for the first candidate, format its local
+ * bucket, compare to `lastFireLocalBucket`. If they match, advance past
+ * that candidate and try again. Bounded by `MAX_DST_DEDUP_HOPS` so an
+ * adversarial input can't pin the scheduler.
+ */
+const MAX_DST_DEDUP_HOPS = 90; // 90 minutes of lookahead past the duplicate
+function computeNextCronRunWithDstDedup(
+  job: CronJob,
+  nowMs: number
+): number | undefined {
+  if (job.schedule.kind !== "cron") {
+    return computeNextRunAtMs(job.schedule, nowMs);
+  }
+  const lastBucket = job.state.lastFireLocalBucket;
+  let cursor = nowMs;
+  for (let i = 0; i <= MAX_DST_DEDUP_HOPS; i += 1) {
+    const candidate = computeNextRunAtMs(job.schedule, cursor);
+    if (candidate === undefined) return undefined;
+    if (!lastBucket) return candidate;
+    const candidateBucket = formatLocalCronBucket(candidate, job.schedule.tz);
+    if (candidateBucket !== lastBucket) return candidate;
+    // Same bucket as the last fire — advance and look for the next match.
+    cursor = candidate;
+  }
+  // Lookahead exhausted — extremely unlikely. Return the last candidate
+  // we saw so the scheduler doesn't get permanently stuck.
+  return computeNextRunAtMs(job.schedule, cursor);
 }
 
 /**
@@ -263,6 +306,9 @@ function applyPatch(job: CronJob, patch: CronJobPatch, nowMs: number): void {
     // New schedule supplied — drop any stale "unresolvable" cache from the
     // previous schedule. The fresh expression must get a real evaluation.
     job.state.unresolvable = false;
+    // DST fall-back dedup bucket is also stale — it was recorded against
+    // the old schedule's tz, may be meaningless under the new one.
+    job.state.lastFireLocalBucket = undefined;
   }
   if (patch.payload) {
     const payloadPatch = patch.payload;
@@ -466,6 +512,17 @@ async function finalizeJobRun(projectIdRaw: string, jobId: string, result: RunRe
     job.state.lastDurationMs = Math.max(0, result.endedAt - result.startedAt);
     job.state.lastError = result.error;
     job.updatedAtMs = result.endedAt;
+
+    // DST fall-back dedup — remember the local-time bucket of this fire
+    // so `computeNextCronRunWithDstDedup` can skip the duplicate when
+    // clocks go back. Only relevant for cron schedules; for `at` and
+    // `every` the bucket is meaningless and we leave it unset.
+    if (job.schedule.kind === "cron") {
+      job.state.lastFireLocalBucket = formatLocalCronBucket(
+        result.startedAt,
+        job.schedule.tz
+      );
+    }
 
     if (result.status === "error") {
       job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
@@ -706,6 +763,59 @@ async function executeClaimedJobs(claimed: ClaimedCronJob[]): Promise<void> {
     const result = await executeCronJob(item.job);
     await finalizeJobRun(item.projectId, item.job.id, result);
   }
+}
+
+/**
+ * Boot-time recovery: clear `runningAtMs` from all cron jobs across all
+ * projects, marking each as failed with a "process restart" error reason.
+ *
+ * Premise: a `runningAtMs` marker on disk at process start MUST be from a
+ * previous process (we just booted; we couldn't have set it ourselves).
+ * The previous process couldn't have terminated cleanly without clearing
+ * the marker, so we know the job was interrupted mid-flight.
+ *
+ * Without this, jobs are stuck "running" until the existing `STUCK_RUN_MS`
+ * sanitizer (2 hours, see service.ts) clears them. Two-hour stuck markers
+ * surface in the UI as jobs that can't be re-run, with no explanation.
+ *
+ * Called once from `ensureCronSchedulerStarted` (boot path). Safe to call
+ * multiple times — idempotent (after the first call, no `runningAtMs` is
+ * set so subsequent calls are no-ops). The single-process invariant
+ * documented in CLAUDE.md §"Critical Rules" makes the "this is from us"
+ * impossibility hold; if you ever move to multi-process, replace this
+ * with a process-id ownership check.
+ */
+export async function recoverStaleCronRunMarkers(): Promise<{
+  scannedProjects: number;
+  clearedJobs: number;
+}> {
+  const projectIds = await listKnownCronProjectIds();
+  let clearedJobs = 0;
+  for (const projectId of projectIds) {
+    try {
+      await withProjectStore(projectId, async ({ store, markChanged }) => {
+        for (const job of store.jobs) {
+          if (typeof job.state.runningAtMs === "number") {
+            job.state.runningAtMs = undefined;
+            // Only stomp on `lastStatus` if there isn't a completed run
+            // recorded — a job could have finished successfully right before
+            // process kill, in which case `lastStatus === "ok"` and we'd
+            // be overwriting a true positive.
+            if (job.state.lastStatus !== "ok") {
+              job.state.lastStatus = "error";
+              job.state.lastError = "Interrupted by process restart.";
+              job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
+            }
+            clearedJobs += 1;
+            markChanged();
+          }
+        }
+      });
+    } catch {
+      // Per-project failure is non-fatal — try the rest.
+    }
+  }
+  return { scannedProjects: projectIds.length, clearedJobs };
 }
 
 export async function listKnownCronProjectIds(): Promise<string[]> {

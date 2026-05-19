@@ -618,3 +618,184 @@ describe("PM #20 follow-up — impossible cron expression caching", () => {
     expect(created.state.unresolvable).toBeFalsy();
   });
 });
+
+/**
+ * STUCK_RUN_MS boot recovery regression — see
+ * `recoverStaleCronRunMarkers` in service.ts.
+ *
+ * Pre-fix: if a cron job was running when the process crashed, its
+ * `runningAtMs` marker stayed on disk. The scheduler then refused to
+ * re-run the job for 2 hours (STUCK_RUN_MS) until the in-line sanitizer
+ * cleared it. Users saw "running" in the UI with no way to recover.
+ *
+ * Post-fix: on every boot, scan all cron stores and clear any
+ * `runningAtMs` markers (they must be from a previous process by the
+ * single-process invariant). Mark affected jobs as `lastStatus="error"`
+ * with `lastError="Interrupted by process restart."` so the UI shows
+ * an explanation.
+ */
+describe("recoverStaleCronRunMarkers — clears interrupted-job markers on boot", () => {
+  beforeEach(() => {
+    // The recovery iterates listKnownCronProjectIds, which depends on
+    // getAllProjects(). Default mock is empty array; tests in this block
+    // need "p-1" to be visible so recovery actually opens its store.
+    mockedGetAllProjects.mockResolvedValue([{ id: "p-1" } as any]);
+  });
+
+  it("clears runningAtMs and records error reason for an interrupted job", async () => {
+    // Create a normal job, then manually plant a "running" marker as if
+    // the previous process died mid-execution.
+    const created = await service.addCronJob("p-1", everyCreate());
+    const storePath = path.join(
+      tmpRoot, "data", "projects", "p-1", ".meta", "cron", "jobs.json"
+    );
+    const raw = await fs.readFile(storePath, "utf8");
+    const parsed = JSON.parse(raw);
+    parsed.jobs.find((j: any) => j.id === created.id).state.runningAtMs =
+      NOW - 60_000; // 1 minute ago
+    await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
+
+    const result = await service.recoverStaleCronRunMarkers();
+    expect(result.scannedProjects).toBeGreaterThanOrEqual(1);
+    expect(result.clearedJobs).toBe(1);
+
+    const after = await service.getCronJob("p-1", created.id);
+    expect(after?.state.runningAtMs).toBeUndefined();
+    expect(after?.state.lastStatus).toBe("error");
+    expect(after?.state.lastError).toMatch(/process restart/i);
+    expect(after?.state.consecutiveErrors).toBe(1);
+  });
+
+  it("does NOT touch jobs that completed successfully (lastStatus stays 'ok')", async () => {
+    // This shouldn't really happen — if lastStatus="ok", runningAtMs would
+    // have been cleared by finalizeJobRun. But defensive: a write that
+    // crashed BETWEEN setting lastStatus and clearing runningAtMs would
+    // leave both set. Recovery must not stomp on a true positive.
+    const created = await service.addCronJob("p-1", everyCreate());
+    const storePath = path.join(
+      tmpRoot, "data", "projects", "p-1", ".meta", "cron", "jobs.json"
+    );
+    const raw = await fs.readFile(storePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const stored = parsed.jobs.find((j: any) => j.id === created.id);
+    stored.state.runningAtMs = NOW - 60_000;
+    stored.state.lastStatus = "ok"; // pretend run finished happily
+    stored.state.lastError = undefined;
+    await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
+
+    await service.recoverStaleCronRunMarkers();
+    const after = await service.getCronJob("p-1", created.id);
+    expect(after?.state.runningAtMs).toBeUndefined();
+    expect(after?.state.lastStatus).toBe("ok"); // preserved
+    expect(after?.state.lastError).toBeUndefined();
+  });
+
+  it("is idempotent — second call is a no-op", async () => {
+    const created = await service.addCronJob("p-1", everyCreate());
+    const storePath = path.join(
+      tmpRoot, "data", "projects", "p-1", ".meta", "cron", "jobs.json"
+    );
+    const raw = await fs.readFile(storePath, "utf8");
+    const parsed = JSON.parse(raw);
+    parsed.jobs.find((j: any) => j.id === created.id).state.runningAtMs = NOW - 1000;
+    await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
+
+    const first = await service.recoverStaleCronRunMarkers();
+    expect(first.clearedJobs).toBe(1);
+
+    const second = await service.recoverStaleCronRunMarkers();
+    expect(second.clearedJobs).toBe(0);
+  });
+
+  it("returns zero clearedJobs when no jobs have stale markers", async () => {
+    await service.addCronJob("p-1", everyCreate());
+    const result = await service.recoverStaleCronRunMarkers();
+    expect(result.clearedJobs).toBe(0);
+  });
+});
+
+/**
+ * DST fall-back dedup regression — see schedule.ts `computeNextCronRunWithDstDedup`
+ * and CronJobState.lastFireLocalBucket.
+ *
+ * The test exercises `computeJobNextRunAtMs` indirectly through addCronJob +
+ * updateCronJob (which both go through the dedup path). We can't easily
+ * simulate a real DST transition in the cron tick loop within unit tests,
+ * so instead we hand-craft a job with a `lastFireLocalBucket` and verify
+ * that the next compute skips a candidate matching that bucket.
+ */
+describe("DST fall-back dedup — cron schedules don't double-fire on clock rollback", () => {
+  it("a cron job with lastFireLocalBucket set skips the duplicate UTC instant", async () => {
+    // Anchor the test clock to the NYC fall-back morning of 2026:
+    // 2026-11-01 05:00 UTC (which is 01:00 EDT — DST about to end at 02:00 local).
+    const NOW_FALLBACK = Date.UTC(2026, 10, 1, 5, 0, 0);
+    vi.setSystemTime(NOW_FALLBACK);
+
+    // Create a cron `30 1 * * *` America/New_York → fires at 01:30 local daily.
+    const created = await service.addCronJob("p-1", {
+      name: "ny-130",
+      schedule: { kind: "cron", expr: "30 1 * * *", tz: "America/New_York" },
+      payload: { kind: "agentTurn", message: "x" },
+    });
+    // First-ever fire — no previous bucket, so the natural next match is
+    // 01:30 EDT = 05:30 UTC the same day.
+    expect(created.state.nextRunAtMs).toBe(Date.UTC(2026, 10, 1, 5, 30, 0));
+
+    // Now simulate that the job has just fired at 01:30 EDT — set
+    // lastFireLocalBucket directly + advance the clock past 05:30 UTC.
+    // PATCH with no schedule change so we hit applyPatch's recompute
+    // path with the bucket still in place.
+    vi.setSystemTime(Date.UTC(2026, 10, 1, 5, 31, 0)); // 1 minute after first fire
+
+    // The implementation persists lastFireLocalBucket inside finalizeJobRun
+    // (which we don't invoke here — runCronJobNow goes through a different
+    // claim path). For unit testing, we set the bucket via updateCronJob's
+    // patch path by directly editing the JSON file the store reads. This
+    // is brittle but the alternative requires running the full executeCronJob
+    // pipeline (mocked LLM, mocked telegram, …) which adds too much surface
+    // for one regression.
+    const storePath = path.join(
+      tmpRoot, "data", "projects", "p-1", ".meta", "cron", "jobs.json"
+    );
+    const raw = await fs.readFile(storePath, "utf8");
+    const parsed = JSON.parse(raw);
+    const stored = parsed.jobs.find((j: any) => j.id === created.id);
+    stored.state.lastFireLocalBucket = "2026-11-01 01:30";
+    await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
+
+    // Re-trigger a recompute via PATCH (name change is a no-op for
+    // scheduling but goes through applyPatch → computeNextRunWithCache).
+    const refreshed = await service.updateCronJob("p-1", created.id, {
+      name: "ny-130-renamed",
+    });
+
+    // The natural next match for `30 1 * * *` after 05:31 UTC is 06:30 UTC
+    // (01:30 EST — the duplicate). DST dedup must skip it and return
+    // 2026-11-02 01:30 EST = 2026-11-02 06:30 UTC instead.
+    expect(refreshed?.state.nextRunAtMs).toBe(Date.UTC(2026, 10, 2, 6, 30, 0));
+  }, 30_000);
+
+  it("PATCH-ing the schedule clears the dedup bucket alongside the unresolvable flag", async () => {
+    const created = await service.addCronJob("p-1", {
+      name: "x",
+      schedule: { kind: "cron", expr: "0 12 * * *", tz: "UTC" },
+      payload: { kind: "agentTurn", message: "x" },
+    });
+    // Plant a stale bucket directly on disk.
+    const storePath = path.join(
+      tmpRoot, "data", "projects", "p-1", ".meta", "cron", "jobs.json"
+    );
+    const raw = await fs.readFile(storePath, "utf8");
+    const parsed = JSON.parse(raw);
+    parsed.jobs.find((j: any) => j.id === created.id).state.lastFireLocalBucket =
+      "2020-01-01 12:00";
+    await fs.writeFile(storePath, JSON.stringify(parsed, null, 2));
+
+    // Patch the schedule. The bucket is recorded against the OLD tz/expr
+    // and is meaningless under the new schedule.
+    const updated = await service.updateCronJob("p-1", created.id, {
+      schedule: { kind: "cron", expr: "0 13 * * *", tz: "UTC" },
+    });
+    expect(updated?.state.lastFireLocalBucket).toBeUndefined();
+  });
+});

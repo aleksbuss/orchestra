@@ -9,7 +9,13 @@ import {
 } from "ai";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
+import {
+  classifyModelError,
+  pickFallbackModel,
+  describeFallback,
+} from "@/lib/providers/model-fallback";
 import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
+import { saveSettings } from "@/lib/storage/settings-store";
 import { classifyChatError } from "@/lib/observability/classify-error";
 import { getCurrentTraceId, log } from "@/lib/observability/logger";
 import { dumpPostmortem } from "@/lib/observability/postmortem";
@@ -79,6 +85,111 @@ function resolveModelProviderOptions(provider: string) {
     };
   }
   return undefined;
+}
+
+/**
+ * Auto-fallback on model failures. Called from the streamText `onError`
+ * handler (and the MoA equivalent, see runMoAEnsemble). If the error
+ * shape matches "model is unavailable" or "model doesn't support tools",
+ * we pick a replacement model from the same provider, persist it as the
+ * new default in settings, and surface a `model_fallback` notification
+ * so the user knows what happened.
+ *
+ * Intentionally NOT a retry of the current turn — that would mean
+ * double LLM cost and risk of double tool execution. The user's next
+ * message uses the new model automatically.
+ *
+ * Fire-and-forget — never throws. Any internal failure is logged but
+ * not surfaced; the caller is expected to ALSO publish the original
+ * error event so the UI sees the immediate failure regardless of
+ * whether fallback succeeds.
+ */
+async function attemptModelFallback(
+  error: unknown,
+  settings: AppSettings,
+  chatId: string,
+  projectId: string | null | undefined
+): Promise<void> {
+  try {
+    const failureKind = classifyModelError(error);
+    if (failureKind !== "model_not_found" && failureKind !== "no_tool_support" && failureKind !== "unknown_4xx") {
+      // Not a model-availability problem — let the existing error path
+      // surface to the user without auto-switching providers.
+      return;
+    }
+
+    const chatModel = settings.chatModel;
+    if (!chatModel?.provider || !chatModel?.model) {
+      return;
+    }
+
+    const result = await pickFallbackModel({
+      provider: chatModel.provider,
+      failedModel: chatModel.model,
+      apiKey: chatModel.apiKey || undefined,
+      baseUrl: (chatModel as { baseUrl?: string }).baseUrl,
+    });
+
+    if (!result.modelId) {
+      log.info("agent_fallback_no_candidate", {
+        chatId,
+        provider: chatModel.provider,
+        failedModel: chatModel.model,
+        failureKind,
+      });
+      return;
+    }
+
+    // Persist the new model so subsequent turns don't re-fail. We only
+    // change `chatModel.model`; everything else (provider, api key,
+    // baseUrl) stays intact.
+    await saveSettings({
+      chatModel: { ...chatModel, model: result.modelId },
+    });
+
+    const details = {
+      originalModel: chatModel.model,
+      newModel: result.modelId,
+      provider: chatModel.provider,
+      source: result.source,
+      reason: failureKind === "no_tool_support"
+        ? "no_tool_support" as const
+        : failureKind === "model_not_found"
+          ? "model_not_found" as const
+          : "unknown_4xx" as const,
+      pricing: result.pricing,
+    };
+    const { message, hint } = describeFallback(details);
+
+    log.info("agent_fallback_applied", {
+      chatId,
+      provider: chatModel.provider,
+      from: chatModel.model,
+      to: result.modelId,
+      source: result.source,
+      isFree: result.pricing?.isFree ?? false,
+    });
+
+    publishChatErrorEvent({
+      chatId,
+      projectId,
+      payload: {
+        kind: "model_fallback",
+        message,
+        hint,
+        recoverable: true,
+        modelFallback: details,
+        traceId: getCurrentTraceId(),
+      },
+    });
+  } catch (fallbackErr) {
+    // Never throw out of fallback — that would compound the original
+    // error and possibly mask the user-visible PM #17 banner.
+    log.warn("agent_fallback_failed", {
+      chatId,
+      err: fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr)),
+    });
+  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1439,6 +1550,14 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       // the upstream 404 (no endpoints support tool use) into the stream
       // and the frontend never rendered anything. Now we ALSO publish a
       // structured `chat-error` event so the UI knows what happened.
+      //
+      // 2026-05 — added auto-fallback: when the failure shape matches
+      // "model deprecated / no tool support", try to pick a replacement
+      // model from the same provider, persist it to settings, and
+      // surface a friendly `model_fallback` notification instead of a
+      // hard error. The user's next message uses the new model
+      // automatically. We intentionally do NOT retry the current turn
+      // (would mean double LLM cost and complex stream replay).
       const payload = classifyChatError(error, getCurrentTraceId());
       log.error("agent_stream_error", {
         chatId: options.chatId,
@@ -1447,6 +1566,15 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         message: payload.message,
         err: error instanceof Error ? error : new Error(String(error)),
       });
+
+      // Fire-and-forget — we want the rest of onError to run synchronously
+      // (DAG cleanup, postmortem dump, sync events) while the fallback
+      // lookup happens in the background. If fallback succeeds, it
+      // publishes its own `model_fallback` chat-error event AFTER the
+      // PM #17 error event, so the UI sees both: "something failed" and
+      // then "we switched models for next time".
+      void attemptModelFallback(error, settings, options.chatId, options.projectId);
+
       publishChatErrorEvent({
         chatId: options.chatId,
         projectId: options.projectId,

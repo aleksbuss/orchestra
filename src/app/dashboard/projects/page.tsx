@@ -267,7 +267,12 @@ function ProjectsPageClient() {
       return;
     }
 
-    if (onboardingStep === -1 && isOnboardingQuery) {
+    // Respect `?onboarding=1` only for users who actually need onboarding
+    // (no projects yet). Veteran users sometimes hit this URL via a stale
+    // bookmark or middleware redirect remnant — they should NOT be dragged
+    // back through the wizard. They can re-enter it deliberately via the
+    // sidebar settings if they want to add a model key / Telegram / Skills.
+    if (onboardingStep === -1 && isOnboardingQuery && projects.length === 0) {
       setOnboardingStep(2);
     }
   }, [
@@ -380,13 +385,25 @@ function ProjectsPageClient() {
       setCredentialPasswordConfirm("");
 
       if (projects.length === 0) {
+        // No projects yet — user MUST create at least one to use the app.
         setOnboardingStep(1);
       } else {
-        setOnboardingStep(2);
+        // Existing user. Cred rotation was the only thing they were
+        // gated on; don't drag them through the remaining "Model keys /
+        // Telegram / Skills" wizard steps every time they reset auth.
+        // They can revisit any of those via the sidebar settings on demand.
+        setOnboardingStep(-1);
       }
 
+      // Strip BOTH the `credentials=1` and `onboarding=1` query params.
+      // If we only drop `credentials`, the effect at the top of the file
+      // sees `?onboarding=1` on the next render and re-enters the wizard
+      // at Step 2 — exactly the loop we just decided to break.
       const params = new URLSearchParams(searchParams.toString());
       params.delete("credentials");
+      if (projects.length > 0) {
+        params.delete("onboarding");
+      }
       const nextQuery = params.toString();
       router.replace(
         nextQuery ? `/dashboard/projects?${nextQuery}` : "/dashboard/projects"

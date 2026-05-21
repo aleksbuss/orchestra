@@ -28,8 +28,17 @@ interface AppState {
   // Swarm & Background Config
   swarmEnabled: boolean;
   daemonMode: boolean;
+  /**
+   * When true, the MoA Router's `requiresSwarm` decision is overridden — the
+   * full proposer ensemble runs even on prompts the Router would have classed
+   * as trivial. Useful when `utilityModel` is a cheap model that mis-classifies
+   * substantive prompts as "direct query" and silently bypasses the Swarm.
+   * Has no effect when `swarmEnabled` is false.
+   */
+  forceSwarm: boolean;
   setSwarmEnabled: (enabled: boolean) => void;
   setDaemonMode: (enabled: boolean) => void;
+  setForceSwarm: (enabled: boolean) => void;
 
   // Model Presets
   activePreset: PresetTier;
@@ -66,8 +75,10 @@ export const useAppStore = create<AppState>((set) => ({
   // Swarm
   swarmEnabled: true,
   daemonMode: false,
+  forceSwarm: false,
   setSwarmEnabled: (enabled) => set({ swarmEnabled: enabled }),
   setDaemonMode: (enabled) => set({ daemonMode: enabled }),
+  setForceSwarm: (enabled) => set({ forceSwarm: enabled }),
 
   // Model Presets — default to "custom" so we never accidentally override
   // the user's manually-configured model with a preset that requires

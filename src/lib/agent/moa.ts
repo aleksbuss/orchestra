@@ -115,7 +115,13 @@ export interface DPGResult {
  * Dynamically generates 3-5 hyper-specialized expert personas tailored to the user's prompt.
  * Includes Intelligent Bypass: evaluates if the task actually needs a swarm.
  */
-async function generateDynamicSwarm(userMessage: string, history: ModelMessage[], modelConfig: ModelConfig, searchEnabled: boolean): Promise<DPGResult> {
+async function generateDynamicSwarm(
+  userMessage: string,
+  history: ModelMessage[],
+  modelConfig: ModelConfig,
+  searchEnabled: boolean,
+  abortSignal?: AbortSignal
+): Promise<DPGResult> {
   try {
     // Format the last 5 messages for context — content can be string or array (tool-calls)
     const recentContext = history.slice(-5).map(m => {
@@ -157,7 +163,8 @@ INSTRUCTIONS:
    [RULES] 2-3 strict guidelines they must follow (e.g., "Always hunt for edge cases", "Never propose complex solutions").
    [FORMAT] How they should format their answer.
 5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail.
-${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}`
+${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}`,
+      abortSignal,
     });
 
     return {
@@ -209,6 +216,14 @@ export interface MoAOptions {
   history: ModelMessage[];
   settings: AppSettings;
   abortSignal?: AbortSignal;
+  /**
+   * If true, the Router's `requiresSwarm` decision is ignored — the full
+   * ensemble (Dynamic Persona Generation → N proposers → aggregator) runs
+   * unconditionally. Use this when the user has explicitly demanded the
+   * Swarm and an unreliable `utilityModel` would otherwise mis-classify the
+   * prompt as trivial. Wired through from the UI's "Force Swarm" toggle.
+   */
+  forceSwarm?: boolean;
 }
 
 export interface MoAResult {
@@ -257,6 +272,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     history,
     settings,
     abortSignal,
+    forceSwarm,
   } = options;
 
   // ── Step 1: Resolve model configs ──────────────────────────────────
@@ -301,7 +317,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const routerConfig = resolveWorkerKey(routingModelConfig, settings);
   
   const searchEnabled = settings.search?.enabled && settings.search.provider !== "none";
-  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled);
+  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal);
 
   publishUiSyncEvent({
     topic: "chat",
@@ -317,14 +333,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   });
 
   // ── Step 1.9: Bypass Check ─────────────────────────────────────────
-  if (!dpgResult.requiresSwarm) {
+  // The Router (running on `utilityModel`) may decide `requiresSwarm: false`
+  // for prompts it deems trivial. When the user has explicitly pinned the
+  // Force-Swarm toggle, we ignore that decision — the UI invariant is "if
+  // the user demands the swarm, the swarm runs."
+  if (!dpgResult.requiresSwarm && !forceSwarm) {
     publishUiSyncEvent({
       topic: "chat",
       chatId,
       projectId: projectId ?? null,
       reason: `[MoA] Auto-Routing: Task is direct. Swarm bypassed to save latency.`,
     });
-    
+
     console.log(`[MoA] Swarm bypassed for direct query.`);
     const brainConfig = resolveWorkerKey(
       getBrainConfig(preset ?? "custom", settings.chatModel),

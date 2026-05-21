@@ -122,3 +122,43 @@ describe("modelSupportsTools — pattern list shape", () => {
     expect(NO_TOOL_PATTERNS.length).toBeGreaterThan(5);
   });
 });
+
+describe("modelSupportsTools — Qwen coder regression (2026-05-20)", () => {
+  // The MoA proposer ensemble silently produced 5/5 failures with
+  // "No endpoints found that support tool use" because `qwen-2.5-coder-32b-instruct`
+  // was not in NO_TOOL_PATTERNS. Tools were forwarded, OpenRouter rejected.
+  // Tight match — only coder-line, NOT generic Qwen instruct/chat models.
+
+  it("rejects qwen/qwen-2.5-coder-32b-instruct on OpenRouter (live failure case)", () => {
+    expect(
+      modelSupportsTools("openrouter", "qwen/qwen-2.5-coder-32b-instruct")
+    ).toBe(false);
+  });
+
+  it("rejects qwen-coder variants across spelling conventions", () => {
+    const variants = [
+      "qwen2.5-coder-7b",
+      "qwen-2.5-coder-14b",
+      "Qwen/Qwen2.5-Coder-32B-Instruct", // case-insensitive
+      "qwen-coder", // bare match
+    ];
+    for (const v of variants) {
+      expect(modelSupportsTools("openrouter", v)).toBe(false);
+    }
+  });
+
+  it("does NOT reject generic Qwen instruct/chat models (they support tools)", () => {
+    // Negative-space guard: keep the coder rejection from over-matching the
+    // tool-capable Qwen family. If someone widens the pattern to just "qwen",
+    // this test fails and they have to think twice.
+    const okModels = [
+      "qwen/qwen-2.5-72b-instruct",
+      "qwen/qwen-2.5-7b-instruct",
+      "qwen/qwen3-32b",
+      "qwen2.5-72b-instruct",
+    ];
+    for (const m of okModels) {
+      expect(modelSupportsTools("openrouter", m)).toBe(true);
+    }
+  });
+});

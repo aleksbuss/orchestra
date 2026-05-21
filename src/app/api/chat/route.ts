@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
     try {
       await ensureCronSchedulerStarted();
       const body = await req.json();
-      const { chatId, projectId, currentPath, background, swarmEnabled } = body;
+      const { chatId, projectId, currentPath, background, swarmEnabled, forceSwarm } = body;
       const preset: PresetTier | undefined = body.preset;
       let message: string | undefined = body.message;
 
@@ -111,6 +111,7 @@ export async function POST(req: NextRequest) {
         projectId,
         currentPath: typeof currentPath === "string" ? currentPath : undefined,
         swarmEnabled: swarmEnabled ?? true,
+        forceSwarm: forceSwarm === true,
         preset,
         abortSignal: req.signal,
       });

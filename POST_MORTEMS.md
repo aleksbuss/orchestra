@@ -38,6 +38,58 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 23. AbortSignal Regression — `req.signal` Stopped Mid-Pipeline at Router / SubAgent / Compressor / Reflection
+**Date:** 2026-05
+**Status:** RESOLVED (4 of 6 sites fixed; 2 cron/external paths documented as carrying the same gap, plumbing deferred)
+**Severity:** P0 (recurrence of the original PM #1 zombie-stream class — user closes the tab, half of the inference pipeline keeps running on the operator's bill)
+**Symptoms:** No live incident found at audit time, but `lsof -i :3000 | grep ESTABLISHED` after a cancelled chat showed lingering upstream OpenAI/Anthropic connections — same fingerprint as PM #1.
+**Detection:** Method-6 of the 2026-05-20 audit (greppable `await generateText({ … })` block inspection). For each `await generateText`/`await generateObject`/`await streamText` call, awk the block and assert `abortSignal` appears inside. The audit shipped this as a one-liner: see "Method 6" in the audit report.
+```bash
+# every site missing the prop is a P0 — run before merging anything that touches the agent path
+for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts; do
+  total=$(grep -c "await generateText\|await generateObject\|streamText" "$f")
+  with_signal=$(awk '/await generateText|await generateObject|streamText\(/,/}\)/' "$f" | grep -c "abortSignal")
+  echo "$f: $total calls, $with_signal with abortSignal"
+done
+```
+**Root Cause:** Six `generateText`/`generateObject` callsites grew over six months across as many features (Router DPG, the swarm `runSubAgent` worker, context compressor, reflection QA, cron-driven `runAgentText`, the `call_subordinate` tool's `runSubordinateAgent`). Each one was added without `abortSignal`. There was no central enforcement — the `runAgent` entry-point passed `req.signal` exactly once into `streamText` and assumed it propagated, but every inner re-entry into the AI SDK is a fresh call with its own option bag. PM #1 originally fixed the *outermost* call; the inner ones drifted in silently.
+
+The user-visible failure mode is identical to PM #1: close the browser tab, the SSE socket closes, but the upstream LLM call doesn't see the abort because it was started with an `abortSignal: undefined`. The provider keeps streaming tokens, the operator keeps paying, and the data eventually ends up in `data/chats/<id>.json` for a chat the user already abandoned.
+**Resolution:** Fixed four of six sites in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) (Router `generateObject` + `generateDynamicSwarm` signature), [`src/lib/agent/agent.ts`](src/lib/agent/agent.ts) (`runSubAgent` + its single caller inside `runAgent`), [`src/lib/agent/compressor.ts`](src/lib/agent/compressor.ts) (`compressChatHistory` signature + the inner call), and [`src/lib/agent/reflection.ts`](src/lib/agent/reflection.ts) (`reflectOnResponse` signature + the inner call). All four signatures gained `abortSignal?: AbortSignal` and thread it straight to the AI SDK.
+
+Two sites remain plumbed for a follow-up PR:
+- `runAgentText` ([`agent.ts`](src/lib/agent/agent.ts) ~line 1776) — caller is `cron/service.ts` and `external/handle-external-message.ts`. Neither caller currently holds an `AbortSignal` (the cron runtime has a separate `AbortController` per the CLAUDE.md exception, but it isn't piped through yet).
+- `runSubordinateAgent` ([`agent.ts`](src/lib/agent/agent.ts) ~line 1918) — invoked by the `call_subordinate` tool ([`tools/call-subordinate.ts`](src/lib/tools/call-subordinate.ts)). The tool's `execute` does receive an SDK-provided signal but the wrapper doesn't accept it; needs a one-day refactor.
+**Regression Coverage:** None at the unit level (the AI SDK call shape isn't easy to assert in a focused test). The audit grep above is the canonical detection — codify it as a lint rule when possible. Manual reproduction: start a long generation, close the browser tab, watch `npm run dev`'s log for further `[MoA] Proposer …` lines after the SSE socket closes.
+**Doc Updates:** `CLAUDE.md` § "🛑 AbortSignal Propagation Contract" — strengthened the existing wording to require an explicit grep-pattern audit on every new entry into the agent pipeline, and added a "Two paths still don't propagate (tech debt)" note pointing here.
+**Rule:** **Every** `await generateText` / `await generateObject` / `streamText({...})` MUST receive `abortSignal` from its caller — no exception. If the surrounding function doesn't accept an `AbortSignal`, add it as an optional parameter and thread from the top of the request path. PM #1 was the outer call; PM #23 proves the same class regenerates as the codebase grows. Treat the audit grep at the top of this entry as a pre-merge gate.
+
+---
+
+## 22. Router Internal Bypass Silently Overrode User's UI Swarm Toggle When `utilityModel` Was Cheap/Weak
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P1 (user-visible — "I turned Swarm ON, where are my 5 expert drafts?" with no error, no log, no UI signal)
+**Symptoms:** User reports the Swarm toggle "doesn't work" for short prompts, or that Swarm "stopped working" after they changed `utilityModel`. Logs show `[MoA] Swarm bypassed for direct query.` even when `swarmEnabled: true, preset: "custom"` is in the request body — same line that legitimately fires for `"hi"` / `"thanks"`. No regex/intent on the user's prompt is visible at the entry layer (PM #9 removed that), so the bypass MUST be coming from inside MoA.
+**Detection:** Live debugging session on 2026-05-20. User said "Swarm никогда не вызывается, я разные модели пробовал". `grep -n "Swarm bypassed" /tmp/orchestra-dev.log` returned `[MoA] Swarm bypassed for direct query.` for 4 of the last 4 turns. Settings showed `utilityModel: openrouter/google/gemini-2.5-flash` — the documented hazard from `CLAUDE.md` § MoA: *"a weak `utilityModel` can mis-classify substantive prompts as trivial"*.
+**Root Cause:** `runMoAEnsemble` consults the Router (`generateDynamicSwarm` on `settings.utilityModel`) to decide whether the prompt is worth a 5-proposer fan-out. The Router schema expects `requiresSwarm: boolean`. The prompt instructions for `false` were broad enough (*"trivial task that a single AI agent can handle easily"*) that a weak Gemini-Flash-grade model picks `false` for legitimately substantive queries.
+
+The bypass itself is an intentional optimisation — `CLAUDE.md` § "Mixture-of-Agents (MoA) Ensemble" explicitly documents it as *"an internal MoA optimization; it never bypasses the user's intent to use Swarm"*. The bug is that the architecture violated its own promise: when a cheap utility model is the Router, "internal optimization" becomes *de facto* user override, because the bypass decision is the only thing standing between Swarm-ON and a single-model answer.
+**Resolution:** Added an explicit **Force Swarm** UI toggle that overrides the Router's verdict.
+1. `forceSwarm` field added to `MoAOptions` in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) and `RunAgentOptions` in [`src/lib/agent/agent.ts`](src/lib/agent/agent.ts). The bypass branch now reads `if (!dpgResult.requiresSwarm && !forceSwarm)` — the user's explicit demand wins.
+2. UI: amber "Force" pill in [`src/components/chat/swarm-config.tsx`](src/components/chat/swarm-config.tsx), visible *only* when Swarm is ON (no point letting the user "force" a feature they've turned off). Wired through Zustand (`forceSwarm` + `setForceSwarm` in [`src/store/app-store.ts`](src/store/app-store.ts)).
+3. End-to-end plumbing: `chat-panel.tsx` `body()` and the auto-pilot fetch both forward `forceSwarm`. `chat/route.ts` parses with `forceSwarm === true` (defensive — string `"true"` from a sloppy client must NOT enable it).
+
+Crucially this is a UI *escape hatch*, not a redesign — the default behaviour (Router decides) is preserved for the 95% of prompts where the Router is right and the bypass saves real tokens. Only the Force toggle lets the user *opt out* of being second-guessed.
+**Regression Coverage:**
+- [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 3 new tests: `forceSwarm=true` overrides bypass (4 calls instead of 1), `forceSwarm=false` (the default) still respects bypass, `forceSwarm=true` is a no-op when Router already wants the swarm.
+- [`src/components/chat/swarm-config.dom.test.tsx`](src/components/chat/swarm-config.dom.test.tsx) — 11 new tests: Force button hidden when Swarm OFF, appears when ON, toggles wire to store, preserves preference across Swarm-OFF/ON.
+- [`src/app/api/chat/route.test.ts`](src/app/api/chat/route.test.ts) — 6 new tests pinning the `forceSwarm` body → `runAgent` options forwarding contract.
+**Doc Updates:** `CLAUDE.md` § "Mixture-of-Agents (MoA) Ensemble" — added the Force Swarm escape hatch alongside the existing "Internal Bypass" note, with the rule that any UI-level user toggle MUST have an override path past internal optimisations.
+**Rule:** When an internal optimisation can countermand a user-facing toggle, ship the override mechanism alongside the optimisation — not after the first user reports the silent override. Concretely: any boolean in MoA / agent / tool layers that *can* short-circuit a user-requested feature needs a paired `force<Feature>` escape hatch and a "user wins" branch in the gate. If the optimisation can't be reliably suppressed, it shouldn't run on user-requested features at all.
+
+---
+
 ## 21. Knowledge Routes Accepted Raw User-Controlled Filename — Arbitrary File Write / Delete Primitive
 **Date:** 2026-05
 **Status:** RESOLVED

@@ -27,6 +27,13 @@ function toTrimmedString(value: unknown): string {
 
 export async function POST(req: NextRequest) {
   try {
+    // Auth fully disabled via env (e.g. local dev, password recovery).
+    // Middleware already bypasses session checks, but a stray POST to this
+    // route should still resolve cleanly instead of returning a confusing 401.
+    if (process.env.ORCHESTRA_DISABLE_AUTH === "true") {
+      return Response.json({ success: true, mustChangeCredentials: false });
+    }
+
     const ip = clientIpFromRequest(req);
     const decision = shouldAllowLoginAttempt(ip);
     if (!decision.allowed) {

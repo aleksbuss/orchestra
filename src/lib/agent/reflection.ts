@@ -38,8 +38,9 @@ export async function reflectOnResponse(params: {
   agentResponse: string;
   settings: AppSettings;
   projectId?: string;
+  abortSignal?: AbortSignal;
 }): Promise<ReflectionResult> {
-  const { userMessage, agentResponse, settings, projectId } = params;
+  const { userMessage, agentResponse, settings, projectId, abortSignal } = params;
 
   // Skip reflection for very short or trivial responses
   if (agentResponse.length < 30) {
@@ -66,6 +67,7 @@ export async function reflectOnResponse(params: {
       ],
       temperature: 0.1, // Low temperature for consistent QA judgements
       maxOutputTokens: 256, // Keep it cheap and fast
+      abortSignal,
     });
 
     const text = result.text.trim();

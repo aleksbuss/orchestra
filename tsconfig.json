@@ -45,6 +45,9 @@
   "exclude": [
     "node_modules",
     "reference",
-    "bundled-skills"
+    "bundled-skills",
+    "data",
+    "tests/e2e",
+    "scripts"
   ]
 }

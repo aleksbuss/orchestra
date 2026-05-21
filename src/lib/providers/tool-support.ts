@@ -41,6 +41,18 @@ export const NO_TOOL_PATTERNS: readonly string[] = [
   "codellama", "starcoder",
   "tinyllama", "stablelm",
   "yi-",
+  // Qwen *coder* variants: instruction-tuned for code completion, not for
+  // function-calling. Confirmed live failure on OpenRouter for
+  // `qwen/qwen-2.5-coder-32b-instruct` ("No endpoints found that support
+  // tool use"). Generic Qwen2.5-Instruct / Qwen3 DO support tools — only
+  // the coder-line is broken, so we keep the match tight.
+  "qwen-2.5-coder", "qwen2.5-coder", "qwen-coder",
+  // Vision-language Qwen variants: trained for image understanding, not
+  // function-calling. `qwen-vl` matches `qwen-vl-plus`, `qwen-vl-max`,
+  // `qwen2-vl-72b-instruct`, etc. Tight prefix — does NOT shadow text-only
+  // Qwen models. Generic Llama 3 / Mixtral remain tool-capable on OpenRouter
+  // so they are intentionally NOT added here (audit 2026-05-20 false positive).
+  "qwen-vl", "qwen2-vl", "qwen2.5-vl",
 ] as const;
 
 /**

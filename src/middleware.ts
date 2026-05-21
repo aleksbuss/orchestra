@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { AUTH_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
 
+// Escape hatch for local development and forgotten-password recovery.
+// When set to "true", middleware skips all auth checks — every request is
+// treated as fully authenticated. Set via .env.local; requires server restart.
+// Never enable this in a deployment reachable from untrusted networks.
+function isAuthDisabledByEnv(): boolean {
+  return process.env.ORCHESTRA_DISABLE_AUTH === "true";
+}
+
 function isPublicPage(pathname: string): boolean {
   return pathname === "/login";
 }
@@ -53,6 +61,18 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   if (shouldBypass(pathname)) {
+    return NextResponse.next();
+  }
+
+  // Auth fully disabled — every request passes, but /login still redirects to
+  // /dashboard (no reason to show a login form that does nothing).
+  if (isAuthDisabledByEnv()) {
+    if (isPublicPage(pathname)) {
+      return NextResponse.redirect(new URL("/dashboard", req.url));
+    }
+    if (pathname === "/") {
+      return NextResponse.redirect(new URL("/dashboard", req.url));
+    }
     return NextResponse.next();
   }
 

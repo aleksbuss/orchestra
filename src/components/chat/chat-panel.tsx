@@ -228,6 +228,7 @@ export function ChatPanel() {
     addChat,
     swarmEnabled,
     daemonMode,
+    forceSwarm,
     activePreset,
   } = useAppStore();
   
@@ -264,6 +265,9 @@ export function ChatPanel() {
   const swarmEnabledRef = useRef(swarmEnabled);
   swarmEnabledRef.current = swarmEnabled;
 
+  const forceSwarmRef = useRef(forceSwarm);
+  forceSwarmRef.current = forceSwarm;
+
   const daemonModeRef = useRef(daemonMode);
   daemonModeRef.current = daemonMode;
 
@@ -296,6 +300,7 @@ export function ChatPanel() {
           projectId: activeProjectIdRef.current,
           currentPath: currentPathRef.current,
           swarmEnabled: swarmEnabledRef.current,
+          forceSwarm: forceSwarmRef.current,
           background: daemonModeRef.current,
           preset: activePresetRef.current,
         }),
@@ -555,6 +560,7 @@ export function ChatPanel() {
             projectId: activeProjectIdRef.current,
             currentPath: currentPathRef.current,
             swarmEnabled: swarmEnabledRef.current,
+            forceSwarm: forceSwarmRef.current,
             background: true,
             message: messageText,
           }),

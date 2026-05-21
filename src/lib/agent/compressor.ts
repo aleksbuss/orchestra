@@ -16,7 +16,8 @@ Format your output as a concise markdown list of facts and states.`;
 export async function compressChatHistory(
   messages: ChatMessage[],
   settings: AppSettings,
-  projectId?: string
+  projectId?: string,
+  abortSignal?: AbortSignal
 ): Promise<string> {
   if (messages.length === 0) return "";
 
@@ -41,6 +42,7 @@ export async function compressChatHistory(
       model,
       system: COMPRESSOR_SYSTEM_PROMPT,
       messages: [{ role: "user", content: promptText }],
+      abortSignal,
     });
     return result.text.trim();
   } catch (err) {

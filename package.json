@@ -8,16 +8,21 @@
   },
   "scripts": {
     "dev": "next dev",
+    "prebuild": "npm run lint",
     "build": "next build --turbopack --no-lint",
     "start": "next start",
     "lint": "eslint",
+    "lint:strict": "eslint --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
     "setup:one": "bash ./scripts/install.sh",
     "setup:local": "bash ./scripts/install-local.sh",
     "setup:docker": "bash ./scripts/install-docker.sh",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:stress": "npx tsx scripts/stress-test.ts",
-    "scrub:secrets": "npx tsx scripts/scrub-secrets.ts"
+    "scrub:secrets": "npx tsx scripts/scrub-secrets.ts",
+    "auth:reset": "npx tsx scripts/auth-reset.ts"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.37",

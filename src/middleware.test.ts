@@ -196,3 +196,48 @@ describe("middleware — root + invalid cookies", () => {
     expect(res.headers.get("location")).toContain("/login");
   });
 });
+
+describe("middleware — ORCHESTRA_DISABLE_AUTH escape hatch", () => {
+  // When the env flag is set, every request must pass without inspecting the
+  // cookie. This is the "local dev / forgot password recovery" path. It MUST
+  // NOT silently re-enable itself based on cookie presence — a stale cookie
+  // from a previous session is irrelevant when auth is off.
+
+  it("lets an anonymous request through to a protected page (no redirect)", async () => {
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await middleware(makeRequest("/dashboard/projects"));
+    // 200-ish: NextResponse.next() does not set a redirect status.
+    expect(res.status).not.toBe(307);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("lets an anonymous API request through without 401", async () => {
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await middleware(makeRequest("/api/projects"));
+    expect(res.status).not.toBe(401);
+  });
+
+  it("redirects /login → /dashboard when auth is disabled (no login form needed)", async () => {
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await middleware(makeRequest("/login"));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/dashboard");
+  });
+
+  it("redirects '/' → /dashboard when auth is disabled", async () => {
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await middleware(makeRequest("/"));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/dashboard");
+  });
+
+  it("only activates when value is exactly 'true' — '1', 'yes', '' are off", async () => {
+    // Defensive: prevents accidental enablement from sloppy shell quoting.
+    for (const value of ["1", "yes", "TRUE", "", "false"]) {
+      vi.stubEnv("ORCHESTRA_DISABLE_AUTH", value);
+      const res = await middleware(makeRequest("/dashboard"));
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/login");
+    }
+  });
+});

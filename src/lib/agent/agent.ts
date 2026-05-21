@@ -944,7 +944,8 @@ async function runSubAgent(
   parentContext: AgentContext,
   settings: AppSettings,
   providerOptions: any,
-  model: any // Pass the actual resolved model instance from Orchestrator!
+  model: any, // Pass the actual resolved model instance from Orchestrator!
+  abortSignal?: AbortSignal
 ): Promise<string> {
   const nodeId = crypto.randomUUID();
 
@@ -1018,10 +1019,11 @@ async function runSubAgent(
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      abortSignal,
     });
     const responseText = getLastResponseToolText(result.response.messages) || result.text;
     const outputText = responseText.trim() || "Agent finished but returned no text.";
-    
+
     // DAG: publish agent_node completed
     publishUiSyncEvent({
       topic: "chat",
@@ -1069,6 +1071,13 @@ export interface RunAgentOptions {
   currentPath?: string;
   agentNumber?: number;
   swarmEnabled?: boolean;
+  /**
+   * Bypass the MoA Router's `requiresSwarm` classification. When `true`, the
+   * full proposer fan-out runs regardless of the Router's verdict. Plumbed
+   * straight through to `runMoAEnsemble`; has no effect when
+   * `swarmEnabled === false`.
+   */
+  forceSwarm?: boolean;
   isBackground?: boolean;
   abortSignal?: AbortSignal;
   preset?: PresetTier;
@@ -1264,8 +1273,8 @@ export async function runAgent(options: RunAgentOptions) {
         },
       });
 
-      return agentSemaphore.run(() => 
-        runSubAgent(role, desc, extra, context, settings, providerOptions, model)
+      return agentSemaphore.run(() =>
+        runSubAgent(role, desc, extra, context, settings, providerOptions, model, options.abortSignal)
       );
     });
   }
@@ -1329,6 +1338,7 @@ export async function runAgent(options: RunAgentOptions) {
         history: context.history,
         settings,
         abortSignal: options.abortSignal,
+        forceSwarm: options.forceSwarm,
       });
 
       if (moaResult.text && !moaResult.text.startsWith("All MoA proposer agents failed")) {

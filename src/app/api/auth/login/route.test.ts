@@ -219,3 +219,39 @@ describe("POST /api/auth/login — passwordHash leak regression", () => {
     });
   }
 });
+
+describe("POST /api/auth/login — ORCHESTRA_DISABLE_AUTH escape hatch", () => {
+  // When auth is fully disabled via env, middleware never sends users here,
+  // but a programmatic POST should still resolve cleanly. The endpoint must
+  // NOT consult the rate limiter or the settings store — both are bypassed.
+
+  it("returns success without checking credentials when auth is disabled", async () => {
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await POST(buildRequest({ username: "anyone", password: "anything" }));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data.success).toBe(true);
+    expect(data.mustChangeCredentials).toBe(false);
+    // Neither rate limiter nor settings store should have been touched.
+    expect(vi.mocked(shouldAllowLoginAttempt)).not.toHaveBeenCalled();
+    expect(vi.mocked(getSettings)).not.toHaveBeenCalled();
+    expect(vi.mocked(recordLoginOutcome)).not.toHaveBeenCalled();
+  });
+
+  it("returns success even with empty credentials when auth is disabled", async () => {
+    // Edge case: stray client posts {} — should still resolve, not 400.
+    vi.stubEnv("ORCHESTRA_DISABLE_AUTH", "true");
+    const res = await POST(buildRequest({}));
+    expect(res.status).toBe(200);
+  });
+
+  it("only activates when value is exactly 'true' — falsy strings remain protected", async () => {
+    for (const value of ["1", "yes", "TRUE", "", "false"]) {
+      vi.stubEnv("ORCHESTRA_DISABLE_AUTH", value);
+      vi.mocked(getSettings).mockResolvedValue(defaultSettingsWithAuth() as never);
+      const res = await POST(buildRequest({ username: "x", password: "y" }));
+      // Should reach the real verifier and fail (wrong password), not bypass.
+      expect(res.status).toBe(401);
+    }
+  });
+});

@@ -256,3 +256,101 @@ describe("runMoAEnsemble — Aggregator must NOT receive consecutive user messag
     expect(lastCallArgs!.messages![0].role).toBe("user");
   }, 30_000);
 });
+
+describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", () => {
+  // The Router runs on `utilityModel` (often a cheap model). When the user
+  // has explicitly pinned the "Force Swarm" toggle in the UI, the Router's
+  // `requiresSwarm: false` verdict must be ignored — otherwise a weak
+  // utilityModel silently mis-classifies substantive prompts as "trivial"
+  // and the user gets a single-model answer when they demanded an ensemble.
+
+  it("forceSwarm=true runs the full ensemble even when Router says bypass", async () => {
+    // Router votes for bypass, but with personas already populated (the
+    // schema enforces .min(3).max(5) so personas are present on success).
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: false,
+        personas: MOA_PROPOSERS.slice(0, 3).map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as any);
+
+    let callIndex = 0;
+    mockedGenerateText.mockImplementation(async () => {
+      callIndex += 1;
+      return { text: `draft-${callIndex}` } as any;
+    });
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "tell me about quantum computing",
+      history: [],
+      settings: fakeSettings(),
+      forceSwarm: true,
+    });
+
+    // 3 proposers + 1 aggregator = 4 generateText calls. If forceSwarm were
+    // ignored, it would be exactly 1 (the bypass direct-answer call).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(4);
+    expect(result.drafts.length).toBe(3);
+  }, 30_000);
+
+  it("forceSwarm=false (the default) still respects the Router's bypass decision", async () => {
+    // Negative-space guard: the forceSwarm flag must not accidentally flip
+    // the default behavior. Existing bypass logic stays exactly as before.
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { requiresSwarm: false, personas: [] },
+    } as any);
+    mockedGenerateText.mockResolvedValueOnce({ text: "direct answer" } as any);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "hi",
+      history: [],
+      settings: fakeSettings(),
+      forceSwarm: false,
+    });
+
+    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    expect(result.drafts).toEqual([]);
+  });
+
+  it("forceSwarm=true is a no-op when Router already wants the swarm", async () => {
+    // When Router says `requiresSwarm: true`, the swarm runs regardless of
+    // the flag. The flag's only job is to override `false → true`, never
+    // the other way around.
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: MOA_PROPOSERS.slice(0, 3).map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as any);
+
+    let callIndex = 0;
+    mockedGenerateText.mockImplementation(async () => {
+      callIndex += 1;
+      return { text: `draft-${callIndex}` } as any;
+    });
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "complex multi-faceted analysis request",
+      history: [],
+      settings: fakeSettings(),
+      forceSwarm: true,
+    });
+
+    // 3 proposers + 1 aggregator = 4 calls. Same as without the flag.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(4);
+    expect(result.drafts.length).toBe(3);
+  }, 30_000);
+});

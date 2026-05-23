@@ -561,6 +561,11 @@ export function ChatPanel() {
             currentPath: currentPathRef.current,
             swarmEnabled: swarmEnabledRef.current,
             forceSwarm: forceSwarmRef.current,
+            // Carry the active preset through to background mode too. Without
+            // this, the daemon dispatcher uses settings.chatModel directly,
+            // ignoring whatever preset the user had pinned in the UI when
+            // they triggered Auto-Pilot.
+            preset: activePresetRef.current,
             background: true,
             message: messageText,
           }),

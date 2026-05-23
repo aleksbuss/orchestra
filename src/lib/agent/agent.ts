@@ -1508,7 +1508,19 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             });
             continuationText = (continuation.text || "").trim();
           } catch (error) {
+            // Auto-continuation is an enhancement (it extends a truncated
+            // reply); silent console.warn meant the user never learned a
+            // continuation was even attempted. Surface a UI event so the
+            // operator sees what's happening — primary response still ships,
+            // continuation gap is annotated.
+            const errMsg = error instanceof Error ? error.message : String(error);
             console.warn("Auto-continuation failed:", error);
+            publishUiSyncEvent({
+              topic: "chat",
+              chatId: options.chatId,
+              projectId: options.projectId ?? null,
+              reason: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,
+            });
           }
         }
 

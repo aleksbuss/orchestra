@@ -18,6 +18,7 @@ import {
 import { memorySave, memoryLoad, memoryDelete } from "@/lib/tools/memory-tools";
 import { knowledgeQuery } from "@/lib/tools/knowledge-query";
 import { searchWeb } from "@/lib/tools/search-engine";
+import { createWebTaskTool } from "@/lib/tools/web-task";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1308,6 +1309,12 @@ export function createAgentTools(
       },
     });
   }
+
+  // web_task — autonomous browser automation. Always registered; the heavy
+  // dep (chromium) is only spawned when the tool is actually invoked, so
+  // this is cheap to include. Sits next to search_web because the parent
+  // agent picks one or the other for "fetch info from the web" tasks.
+  tools.web_task = createWebTaskTool(settings);
 
   const telegramRuntime = getTelegramRuntimeData(context);
   if (telegramRuntime) {

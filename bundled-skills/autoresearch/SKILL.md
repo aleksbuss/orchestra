@@ -1,4 +1,5 @@
 ---
+name: autoresearch
 description: Autonomous AI Research Loop for Nanochat Training (Apple Silicon/MLX Optimized)
 license: MIT
 compatibility: macOS (Apple Silicon M-Series)

@@ -46,7 +46,7 @@ describe("loadCronStore", () => {
     await fs.writeFile(storePath, JSON.stringify(expected), "utf-8");
     const store = await loadCronStore(storePath);
     expect(store.jobs).toHaveLength(1);
-    expect((store.jobs[0] as { jobId: string }).jobId).toBe("j1");
+    expect((store.jobs[0] as unknown as { jobId: string }).jobId).toBe("j1");
   });
 
   it("coerces a non-array `jobs` field to []", async () => {

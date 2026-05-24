@@ -16,6 +16,13 @@ export interface HandleExternalMessageInput {
   chatId?: string;
   currentPath?: string;
   runtimeData?: Record<string, unknown>;
+  /**
+   * PM #23 — caller (Telegram webhook, external POST API) owns lifecycle.
+   * If the webhook handler exits early (Telegram retried, request aborted),
+   * pass `req.signal` here so the inner LLM call stops too. Omit for true
+   * fire-and-forget external messages.
+   */
+  abortSignal?: AbortSignal;
 }
 
 interface SwitchProjectSignal {
@@ -258,6 +265,7 @@ export async function handleExternalMessage(
     projectId: resolvedProjectId,
     currentPath: currentPath || undefined,
     runtimeData: input.runtimeData,
+    abortSignal: input.abortSignal,
   });
 
   const afterChat = await getChat(resolvedChatId);

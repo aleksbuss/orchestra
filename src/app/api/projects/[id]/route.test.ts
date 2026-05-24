@@ -31,8 +31,10 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+type NextRequestInit = ConstructorParameters<typeof NextRequest>[1];
+
 function buildRequest(method: string, body?: unknown): NextRequest {
-  const init: RequestInit = { method };
+  const init: NextRequestInit = { method };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);

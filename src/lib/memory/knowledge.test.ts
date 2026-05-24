@@ -285,8 +285,8 @@ describe("queryKnowledge — RAG retrieval", () => {
   });
 
   it("queries every subdir with the documented 'knowledge' area tag", async () => {
-    mockedSearch.mockImplementation(async (q, limit, threshold, subdir) => [
-      { text: `from ${subdir}`, score: 0.9, metadata: { subdir } },
+    mockedSearch.mockImplementation(async (_q, _limit, _threshold, subdir) => [
+      { id: `id-${subdir}`, text: `from ${subdir}`, score: 0.9, metadata: { subdir } },
     ]);
 
     await queryKnowledge("q", 5, ["main", "proj-1", "proj-2"], fakeSettings());
@@ -301,8 +301,8 @@ describe("queryKnowledge — RAG retrieval", () => {
 
   it("sorts results by score descending; formats with (relevance: <pct>%)", async () => {
     mockedSearch.mockResolvedValueOnce([
-      { text: "low score", score: 0.5, metadata: {} },
-      { text: "high score", score: 0.95, metadata: {} },
+      { id: "low", text: "low score", score: 0.5, metadata: {} },
+      { id: "high", text: "high score", score: 0.95, metadata: {} },
     ]);
 
     const out = await queryKnowledge("q", 5, ["main"], fakeSettings());
@@ -317,7 +317,7 @@ describe("queryKnowledge — RAG retrieval", () => {
   it("dedupes by exact text content (multiple subdirs with the same chunk = single result)", async () => {
     // Two subdirs return the same chunk text.
     mockedSearch.mockImplementation(async () => [
-      { text: "shared chunk", score: 0.8, metadata: {} },
+      { id: "sh", text: "shared chunk", score: 0.8, metadata: {} },
     ]);
 
     const out = await queryKnowledge(
@@ -333,10 +333,10 @@ describe("queryKnowledge — RAG retrieval", () => {
 
   it("respects the `limit` after dedupe", async () => {
     mockedSearch.mockResolvedValueOnce([
-      { text: "a", score: 0.9, metadata: {} },
-      { text: "b", score: 0.85, metadata: {} },
-      { text: "c", score: 0.8, metadata: {} },
-      { text: "d", score: 0.75, metadata: {} },
+      { id: "a", text: "a", score: 0.9, metadata: {} },
+      { id: "b", text: "b", score: 0.85, metadata: {} },
+      { id: "c", text: "c", score: 0.8, metadata: {} },
+      { id: "d", text: "d", score: 0.75, metadata: {} },
     ]);
 
     const out = await queryKnowledge("q", 2, ["main"], fakeSettings());
@@ -353,7 +353,7 @@ describe("queryKnowledge — RAG retrieval", () => {
       throw new Error("subdir does not exist yet");
     });
     mockedSearch.mockImplementationOnce(async () => [
-      { text: "from-good", score: 0.9, metadata: {} },
+      { id: "fg", text: "from-good", score: 0.9, metadata: {} },
     ]);
 
     const out = await queryKnowledge(

@@ -16,7 +16,9 @@ import { getProject, loadProjectSkills } from "@/lib/storage/project-store";
 const mockedGet = vi.mocked(getProject);
 const mockedLoad = vi.mocked(loadProjectSkills);
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 const req = () =>
   new NextRequest("http://localhost:3000/api/projects/p-1/skills");

@@ -8,7 +8,7 @@
  * These are the most security-critical utilities in Orchestra; a bug here
  * means data loss under any concurrent load.
  */
-import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";

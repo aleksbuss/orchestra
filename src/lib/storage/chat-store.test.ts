@@ -36,7 +36,7 @@ describe("Chat Store", () => {
 
   it("createChat should persist a chat with correct fields", async () => {
     // We test the shape of the Chat object returned by createChat
-    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    const { createChat } = await import("@/lib/storage/chat-store");
     const chatId = `test-${Date.now()}-${Math.random()}`;
     
     const chat = await createChat(chatId, "Test Chat Title", "project-abc");

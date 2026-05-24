@@ -108,8 +108,10 @@ function buildPostMultipart(
   );
 }
 
+type NextRequestInit = ConstructorParameters<typeof NextRequest>[1];
+
 function buildDelete(body?: unknown): NextRequest {
-  const init: RequestInit = { method: "DELETE" };
+  const init: NextRequestInit = { method: "DELETE" };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = JSON.stringify(body);

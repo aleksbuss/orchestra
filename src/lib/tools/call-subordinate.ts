@@ -241,7 +241,8 @@ export async function callSubordinate(
   task: string,
   projectId: string | undefined,
   parentAgentNumber: number,
-  parentHistory: ModelMessage[]
+  parentHistory: ModelMessage[],
+  abortSignal?: AbortSignal
 ): Promise<string> {
   try {
     // Dynamic import to avoid circular dependency
@@ -254,6 +255,7 @@ export async function callSubordinate(
           projectId,
           parentAgentNumber,
           parentHistory,
+          abortSignal,
         })
       )
     );

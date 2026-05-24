@@ -6,13 +6,12 @@
  *   - updateGoal concurrency: ensures no task overwrite under race
  *   - Error handling: no chatId, nonexistent goal
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 
 vi.mock("@/lib/realtime/event-bus", () => ({
   publishUiSyncEvent: vi.fn(),
 }));
 
-import { vi } from "vitest";
 import type { ProjectGoal } from "@/lib/types";
 
 function makeGoal(chatId: string): ProjectGoal {

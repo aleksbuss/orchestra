@@ -40,8 +40,14 @@ const params = (id: string, jobId: string) => ({
   params: Promise.resolve({ id, jobId }),
 });
 
+// Next 15's NextRequest constructor takes its own RequestInit variant where
+// `signal` is `AbortSignal | undefined` (not `… | null` like the DOM lib).
+// We use the constructor-parameter type directly so the test doesn't need
+// to fight DOM-vs-Next typing.
+type NextRequestInit = ConstructorParameters<typeof NextRequest>[1];
+
 function buildReq(method: string, body?: unknown, raw = false): NextRequest {
-  const init: RequestInit = { method };
+  const init: NextRequestInit = { method };
   if (body !== undefined) {
     init.headers = { "Content-Type": "application/json" };
     init.body = raw ? (body as string) : JSON.stringify(body);

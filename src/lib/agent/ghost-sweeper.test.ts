@@ -20,7 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import type { Goal, GoalTask } from "@/lib/types";
+import type { ProjectGoal as Goal, GoalTask } from "@/lib/types";
 
 vi.mock("@/lib/agent/daemon", () => ({
   isJobActive: vi.fn(() => false),
@@ -69,7 +69,10 @@ async function readGoal(chatId: string): Promise<Goal> {
 const task = (overrides: Partial<GoalTask> = {}): GoalTask =>
   ({
     id: overrides.id ?? "t1",
-    title: overrides.title ?? "task",
+    // The GoalTask shape uses `description`, not `title` — title is on the
+    // parent goal. Tests that wanted a human-readable label belong on
+    // description.
+    description: overrides.description ?? "task",
     status: overrides.status ?? "in_progress",
     subtasks: overrides.subtasks ?? [],
     ...overrides,

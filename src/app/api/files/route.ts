@@ -1,6 +1,5 @@
 import { NextRequest } from "next/server";
 import fs from "fs/promises";
-import path from "path";
 import { getProjectFiles, getWorkDir } from "@/lib/storage/project-store";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { assertPathInside } from "@/lib/storage/fs-utils";

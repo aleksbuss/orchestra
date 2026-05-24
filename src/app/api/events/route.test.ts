@@ -20,10 +20,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 import { GET } from "./route";
-import {
-  publishUiSyncEvent,
-  subscribeUiSyncEvents,
-} from "@/lib/realtime/event-bus";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
 beforeEach(() => {
   vi.useFakeTimers();

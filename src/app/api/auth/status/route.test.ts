@@ -33,7 +33,6 @@ import { getSettings } from "@/lib/storage/settings-store";
 import {
   AUTH_COOKIE_NAME,
   verifySessionToken,
-  createSessionToken,
 } from "@/lib/auth/session";
 import {
   DEFAULT_AUTH_PASSWORD_HASH,

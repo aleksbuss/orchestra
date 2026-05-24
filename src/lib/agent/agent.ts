@@ -1717,6 +1717,15 @@ export async function runAgentText(options: {
   currentPath?: string;
   agentNumber?: number;
   runtimeData?: Record<string, unknown>;
+  /**
+   * PM #23 follow-up — non-interactive entry path. Caller (cron runtime, the
+   * Telegram-relay external-message handler, etc.) owns the lifetime of the
+   * AbortController. Pass `undefined` for fire-and-forget background jobs.
+   * The signal is plumbed straight into the inner `generateText` call so a
+   * cancelled cron tick or a disconnected Telegram webhook actually stops
+   * the upstream LLM stream instead of completing and silently billing.
+   */
+  abortSignal?: AbortSignal;
 }): Promise<string> {
   const settings = await getSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
@@ -1795,6 +1804,7 @@ export async function runAgentText(options: {
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      abortSignal: options.abortSignal,
     });
 
     const responseMessages = (
@@ -1864,6 +1874,13 @@ export async function runSubordinateAgent(options: {
   projectId?: string;
   parentAgentNumber: number;
   parentHistory: ModelMessage[];
+  /**
+   * PM #23 — the parent agent's `req.signal`, plumbed through the
+   * `call_subordinate` tool. When the user cancels the parent chat, the
+   * subordinate's inner generateText call must abort too — otherwise the
+   * subordinate keeps streaming tokens while no one's listening.
+   */
+  abortSignal?: AbortSignal;
 }): Promise<string> {
   const settings = await getSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
@@ -1937,6 +1954,7 @@ export async function runSubordinateAgent(options: {
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      abortSignal: options.abortSignal,
     });
     const responseMessages = (
       result as unknown as { response?: { messages?: ModelMessage[] } }

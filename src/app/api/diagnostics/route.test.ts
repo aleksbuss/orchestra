@@ -301,7 +301,7 @@ describe("GET /api/diagnostics — provider API tests (per-vendor wire)", () => 
     });
     await callDiagnostics();
     const calls = fetchSpy.mock.calls.map((c: any[]) => String(c[0]));
-    expect(calls.some((u) => u.includes("generativelanguage.googleapis.com/v1beta/models"))).toBe(true);
+    expect(calls.some((u: string) => u.includes("generativelanguage.googleapis.com/v1beta/models"))).toBe(true);
   });
 
   it("Anthropic: POST to api.anthropic.com (the only POST in the diagnostic set)", async () => {

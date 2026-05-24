@@ -1903,12 +1903,13 @@ export function createAgentTools(
             "Detailed description of the task to delegate. Include all necessary context."
           ),
       }),
-      execute: async ({ task }) => {
+      execute: async ({ task }, { abortSignal }) => {
         return callSubordinate(
           task,
           context.projectId,
           context.agentNumber,
-          context.history
+          context.history,
+          abortSignal
         );
       },
     });

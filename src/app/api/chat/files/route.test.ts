@@ -52,7 +52,10 @@ function buildPostMultipart(
   const form = new FormData();
   if (chatId !== null) form.append("chatId", chatId);
   if (fileBytes !== null) {
-    form.append("file", new Blob([fileBytes]), filename);
+    // Cast — DOM lib's Uint8Array<ArrayBufferLike> isn't structurally
+    // assignable to BlobPart under bundler TS even though it works at
+    // runtime. This is a test fixture, the cast is fine.
+    form.append("file", new Blob([fileBytes as unknown as BlobPart]), filename);
   }
   return new NextRequest("http://localhost:3000/api/chat/files", {
     method: "POST",

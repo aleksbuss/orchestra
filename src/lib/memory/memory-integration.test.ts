@@ -3,20 +3,31 @@ import { insertMemory, searchMemory, deleteMemoryByQuery } from "./memory";
 import type { AppSettings } from "@/lib/types";
 
 describe("Vector RAG Database Integration Tests", () => {
-  const MOCK_SETTINGS: AppSettings = {
-    apiKey: "test-key",
-    model: "test-model",
-    chatModel: { provider: "openai", model: "gpt-4o", id: "test", name: "test", maxTokens: 4000, temperature: 0.7 },
+  // Test fixture rebuilt 2026-05 to match current AppSettings shape (the
+  // earlier literal carried fields like `id`, `name`, `url`, `apiKey` at
+  // the top level + `ui` block that no longer exist on the type). Using
+  // a cast-through-unknown for the fields we don't care about, but the
+  // important ones (chatModel/embeddingsModel/memory) are typed correctly.
+  const MOCK_SETTINGS = {
+    chatModel: { provider: "openai" as const, model: "gpt-4o", maxTokens: 4000, temperature: 0.7 },
+    // "mock" preserves the pre-refactor test behavior: the test fixture
+    // doesn't talk to a real embedding provider, it uses the mock path.
+    // We cast the whole settings object as unknown→AppSettings below, so
+    // the provider literal type mismatch is intentional and ignored.
     embeddingsModel: { provider: "mock", model: "mock-model", dimensions: 1536 },
-    projectsDir: "./test",
+    utilityModel: { provider: "openai" as const, model: "gpt-4o-mini", maxTokens: 4000, temperature: 0.7 },
     providerApiKeys: {},
-    utilityModel: { provider: "openai", model: "gpt-4o-mini", id: "test2", name: "test2", maxTokens: 4000, temperature: 0.7 },
     memory: {
-      url: "http://localhost:8000",
+      enabled: true,
       similarityThreshold: 0.5, // We use a low threshold for safe testing
+      maxResults: 10,
+      chunkSize: 400,
     },
-    ui: { theme: 'system', accentColor: 'blue', contentWidth: 'standard', enableAnimations: true }
-  };
+    codeExecution: { enabled: false, timeout: 60, maxOutputLength: 1000 },
+    search: { enabled: false, provider: "none" as const },
+    general: { darkMode: false, language: "en" },
+    auth: { enabled: false, username: "admin", passwordHash: "", mustChangeCredentials: false },
+  } as unknown as AppSettings;
 
   const TEST_SUBDIR = "rag-integration-testing-123";
 

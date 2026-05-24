@@ -716,30 +716,48 @@ async function executeCronJob(job: CronJob): Promise<RunResult> {
   };
 
   try {
-    const runPromise = runAgentText({
-      chatId,
-      userMessage: job.payload.message,
-      projectId,
-      currentPath: job.payload.currentPath,
-      runtimeData:
-        telegramChatId && telegramBotToken
-          ? {
-              telegram: {
-                botToken: telegramBotToken,
-                chatId: telegramChatId,
-              },
-            }
-          : undefined,
-    });
-    const output =
-      typeof timeoutMs === "number"
-        ? await Promise.race([
-            runPromise,
-            new Promise<string>((_, reject) => {
-              setTimeout(() => reject(new Error("Cron job execution timed out.")), timeoutMs);
-            }),
-          ])
-        : await runPromise;
+    // PM #23 — the previous implementation used Promise.race against a
+    // setTimeout to "abort" the cron job, but the loser of the race kept
+    // running in the background until natural completion: a budget violation
+    // that consumed tokens for the rejected outcome. With AbortSignal plumbed
+    // through runAgentText (and from there into generateText), the timeout
+    // now actually cancels the upstream LLM stream.
+    const cronAbort = new AbortController();
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    if (typeof timeoutMs === "number") {
+      timeoutHandle = setTimeout(() => {
+        cronAbort.abort(new Error("Cron job execution timed out."));
+      }, timeoutMs);
+    }
+
+    let output: string;
+    try {
+      output = await runAgentText({
+        chatId,
+        userMessage: job.payload.message,
+        projectId,
+        currentPath: job.payload.currentPath,
+        runtimeData:
+          telegramChatId && telegramBotToken
+            ? {
+                telegram: {
+                  botToken: telegramBotToken,
+                  chatId: telegramChatId,
+                },
+              }
+            : undefined,
+        abortSignal: cronAbort.signal,
+      });
+    } catch (err) {
+      // Re-throw with a stable user-facing message on timeout so downstream
+      // log/run-record handling identifies the cause consistently.
+      if (cronAbort.signal.aborted) {
+        throw new Error("Cron job execution timed out.");
+      }
+      throw err;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+    }
 
     const summary = output.trim();
     return await deliverToTelegram({

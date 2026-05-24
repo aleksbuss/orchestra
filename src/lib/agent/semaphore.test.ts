@@ -4,7 +4,7 @@
  * The Semaphore prevents VRAM exhaustion by limiting concurrent LLM calls.
  * Correctness here is critical for system stability under load.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { Semaphore } from "@/lib/agent/semaphore";
 
 describe("Semaphore", () => {

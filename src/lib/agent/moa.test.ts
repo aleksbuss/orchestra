@@ -152,7 +152,10 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       userMessage: "thanks",
       history: [],
       settings: fakeSettings(),
-      preset: "best",
+      // PresetTier is now narrowed to "custom" only (presets.ts gutted).
+      // Using "custom" preserves the original test intent: confirm bypass
+      // ignores ANY preset, regardless of which tier it is.
+      preset: "custom",
     });
 
     // Exactly one generateText call = the bypass call. If the ensemble had

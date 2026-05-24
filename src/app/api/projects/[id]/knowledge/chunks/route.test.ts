@@ -21,7 +21,9 @@ import { getProject } from "@/lib/storage/project-store";
 const mockedChunks = vi.mocked(getChunksByFilename);
 const mockedProject = vi.mocked(getProject);
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function buildReq(query: string): NextRequest {
   return new NextRequest(

@@ -1,6 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
-import { insertMemory, insertManyMemories, searchMemory, deleteMemoryByMetadata } from "@/lib/memory/memory";
+import { insertManyMemories, searchMemory, deleteMemoryByMetadata } from "@/lib/memory/memory";
 import type { AppSettings } from "@/lib/types";
 import { loadDocument } from "@/lib/memory/loaders";
 import { RecursiveCharacterTextSplitter } from "@/lib/memory/text-splitter";

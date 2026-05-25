@@ -166,6 +166,36 @@ describe("middleware — mustChangeCredentials gating for authenticated users", 
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toContain("credentials=1");
   });
+
+  it("returns 403 on /api/* when mustChangeCredentials — closes same-origin fetch under default creds", async () => {
+    // Without this gate, a session minted by `npm run auth:reset` (admin/admin
+    // + mustChangeCredentials: true) could hit every API endpoint until the
+    // operator clicked through the dashboard onboarding flow. The dashboard
+    // redirect alone is not enough — a same-origin fetch from any localhost
+    // page bypasses the UI entirely.
+    const cookie = await tokenFor({ mustChange: true });
+    for (const path of [
+      "/api/chat",
+      "/api/projects",
+      "/api/files",
+      "/api/settings",
+      "/api/events",
+    ]) {
+      const res = await middleware(makeRequest(path, { cookie, method: "POST" }));
+      expect(res.status, `mustChange API gate on ${path}`).toBe(403);
+      expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    }
+  });
+
+  it("ALLOWS /api/auth/credentials and /api/auth/logout under mustChangeCredentials — the recovery surface", async () => {
+    const cookie = await tokenFor({ mustChange: true });
+    // /api/auth/credentials must work so the user CAN actually change the
+    // password; /api/auth/logout so the UI can offer an escape hatch.
+    for (const path of ["/api/auth/credentials", "/api/auth/logout"]) {
+      const res = await middleware(makeRequest(path, { cookie, method: "PUT" }));
+      expect(res.status, `allowed under mustChange: ${path}`).not.toBe(403);
+    }
+  });
 });
 
 describe("middleware — root + invalid cookies", () => {

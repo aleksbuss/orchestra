@@ -116,6 +116,23 @@ export async function middleware(req: NextRequest) {
     return buildCredentialsOnboardingRedirect(req);
   }
 
+  // Mirror the dashboard gate on the API surface. Without this, a session
+  // logged in as default admin/admin (post `npm run auth:reset`) can hit every
+  // /api/* endpoint before the operator changes the password — a same-origin
+  // fetch from any localhost page would act as admin. Only the credentials-
+  // change and logout endpoints are kept reachable so the UI flow can recover.
+  if (
+    session.mustChangeCredentials &&
+    pathname.startsWith("/api/") &&
+    pathname !== "/api/auth/credentials" &&
+    pathname !== "/api/auth/logout"
+  ) {
+    return Response.json(
+      { error: "Must change default credentials before using the API." },
+      { status: 403 }
+    );
+  }
+
   if (pathname === "/") {
     return NextResponse.redirect(new URL("/dashboard", req.url));
   }

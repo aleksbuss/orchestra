@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 import { getSettings, saveSettings } from "@/lib/storage/settings-store";
 import { updateSettingsByPath } from "@/lib/settings/update-settings-path";
 import { MODEL_PROVIDERS } from "@/lib/providers/model-config";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 
 const ALLOWED_PATCH_ROOTS = new Set([
@@ -48,6 +49,10 @@ export async function PUT(req: NextRequest) {
     const updated = await saveSettings(sanitized);
     const masked = maskSettingsKeys(updated);
     masked.envApiKeys = getEnvApiKeyAvailability();
+    // Multi-tab: editing settings in Tab A used to leave Tab B's view stale
+    // until the next focus event. Settings affect every screen, so broadcast
+    // on "global" — the catch-all topic every consumer subscribes to.
+    publishUiSyncEvent({ topic: "global", reason: "[Settings] Settings saved." });
     return Response.json(masked);
   } catch (error) {
     return Response.json(
@@ -87,6 +92,7 @@ export async function PATCH(req: NextRequest) {
     const updated = updateSettingsByPath(current, path, value);
 
     const saved = await saveSettings(updated);
+    publishUiSyncEvent({ topic: "global", reason: "[Settings] Settings patched." });
     return Response.json(maskSettingsKeys(saved));
   } catch (error) {
     return Response.json(

@@ -24,10 +24,12 @@
  * Requires `npx playwright install chromium` (one-time setup; CI configs
  * already do this for the existing e2e suite).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
+import http from "http";
+import type { AddressInfo } from "net";
 
 // Mock the AI SDK so we script the model's actions; everything else (the
 // real `playwright` package, the real LLM provider factory) is left intact.
@@ -62,15 +64,26 @@ function fakeSettings(): AppSettings {
   };
 }
 
-// Build a self-contained HTML fixture as a `file://` URL so Playwright can
-// open it without a local server. Each test gets its own temp file.
+// Serve the fixture HTML over a per-test localhost HTTP server.
+//
+// Previously the fixtures lived at `file://`, but the SSRF guard added in
+// the 2026-05 P1.5/P2.6 hardening now rejects every non-http(s) protocol
+// before the browser launches. Loopback (`127.0.0.1` / `localhost`) is the
+// one private range the guard intentionally allows — that's the same
+// carve-out that lets `web_task` legitimately hit a local Ollama. So we
+// keep the test self-contained by spinning a real listener for each fixture.
 async function fixtureUrl(html: string): Promise<{ url: string; cleanup: () => Promise<void> }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-webtask-"));
-  const file = path.join(dir, "fixture.html");
-  await fs.writeFile(file, html, "utf-8");
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(html);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
   return {
-    url: `file://${file}`,
+    url: `http://127.0.0.1:${port}/`,
     cleanup: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
       try {
         await fs.rm(dir, { recursive: true, force: true });
       } catch {
@@ -82,6 +95,11 @@ async function fixtureUrl(html: string): Promise<{ url: string; cleanup: () => P
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+afterEach(() => {
+  // Ensures no straggling listeners survive a test that throws past cleanup.
+  // Each test owns its server lifetime explicitly, but defence-in-depth.
 });
 
 describe("web_task — integration against real Playwright (local fixture)", () => {

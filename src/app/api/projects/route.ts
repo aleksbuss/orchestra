@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { getAllProjects, createProject } from "@/lib/storage/project-store";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
 export async function GET() {
   const projects = await getAllProjects();
@@ -31,6 +32,14 @@ export async function POST(req: NextRequest) {
       description: description || "",
       instructions: instructions || "",
       memoryMode: memoryMode || "global",
+    });
+
+    // Sidebar project list subscribes to "projects" — without this broadcast
+    // the new project is invisible until next focus/visibility resync.
+    publishUiSyncEvent({
+      topic: "projects",
+      projectId: project.id,
+      reason: "[Project] Project created.",
     });
 
     return Response.json(project, { status: 201 });

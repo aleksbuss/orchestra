@@ -4,6 +4,7 @@ import {
   updateProject,
   deleteProject,
 } from "@/lib/storage/project-store";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
 export async function GET(
   _req: NextRequest,
@@ -27,6 +28,11 @@ export async function PUT(
   if (!updated) {
     return Response.json({ error: "Project not found" }, { status: 404 });
   }
+  publishUiSyncEvent({
+    topic: "projects",
+    projectId: id,
+    reason: "[Project] Project updated.",
+  });
   return Response.json(updated);
 }
 
@@ -39,5 +45,10 @@ export async function DELETE(
   if (!deleted) {
     return Response.json({ error: "Project not found" }, { status: 404 });
   }
+  publishUiSyncEvent({
+    topic: "projects",
+    projectId: id,
+    reason: "[Project] Project deleted.",
+  });
   return Response.json({ success: true });
 }

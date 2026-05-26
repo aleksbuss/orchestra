@@ -13,6 +13,16 @@ export interface AgentJobPayload {
   projectId?: string;
   currentPath?: string;
   swarmEnabled?: boolean;
+  /**
+   * Mirrors `RunAgentOptions.forceSwarm` — when `true`, the MoA Router's
+   * `requiresSwarm: false` verdict is overridden and the full proposer
+   * fan-out runs. Background mode must accept this for the same reason
+   * the interactive path does (PM #22): any user-facing escape hatch that
+   * can be short-circuited by an internal optimisation MUST be threaded
+   * through every dispatch path, or the override silently disappears the
+   * moment the user enables Auto-Pilot.
+   */
+  forceSwarm?: boolean;
   preset?: PresetTier;
 }
 

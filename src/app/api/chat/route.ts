@@ -90,6 +90,11 @@ export async function POST(req: NextRequest) {
           projectId,
           currentPath: typeof currentPath === "string" ? currentPath : undefined,
           swarmEnabled: swarmEnabled ?? true,
+          // PM #22 follow-up: same override the interactive branch receives at
+          // L114. Dropping this here was the silent half of the bug — a user
+          // with Force ON who flipped to Auto-Pilot lost their override the
+          // moment the Router decided `requiresSwarm: false`.
+          forceSwarm: forceSwarm === true,
           preset,
         });
 

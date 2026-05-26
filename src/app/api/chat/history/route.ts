@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { getAllChats, getChat, deleteChat } from "@/lib/storage/chat-store";
+import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
 export async function GET(req: NextRequest) {
   const chatId = req.nextUrl.searchParams.get("id");
@@ -36,6 +37,10 @@ export async function DELETE(req: NextRequest) {
   if (!deleted) {
     return Response.json({ error: "Chat not found" }, { status: 404 });
   }
+
+  // Sidebar/chat list subscribes to "chat" — without this broadcast the
+  // deleted chat stays in the list until the next focus/visibility resync.
+  publishUiSyncEvent({ topic: "chat", chatId, reason: "[Chat] Chat deleted." });
 
   return Response.json({ success: true });
 }

@@ -175,6 +175,45 @@ describe("PM #7 — production setTimeout path (integration; Defect #6 from 2026
     expect(hasPendingAutoPilotTimeout(chatId)).toBe(false);
   });
 
+  it("PM #22 follow-up — forceSwarm is forwarded to runAgent in background mode", async () => {
+    // The interactive path (api/chat/route.ts L114) sent forceSwarm down all
+    // along. The background dispatch silently dropped it: a user with the
+    // Force pill ON who flipped to Auto-Pilot would lose the override the
+    // moment the Router decided `requiresSwarm: false`. This pins the
+    // contract on the daemon side so a future refactor can't re-introduce
+    // the gap.
+    const chatId = "pm22-force-swarm-background";
+
+    vi.mocked(runAgent).mockResolvedValue({
+      text: Promise.resolve("done"),
+    } as unknown as Awaited<ReturnType<typeof runAgent>>);
+    vi.mocked(getActiveGoal).mockResolvedValue(null);
+
+    await dispatchAgentJob({
+      chatId,
+      userMessage: "hello",
+      swarmEnabled: true,
+      forceSwarm: true,
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(runAgent).toHaveBeenCalledWith(
+          expect.objectContaining({ forceSwarm: true })
+        );
+      },
+      { timeout: 1000, interval: 10 }
+    );
+
+    // Bonus: the persisted queue entry must also carry the flag, so a
+    // server restart mid-run resumes with the override intact.
+    expect(enqueueJob).toHaveBeenCalledWith(
+      expect.objectContaining({ forceSwarm: true })
+    );
+
+    abortJob(chatId);
+  });
+
   it("does NOT register an auto-pilot timeout when the goal has no pending tasks", async () => {
     const chatId = "pm7-no-pending";
 

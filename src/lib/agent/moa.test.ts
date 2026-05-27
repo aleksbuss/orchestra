@@ -122,6 +122,121 @@ describe("MOA_PROPOSERS — static fallback constant", () => {
   });
 });
 
+describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => {
+  // Audit finding: CLAUDE.md §1 promises "one DPG role is ALWAYS forced to
+  // be a QA Auditor / Skeptic". Pre-PM-37, this was enforced via a prompt
+  // instruction — a weak utility-model could (and did, in testing) return
+  // 3-5 personas without any critic. Now the code POST-VALIDATES the LLM
+  // output and force-injects the canonical Adversarial Critic when absent.
+  it("LLM returns 3 personas with NO skeptic → critic is injected", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] analyse [RULES] use data [FORMAT] markdown", color: "blue" },
+          { id: "implementer", role: "Implementation Engineer", systemPrompt: "[GOAL] ship [RULES] no perf bugs [FORMAT] code", color: "green" },
+          { id: "writer", role: "Documentation Writer", systemPrompt: "[GOAL] explain [RULES] no jargon [FORMAT] paragraphs", color: "purple" },
+        ],
+      },
+    } as any);
+    // Stub proposers — return short drafts so aggregation also fires.
+    mockedGenerateText.mockResolvedValue({ text: "ok" } as any);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a system",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Drafts include the canonical critic — count is 4, the critic appears
+    // in the roster.
+    expect(result.drafts).toHaveLength(4);
+    const hasSkeptic = result.drafts.some(d =>
+      /critic|skeptic|auditor|red.?team|adversari/i.test(d.proposerId) ||
+      /critic|skeptic|auditor|red.?team|adversari/i.test(d.role)
+    );
+    expect(hasSkeptic).toBe(true);
+  });
+
+  it("LLM already includes a skeptic → no injection (count unchanged)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "tax_lawyer", role: "Senior Tax Attorney", systemPrompt: "[GOAL] tax [RULES] cite IRC [FORMAT] markdown", color: "blue" },
+          { id: "skeptic_auditor", role: "QA Auditor", systemPrompt: "[GOAL] doubt [RULES] hunt edge cases [FORMAT] bullets", color: "rose" },
+          { id: "domain_expert", role: "Domain Expert", systemPrompt: "[GOAL] depth [RULES] cite sources [FORMAT] structured", color: "purple" },
+        ],
+      },
+    } as any);
+    mockedGenerateText.mockResolvedValue({ text: "ok" } as any);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "tax question",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Exactly 3 drafts — no injection happened because skeptic_auditor was
+    // already in the LLM output.
+    expect(result.drafts).toHaveLength(3);
+  });
+
+  it("LLM returns 5 personas with no skeptic → tail is evicted to make room for critic (cap stays at 5)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "p1", role: "Role 1", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "blue" },
+          { id: "p2", role: "Role 2", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "green" },
+          { id: "p3", role: "Role 3", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "purple" },
+          { id: "p4", role: "Role 4", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "orange" },
+          // Tail position — will be evicted.
+          { id: "p5_tail", role: "Role 5 (tail)", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "amber" },
+        ],
+      },
+    } as any);
+    mockedGenerateText.mockResolvedValue({ text: "ok" } as any);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.drafts).toHaveLength(5);
+    const ids = result.drafts.map(d => d.proposerId);
+    expect(ids).toContain("critic"); // injected
+    expect(ids).not.toContain("p5_tail"); // evicted to keep ≤ 5
+  });
+
+  it("requiresSwarm=false → no injection (the swarm doesn't run; nothing to enforce)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: false,
+        // Empty personas — the LLM correctly omitted them on a trivial prompt.
+        personas: [],
+      },
+    } as any);
+    mockedGenerateText.mockResolvedValueOnce({ text: "hi back" } as any);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "hi",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Bypass path — only the single direct-answer generateText fired, no
+    // proposers, no aggregator. Nothing to inject into.
+    expect(result.drafts).toEqual([]);
+    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
   it("calls the brain model exactly once and returns no drafts", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
@@ -326,10 +441,14 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
     // When Router says `requiresSwarm: true`, the swarm runs regardless of
     // the flag. The flag's only job is to override `false → true`, never
     // the other way around.
+    // PM #37 — must include a skeptic in the test data, otherwise the
+    // Skeptic-injection guard now adds one and bumps the call count.
+    // Picking analyst (0) + critic (3) + chameleon (4) gives the swarm
+    // its required Adversarial Critic so the guard stays inert here.
     mockedGenerateObject.mockResolvedValueOnce({
       object: {
         requiresSwarm: true,
-        personas: MOA_PROPOSERS.slice(0, 3).map((p) => ({
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
           id: p.id,
           role: p.role,
           systemPrompt: p.systemPrompt,

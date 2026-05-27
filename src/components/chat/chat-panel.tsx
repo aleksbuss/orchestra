@@ -13,6 +13,7 @@ import { useChatError } from "@/hooks/use-chat-error";
 import { generateClientId } from "@/lib/utils";
 import { GoalTree } from "@/components/chat/goal-tree";
 import { ChatErrorBanner } from "@/components/chat/chat-error-banner";
+import { BudgetBanner } from "@/components/chat/budget-banner";
 
 /** Convert stored ChatMessage to UIMessage (parts format for useChat) */
 function chatMessagesToUIMessages(chatMessages: ChatMessage[]): UIMessage[] {
@@ -248,6 +249,12 @@ export function ChatPanel() {
   const { error: chatError, dismiss: dismissChatError } = useChatError(
     activeChatId || internalChatId
   );
+  // PM #36 — soft budget banner snapshot for the active chat. Populated from
+  // /api/chat/history (whole chat object includes `cumulativeUsage`); cleared
+  // when switching to a chat with no recorded usage.
+  const [cumulativeUsage, setCumulativeUsage] = useState<
+    import("@/lib/types").ChatUsage | undefined
+  >(undefined);
   const syncTick = useBackgroundSync({
     topics: ["chat", "global"],
     projectId: activeProjectId ?? null,
@@ -382,7 +389,7 @@ export function ChatPanel() {
           return null;
         }
         if (!r.ok) throw new Error("Failed to load chat");
-        return r.json() as Promise<{ messages?: ChatMessage[] }>;
+        return r.json() as Promise<{ messages?: ChatMessage[]; cumulativeUsage?: import("@/lib/types").ChatUsage }>;
       })
       .then((chat) => {
         if (cancelled) return;
@@ -393,8 +400,12 @@ export function ChatPanel() {
 
         if (!chat?.messages) {
           setMessages([]);
+          setCumulativeUsage(undefined);
           return;
         }
+
+        // PM #36 — pick up the chat's running cost banner snapshot.
+        setCumulativeUsage(chat.cumulativeUsage);
 
         const nextMessages = chatMessagesToUIMessages(chat.messages);
         if (areUIMessagesEquivalentById(messagesRef.current, nextMessages)) {
@@ -674,6 +685,10 @@ export function ChatPanel() {
       {chatError && (
         <ChatErrorBanner error={chatError} onDismiss={dismissChatError} />
       )}
+
+      {/* PM #36 — running tokens + cost estimate for this chat. Unobtrusive;
+          hidden when no LLM call has landed yet. Hover for breakdown. */}
+      <BudgetBanner usage={cumulativeUsage} />
 
       <ChatMessages messages={messages} isLoading={isLoading} status={status} />
       

@@ -101,6 +101,25 @@ export interface Attachment {
   path?: string;
 }
 
+/**
+ * Soft per-chat budget tracking (PM #36). Accumulated across every LLM call
+ * within this chat — main streamText, MoA Router, MoA proposers, MoA
+ * aggregator, reflection, etc. Sums input + output tokens × pricing into a
+ * single USD figure for the chat-panel banner.
+ *
+ * Not a hard cap; the operator can keep chatting even if cost is high.
+ * `fullyPriced` is false when any contributing model had unknown pricing —
+ * in that case the displayed cost is a lower bound and the UI labels it
+ * with a "~" prefix.
+ */
+export interface ChatUsage {
+  promptTokens: number;
+  completionTokens: number;
+  costUsd: number;
+  /** False if at least one recorded LLM call had no pricing entry. */
+  fullyPriced: boolean;
+}
+
 export interface Chat {
   id: string;
   title: string;
@@ -108,6 +127,8 @@ export interface Chat {
   messages: ChatMessage[];
   createdAt: string;
   updatedAt: string;
+  /** Cumulative LLM usage across all turns in this chat. PM #36. */
+  cumulativeUsage?: ChatUsage;
 }
 
 export const AttachmentSchema = z.object({
@@ -133,6 +154,13 @@ export const ChatMessageSchema = z.object({
   attachments: z.array(AttachmentSchema).optional(),
 });
 
+export const ChatUsageSchema = z.object({
+  promptTokens: z.number().nonnegative(),
+  completionTokens: z.number().nonnegative(),
+  costUsd: z.number().nonnegative(),
+  fullyPriced: z.boolean(),
+});
+
 export const ChatSchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -140,6 +168,7 @@ export const ChatSchema = z.object({
   messages: z.array(ChatMessageSchema),
   createdAt: z.string(),
   updatedAt: z.string(),
+  cumulativeUsage: ChatUsageSchema.optional(),
 });
 
 export interface ChatListItem {

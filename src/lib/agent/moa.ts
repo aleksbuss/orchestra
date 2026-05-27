@@ -14,6 +14,7 @@
 import { generateText, generateObject, tool, type ModelMessage } from "ai";
 import { addUsageToCumulative } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
+import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
 import { z } from "zod";
 import { createModel } from "@/lib/providers/llm-provider";
 import type { ModelConfig, AppSettings } from "@/lib/types";
@@ -708,7 +709,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     });
 
     const aggregationLatencyMs = Date.now() - aggStart;
-    const finalText = aggResult.text?.trim() || "(aggregation produced empty output)";
+    let finalText = aggResult.text?.trim() || "(aggregation produced empty output)";
 
     console.log(`[MoA] Aggregation completed in ${aggregationLatencyMs}ms (${finalText.length} chars)`);
 
@@ -719,6 +720,67 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       brainConfig.model,
       aggResult.usage
     );
+
+    // PM #38 — generator-critic-revisor loop. Wires the previously-dead
+    // reflection.ts module into the MoA flow. When the operator enables
+    // `settings.reflection.enabled`, the aggregator output is reviewed by
+    // a cheap utility-model critic; flagged issues trigger one revisor
+    // pass on the brain model. Capped at ONE round — the cost is now
+    // visible in the budget banner (PM #36), but two-round runaway is
+    // architecturally easy and we don't want to ship that footgun yet.
+    if (settings.reflection?.enabled) {
+      try {
+        const reflection = await reflectOnResponse({
+          userMessage,
+          agentResponse: finalText,
+          settings,
+          projectId,
+          abortSignal,
+        });
+        if (reflection.usage && reflection.modelConfig) {
+          moaUsage = addUsageToCumulative(
+            moaUsage,
+            reflection.modelConfig.provider,
+            reflection.modelConfig.model,
+            reflection.usage
+          );
+        }
+        if (reflection.shouldRevise && reflection.critique) {
+          console.log(
+            `[MoA] Reflection flagged the aggregator output — revising. Critique: ${reflection.critique.slice(0, 120)}`
+          );
+          const revision = await reviseWithCritique({
+            userMessage,
+            originalResponse: finalText,
+            critique: reflection.critique,
+            suggestion: reflection.suggestion,
+            settings,
+            modelOverride: brainConfig,
+            projectId,
+            abortSignal,
+          });
+          if (revision.usage && revision.modelConfig) {
+            moaUsage = addUsageToCumulative(
+              moaUsage,
+              revision.modelConfig.provider,
+              revision.modelConfig.model,
+              revision.usage
+            );
+          }
+          finalText = revision.text;
+          console.log(
+            `[MoA] Reflection revision applied (${finalText.length} chars after revise)`
+          );
+        }
+      } catch (reflectionErr) {
+        // Reflection is a quality-improvement pass, never a blocker — log
+        // and continue with the un-revised aggregator output.
+        console.warn(
+          "[MoA] Reflection loop failed (non-fatal, keeping original):",
+          reflectionErr
+        );
+      }
+    }
 
     publishUiSyncEvent({
       topic: "chat",

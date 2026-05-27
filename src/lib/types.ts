@@ -52,6 +52,17 @@ export interface AppSettings {
     apiKey?: string;
     baseUrl?: string;
   };
+  /**
+   * Post-aggregator reflection loop (PM #38). When enabled, the MoA
+   * aggregator output is reviewed by a critic LLM; if the critic flags
+   * factual errors / incomplete answers / code bugs / etc, a revisor
+   * pass produces a corrected response. Capped at ONE round to bound
+   * cost — soft budget banner from PM #36 makes the extra spend visible.
+   * Defaults to disabled — opt-in feature.
+   */
+  reflection?: {
+    enabled: boolean;
+  };
   general: {
     darkMode: boolean;
     language: string;

@@ -1,6 +1,7 @@
 import { generateText } from "ai";
 import { createModel } from "@/lib/providers/llm-provider";
-import type { AppSettings } from "@/lib/types";
+import type { AppSettings, ModelConfig } from "@/lib/types";
+import type { RawUsage } from "@/lib/cost/accumulator";
 
 const REFLECTION_SYSTEM_PROMPT = `You are a QA Auditor reviewing an AI agent's response. Analyze the response for:
 
@@ -23,10 +24,30 @@ Rules:
 - Never flag the response for being brief if it answers the question.
 - Be concise in critique and suggestion — max 2 sentences each.`;
 
+const REVISOR_SYSTEM_PROMPT = `You are a careful editor. Given an original AI response AND a specific critique with suggested fixes, produce a revised version that fixes the issues identified.
+
+Rules:
+- Keep the parts of the original that were not flagged as problematic.
+- Apply the suggested fixes precisely.
+- Do NOT introduce new claims or sections that weren't in the original or the critique.
+- Preserve code blocks verbatim except where the critique specifically targets them.
+- Output ONLY the revised response — no preamble like "Here is the revised version" and no explanation of what you changed.`;
+
 export interface ReflectionResult {
   shouldRevise: boolean;
   critique: string;
   suggestion: string;
+  /** PM #36 — token usage so the caller can fold this into the chat banner. */
+  usage?: RawUsage;
+  /** Which model produced the reflection (provider, model) — for cost attribution. */
+  modelConfig?: Pick<ModelConfig, "provider" | "model">;
+}
+
+export interface RevisionResult {
+  /** The revised text — replaces the original aggregator output. */
+  text: string;
+  usage?: RawUsage;
+  modelConfig?: Pick<ModelConfig, "provider" | "model">;
 }
 
 /**
@@ -71,6 +92,10 @@ export async function reflectOnResponse(params: {
     });
 
     const text = result.text.trim();
+    const modelAttribution = {
+      provider: modelConfig.provider,
+      model: modelConfig.model,
+    };
 
     // Try to parse JSON from the response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -81,16 +106,106 @@ export async function reflectOnResponse(params: {
           shouldRevise: Boolean(parsed.shouldRevise),
           critique: typeof parsed.critique === "string" ? parsed.critique : "",
           suggestion: typeof parsed.suggestion === "string" ? parsed.suggestion : "",
+          usage: result.usage as RawUsage | undefined,
+          modelConfig: modelAttribution,
         };
       } catch {
-        // JSON parse failed — treat as no issues
+        // JSON parse failed — treat as no issues (still record usage so the
+        // banner reflects what the failed reflection attempt cost).
       }
     }
 
-    return { shouldRevise: false, critique: "", suggestion: "" };
+    return {
+      shouldRevise: false,
+      critique: "",
+      suggestion: "",
+      usage: result.usage as RawUsage | undefined,
+      modelConfig: modelAttribution,
+    };
   } catch (err) {
     // Reflection failure should never block the main response
     console.warn("[Reflection] Self-critique failed, skipping:", err);
     return { shouldRevise: false, critique: "", suggestion: "" };
+  }
+}
+
+/**
+ * Apply a reflection critique to revise the original response (PM #38).
+ *
+ * Generator-Critic-Revisor loop pattern (Reflexion / LangChain Reflection
+ * Agents). Runs on the BRAIN model — the revisor needs the same horsepower
+ * as the original aggregator since it must preserve correct content while
+ * fixing the flagged issues. Failure modes:
+ *
+ *   - Revisor throws → return original text unchanged (never block on a
+ *     revision step; the user gets the original aggregator output).
+ *   - Revisor empties response → keep original (defensive).
+ *
+ * Usage capture is mandatory (PM #36 cost-banner contract).
+ */
+export async function reviseWithCritique(params: {
+  userMessage: string;
+  originalResponse: string;
+  critique: string;
+  suggestion: string;
+  settings: AppSettings;
+  /** Optional override — defaults to settings.chatModel (the brain). */
+  modelOverride?: ModelConfig;
+  projectId?: string;
+  abortSignal?: AbortSignal;
+}): Promise<RevisionResult> {
+  const {
+    userMessage,
+    originalResponse,
+    critique,
+    suggestion,
+    settings,
+    modelOverride,
+    projectId,
+    abortSignal,
+  } = params;
+
+  try {
+    const modelConfig = { ...(modelOverride ?? settings.chatModel) };
+    if (!modelConfig.apiKey && settings.providerApiKeys?.[modelConfig.provider]) {
+      modelConfig.apiKey = settings.providerApiKeys[modelConfig.provider];
+    }
+    const model = createModel(modelConfig, { projectId });
+
+    const result = await generateText({
+      model,
+      system: REVISOR_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content:
+            `## User's original message:\n${userMessage}\n\n` +
+            `## Original response:\n${originalResponse}\n\n` +
+            `## Critique:\n${critique}\n\n` +
+            `## Suggested fix:\n${suggestion}`,
+        },
+      ],
+      temperature: 0.3,
+      maxOutputTokens: Math.max(modelConfig.maxTokens ?? 4096, 2048),
+      abortSignal,
+    });
+
+    const revisedText = result.text?.trim() ?? "";
+    if (!revisedText) {
+      console.warn("[Reflection] Revisor produced empty output — keeping original.");
+      return { text: originalResponse };
+    }
+
+    return {
+      text: revisedText,
+      usage: result.usage as RawUsage | undefined,
+      modelConfig: {
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+      },
+    };
+  } catch (err) {
+    console.warn("[Reflection] Revision step failed, keeping original:", err);
+    return { text: originalResponse };
   }
 }

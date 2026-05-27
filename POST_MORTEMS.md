@@ -38,6 +38,39 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 38. Reflection Module Was Dead Code — Wired into MoA as Generator-Critic-Revisor Loop
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (feature already built, just disconnected; deep-audit finding from the 2026-05-27 MoA roadmap)
+**Symptoms:** No live incident. The 2026-05-27 MoA audit ran `grep -rn "reflectOnResponse" src/ --exclude='*.test.*'` and found **zero production callsites**. The self-critique module ([`src/lib/agent/reflection.ts`](src/lib/agent/reflection.ts)) was fully implemented and thoroughly tested (8 unit tests in `reflection.test.ts`), but no agent path ever invoked it. The CLAUDE.md positioning of Orchestra as a sophisticated MoA framework included reflection-pattern claims that were aspirational, not delivered.
+**Root Cause:** Reflection was built as a standalone capability with the intent to integrate later. "Later" never came — the integration point (post-aggregator in MoA) wasn't obvious because the original MoA implementation was one-pass fan-in. Without a clear wiring location, the module sat orphaned. Classic capability-vs-behavior gap.
+**Resolution:** Three changes:
+  1. **Extended `reflectOnResponse`** to return `{ shouldRevise, critique, suggestion, usage, modelConfig }`. The usage + modelConfig fields let the caller attribute reflection cost via the PM #36 cost-banner contract.
+  2. **New `reviseWithCritique` function** in reflection.ts. Generator-Critic-Revisor (Reflexion / LangChain Reflection Agents pattern): takes original response + critique + suggestion, returns revised text. Runs on the BRAIN model (same horsepower as the original aggregator since it must preserve correct content while fixing flagged issues). Defensive return paths: revisor throw → return original; empty revision → return original. Never blocks the response.
+  3. **Wired into [`runMoAEnsemble`](src/lib/agent/moa.ts) post-aggregator**, gated on `settings.reflection?.enabled`. Capped at **one** round (not the literature's 2-3) — the cost is now visible via the PM #36 banner, but multi-round runaway is a footgun we don't want to ship yet. Reflection failure is fully non-fatal (try/catch with warn-only logging; original aggregator output ships unchanged).
+
+**Settings shape (new in `AppSettings`):**
+```ts
+reflection?: { enabled: boolean }; // default: disabled, opt-in
+```
+
+**Cost envelope** for a Swarm-ON message with reflection enabled, worst case:
+  - Router (DPG): 1 call (utility-model)
+  - Proposers: 3-5 calls (worker-model)
+  - Aggregator: 1 call (brain-model)
+  - Reflection critic: 1 call (utility-model)
+  - Revisor (only if critic flags): 1 call (brain-model)
+  - **Total: 7-9 LLM calls per user turn.** Banner from PM #36 makes this visible.
+
+**Regression Coverage:**
+  - [`src/lib/agent/reflection.test.ts`](src/lib/agent/reflection.test.ts) — 6 new cases: reflectOnResponse returns usage + modelConfig on success; short-circuit returns no usage; reviseWithCritique returns revised text + usage + modelConfig; revisor throw → original returned; empty revision → original returned; modelOverride wins over settings.chatModel.
+  - [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 5 new cases under `describe("PM #38 — reflection loop wired into MoA after aggregator")`: reflection disabled by default (no extra LLM call); enabled + clean critic → reflection fires, text unchanged; enabled + flagged critic → revisor runs, text replaced; reflection failure → un-revised text ships; cumulativeUsage folds reflection + revisor tokens correctly (PM #36 cross-test).
+
+**Doc Updates:** None to CLAUDE.md required — the section §1 already names reflection as a planned capability. If we shipped a v2 README, that's where the feature toggle would live ("Enable reflection in Settings for a generator-critic-revisor loop").
+**Rule:** Capabilities without wiring are zero-value. When adding a new agent module, the same PR must include the integration point — even if the integration is gated behind a default-off feature flag. Tests for the unwired module are necessary but not sufficient: at least one integration test must exercise the call path from the agent dispatcher. Audit grep: `grep -L "import.*<new-module>" src/lib/agent/agent.ts src/lib/agent/moa.ts` after merging a new agent module — if neither file imports it, the module is dead code by default.
+
+---
+
 ## 37. MoA "QA Auditor Always Forced" Was a Prompt Suggestion, Not Enforced
 **Date:** 2026-05
 **Status:** RESOLVED

@@ -9,6 +9,7 @@ import {
 } from "ai";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import {
   classifyModelError,
   pickFallbackModel,
@@ -1326,6 +1327,12 @@ export async function runAgent(options: RunAgentOptions) {
   // defied the explicit user intent expressed by the toggle. Removed in the
   // 2026-05 fix tracked as PM #9. Routing decisions belong to the Router,
   // not to a brittle regex on the entry path.
+  // PM #36 — track every LLM call's usage so the soft budget banner reflects
+  // total tokens + cost across MoA + main stream. The MoA bundle bubbles up
+  // its own running sum via `moaResult.cumulativeUsage`; we hold it here and
+  // merge it with the streamText `onFinish` usage at save time.
+  let turnExtraUsage: import("@/lib/types").ChatUsage | undefined = undefined;
+
   if (options.swarmEnabled !== false) {
     try {
       console.log(`[MoA] Ensemble mode active — running parallel expert consultation...`);
@@ -1340,6 +1347,7 @@ export async function runAgent(options: RunAgentOptions) {
         abortSignal: options.abortSignal,
         forceSwarm: options.forceSwarm,
       });
+      turnExtraUsage = moaResult.cumulativeUsage;
 
       if (moaResult.text && !moaResult.text.startsWith("All MoA proposer agents failed")) {
         const truncatedConsensus = moaResult.text.length > 5000
@@ -1528,6 +1536,14 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           try { await mcpCleanup(); } catch { /* non-critical */ }
         }
 
+        // PM #36 — collect the main streamText turn's usage. Vercel AI SDK
+        // returns this in the onFinish event regardless of whether the turn
+        // ended via tool-call, stop, or length. May be undefined for some
+        // providers; the accumulator handles that as a zero-add.
+        const streamUsage =
+          (event as unknown as { usage?: import("@/lib/cost/accumulator").RawUsage })
+            .usage ?? undefined;
+
         try {
           await updateChat(options.chatId, (chat) => {
             const now = new Date().toISOString();
@@ -1549,6 +1565,20 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 options.userMessage.slice(0, 60) +
                 (options.userMessage.length > 60 ? "..." : "");
             }
+            // PM #36 — fold streamText turn usage + MoA bundle usage into
+            // the running per-chat cumulative. Resolved chat-model identity
+            // is captured in `resolvedModelConfig` from the outer scope.
+            let next = chat.cumulativeUsage;
+            next = addUsageToCumulative(
+              next,
+              resolvedModelConfig.provider,
+              resolvedModelConfig.model,
+              streamUsage
+            );
+            if (turnExtraUsage) {
+              next = mergeUsage(next, turnExtraUsage);
+            }
+            chat.cumulativeUsage = next;
             return chat;
           });
         } catch (saveErr) {

@@ -38,6 +38,36 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 36. Soft Per-Chat Budget Banner — Token + USD Cost Awareness in the Chat UI
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (no incident; preventive UX improvement. Targets the "I ran auto-pilot for half an hour and now my OpenAI invoice has three commas" failure mode that has hit MANY pet-project operators sharing the tool with friends.)
+**Symptoms:** No live incident yet. Surfaced by the 2026-05-27 roadmap discussion: the only cost-control mechanism in Orchestra is `MAX_AUTO_PILOT_ITERATIONS = 50` (daemon.ts) which caps loop count, NOT cost. With MoA × 5 proposers × up to 3 retries × 50 iterations on a frontier model, a single Auto-Pilot turn could rack up double-digit USD before the iteration cap fires. Operators sharing Orchestra with friends/community lacked any signal of accumulating spend.
+**Root Cause:** Vercel AI SDK already returns per-call `usage: { promptTokens, completionTokens }` (v5) or `{ inputTokens, outputTokens }` (v6) from every `generateText` / `generateObject` / `streamText` call. Orchestra captured none of it — neither in the main streamText `onFinish` nor inside MoA's Router/proposers/aggregator. There was simply no per-chat token or cost ledger.
+**Resolution:** Three small modules + four wiring sites + UI banner. Soft only — never blocks, just informs.
+
+  1. **`src/lib/cost/pricing.ts`** — substring-matched pricing table for major model families (OpenAI gpt-4o/4o-mini/o1, Anthropic claude-opus-4-7/sonnet-4-6/haiku-4-5/3-5-sonnet/3-5-haiku, Google gemini-2.5/2.0/1.5-flash/1.5-pro, OpenAI families up to gpt-4-turbo) plus OpenRouter passthrough (decompose `openrouter/<upstream>/<model>` and route to upstream's pricing). Local providers (ollama, codex-cli, gemini-cli) always priced at $0. Unknown (provider, model) returns `null` — the banner labels honestly rather than fabricating zero. 18 tests pin the matching order (gpt-4o-mini before gpt-4o, etc.) and the unknown→null contract.
+
+  2. **`src/lib/cost/accumulator.ts`** — `normalizeUsage` (accepts both v5 + v6 SDK field names), `addUsageToCumulative` (pure fn: add one call's usage to a running `ChatUsage` total), `mergeUsage` (combine two cumulatives, AND-merge `fullyPriced`). Once any call hits the unknown-pricing branch, `fullyPriced: false` propagates forever — the displayed cost becomes a lower bound. 11 tests cover the field-naming variants, unknown-pricing propagation, and local-provider zero-cost correctness.
+
+  3. **`Chat.cumulativeUsage`** (new field in `src/lib/types.ts` + `ChatSchema`) — `{ promptTokens, completionTokens, costUsd, fullyPriced }`. Persisted in `data/chats/<id>.json` alongside the messages. Optional for backwards compat with pre-PM-36 chats.
+
+  4. **MoA bundle usage** — `MoAResult.cumulativeUsage` now bubbles up the Router + every proposer + aggregator's tokens. Proposers run in `Promise.all` and `result.usage` is collected as part of each draft return, then reduced single-threaded after `Promise.all` settles (avoids the race-shape where parallel branches mutate a shared accumulator).
+
+  5. **`streamText` onFinish** in agent.ts merges the main-turn usage + MoA bundle into `chat.cumulativeUsage` inside the existing `updateChat` mutator, so the whole save is one atomic write.
+
+  6. **UI** — new `<BudgetBanner>` component in `src/components/chat/budget-banner.tsx` renders a single line under the chat header: `${tokensFormatted} tokens · ~${costFormatted}`. Hidden when no LLM call has landed. Hover tooltip shows the prompt/completion breakdown + a "verify against your provider invoice" disclaimer. `fullyPriced: false` flips the label to `cost unknown (no pricing data for this model)` rather than misleading $0.00.
+
+**What this is NOT:**
+  - Not a hard limit. The operator can keep chatting at any cost.
+  - Not a billing-grade ledger. Pricing is a snapshot table updated by hand (~2-3× per year per provider); for live pricing, swap to OpenRouter's `/api/v1/models` (same shape used in `model-fallback.ts` for the catalog).
+  - Not a per-operator quota. Single-trusted-operator model — no auth-tied limits.
+**Regression Coverage:** [`src/lib/cost/pricing.test.ts`](src/lib/cost/pricing.test.ts) (18 cases), [`src/lib/cost/accumulator.test.ts`](src/lib/cost/accumulator.test.ts) (11 cases). 29 total.
+**Doc Updates:** None to CLAUDE.md — this is a feature, not an architectural rule. If a future audit finds the banner under-/over-counting, the contract to encode is "every LLM call must capture `result.usage` and accumulate via `addUsageToCumulative`" — at that point add a Critical Rule.
+**Rule:** Token-level usage data exists in every Vercel AI SDK response. Capturing it is ~5 LOC per callsite. Don't ship a new LLM-touching feature without either (a) accumulating usage into the chat's cumulative, OR (b) documenting why the call is exempt (e.g. local-model only, or fire-and-forget background work). PR template: "Does this PR add a new generateText/generateObject/streamText call? If yes, where does its `result.usage` land?"
+
+---
+
 ## 35. Cold-Boot Lifecycle Gap — SIGTERM-Flush and Sweepers Were Lazy-Init, Not Boot-Init
 **Date:** 2026-05
 **Status:** RESOLVED

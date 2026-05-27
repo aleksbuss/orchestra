@@ -12,6 +12,8 @@
  */
 
 import { generateText, generateObject, tool, type ModelMessage } from "ai";
+import { addUsageToCumulative } from "@/lib/cost/accumulator";
+import type { ChatUsage } from "@/lib/types";
 import { z } from "zod";
 import { createModel } from "@/lib/providers/llm-provider";
 import type { ModelConfig, AppSettings } from "@/lib/types";
@@ -109,6 +111,8 @@ Respond directly to the user's request with the supreme confidence of an apex ex
 export interface DPGResult {
   requiresSwarm: boolean;
   personas: MoAProposer[];
+  /** Router LLM usage so the caller can fold it into the chat cumulative (PM #36). */
+  usage?: import("@/lib/cost/accumulator").RawUsage;
 }
 
 /**
@@ -134,7 +138,7 @@ async function generateDynamicSwarm(
     }).join("\n");
 
     const routerModel = createModel(modelConfig, {});
-    const { object } = await generateObject({
+    const { object, usage } = await generateObject({
       model: routerModel,
       schema: z.object({
         requiresSwarm: z.boolean().describe("Set to false ONLY IF the user's message is a simple conversational reply (e.g. 'thanks', 'hello') or a trivial task that a single AI agent can handle easily without needing a committee of diverse experts."),
@@ -169,13 +173,16 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
 
     return {
       requiresSwarm: object.requiresSwarm,
-      personas: object.personas
+      personas: object.personas,
+      usage,
     };
   } catch (err) {
     console.error("[MoA] Dynamic Persona Generation failed. Falling back to universal presets.", err);
     return {
       requiresSwarm: true,
-      personas: MOA_PROPOSERS
+      personas: MOA_PROPOSERS,
+      // Usage is unknown when the Router crashes; the chat banner just
+      // misses the Router's tokens for this turn (a small undercount).
     };
   }
 }
@@ -235,6 +242,13 @@ export interface MoAResult {
   aggregationLatencyMs: number;
   /** Total wall-clock time */
   totalLatencyMs: number;
+  /**
+   * Aggregated usage across Router + every proposer + aggregator (PM #36).
+   * The caller adds this to the chat's `cumulativeUsage` to keep the soft
+   * budget banner accurate even when Swarm-mode fans out 5+ LLM calls
+   * behind a single user turn.
+   */
+  cumulativeUsage?: import("@/lib/types").ChatUsage;
 }
 
 /**
@@ -365,11 +379,25 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         maxOutputTokens: brainConfig.maxTokens ?? 2048,
         abortSignal,
       });
+      // PM #36 — fold Router + direct-answer usage into the per-chat banner.
+      let bypassUsage = addUsageToCumulative(
+        undefined,
+        routerConfig.provider,
+        routerConfig.model,
+        dpgResult.usage
+      );
+      bypassUsage = addUsageToCumulative(
+        bypassUsage,
+        brainConfig.provider,
+        brainConfig.model,
+        directResult.usage
+      );
       return {
         text: directResult.text?.trim() || "(empty response)",
         drafts: [],
         aggregationLatencyMs: Date.now() - aggStart,
         totalLatencyMs: Date.now() - totalStart,
+        cumulativeUsage: bypassUsage,
       };
     } catch (err) {
       console.error("[MoA] Direct bypass failed:", err);
@@ -384,6 +412,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   }
 
   const dynamicProposers = dpgResult.personas;
+
+  // PM #36 — accumulate usage across the entire ensemble run. The Router's
+  // tokens land here; each proposer and the aggregator add to it as they
+  // complete. The final number bubbles up via MoAResult.cumulativeUsage.
+  let moaUsage: ChatUsage | undefined = addUsageToCumulative(
+    undefined,
+    routerConfig.provider,
+    routerConfig.model,
+    dpgResult.usage
+  );
 
   console.log(`[MoA] Starting ensemble: ${dynamicProposers.length} proposers using ${workerConfig.provider}/${workerConfig.model}`);
 
@@ -511,7 +549,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           },
         });
 
-        return { proposerId: proposer.id, role: proposer.role, text, latencyMs };
+        return {
+          proposerId: proposer.id,
+          role: proposer.role,
+          text,
+          latencyMs,
+          rawUsage: result.usage,
+        };
       } catch (err) {
         const latencyMs = Date.now() - pStart;
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -541,8 +585,28 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   });
 
-  const drafts = await Promise.all(proposerPromises);
+  const draftsWithUsage = await Promise.all(proposerPromises);
   const proposerLatency = Date.now() - proposerStart;
+
+  // PM #36 — fold each successful proposer's usage into the running total.
+  // Reduce runs single-threaded after Promise.all settles, so no race here.
+  for (const d of draftsWithUsage) {
+    if ("rawUsage" in d && d.rawUsage) {
+      moaUsage = addUsageToCumulative(
+        moaUsage,
+        workerConfig.provider,
+        workerConfig.model,
+        d.rawUsage
+      );
+    }
+  }
+  // Strip the internal-only rawUsage field before exposing drafts.
+  const drafts = draftsWithUsage.map(({ proposerId, role, text, latencyMs }) => ({
+    proposerId,
+    role,
+    text,
+    latencyMs,
+  }));
 
   const successfulDrafts = drafts.filter((d) => !d.text.startsWith("[Error:"));
   console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded.`);
@@ -554,6 +618,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       drafts,
       aggregationLatencyMs: 0,
       totalLatencyMs: Date.now() - totalStart,
+      cumulativeUsage: moaUsage,
     };
   }
 
@@ -565,6 +630,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       drafts,
       aggregationLatencyMs: 0,
       totalLatencyMs: Date.now() - totalStart,
+      cumulativeUsage: moaUsage,
     };
   }
 
@@ -617,6 +683,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
     console.log(`[MoA] Aggregation completed in ${aggregationLatencyMs}ms (${finalText.length} chars)`);
 
+    // PM #36 — fold the aggregator's tokens into the running total.
+    moaUsage = addUsageToCumulative(
+      moaUsage,
+      brainConfig.provider,
+      brainConfig.model,
+      aggResult.usage
+    );
+
     publishUiSyncEvent({
       topic: "chat",
       chatId,
@@ -636,11 +710,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       drafts,
       aggregationLatencyMs,
       totalLatencyMs: Date.now() - totalStart,
+      cumulativeUsage: moaUsage,
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[MoA] Fatal Aggregation Error: ${errMsg}`);
-    
+
     // Fallback: return the longest successful draft so the user doesn't get an empty screen
     const bestDraft = successfulDrafts.reduce((a, b) =>
       a.text.length > b.text.length ? a : b
@@ -665,6 +740,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       drafts,
       aggregationLatencyMs: Date.now() - aggStart,
       totalLatencyMs: Date.now() - totalStart,
+      cumulativeUsage: moaUsage,
     };
   }
 }

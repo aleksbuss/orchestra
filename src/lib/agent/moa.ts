@@ -11,7 +11,7 @@
  *                ──▶ [Proposer₃ (Minimalist)]
  */
 
-import { generateText, generateObject, tool, type ModelMessage } from "ai";
+import { generateText, generateObject, tool, type ModelMessage, type ToolSet } from "ai";
 import { addUsageToCumulative } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
@@ -220,6 +220,95 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
       // misses the Router's tokens for this turn (a small undercount).
     };
   }
+}
+
+// ── Proposer role + tool plumbing (PM #42) ──────────────────────────────
+//
+// Per-role tool assignment. Previously every proposer got `search_web` when
+// search was enabled (blanket access) — a creative-brainstorming persona
+// would have access to web search it never used, and the prompt didn't
+// mandate verification, so fact-heavy personas often hallucinated library
+// versions despite having the tool available.
+//
+// PM #42 splits this in two:
+//   1. Role-aware tool selection — only reviewer/researcher personas get
+//      `search_web`. Coder/tool/creative get no tools (focus on synthesis
+//      from training data; cost stays bounded).
+//   2. Prompt augmentation — personas that DO get search_web also get the
+//      Fact-Check Mandate appended to their system prompt, telling them to
+//      VERIFY library versions / API signatures / real-time facts BEFORE
+//      drafting an answer.
+//
+// Code-execution-for-coder-personas is deliberately deferred to v2:
+// process/session lifecycle from N parallel proposers spawning code is a
+// new failure surface; we want eval data first.
+
+export type ProposerRole = "coder" | "researcher" | "reviewer" | "tool" | "orchestrator";
+
+export function detectProposerRole(proposer: MoAProposer): ProposerRole {
+  const blob = (proposer.id + " " + proposer.systemPrompt).toLowerCase();
+  if (/review|critic|audit|qa|quality|skeptic|adversar|red.?team|fact.?check/.test(blob)) {
+    return "reviewer";
+  }
+  if (/research|analys|architect|domain|expert|chameleon|first.?prin/.test(blob)) {
+    return "researcher";
+  }
+  if (/tool|executor|pragmat|deploy|infra|devops|implement/.test(blob)) {
+    return "tool";
+  }
+  return "coder";
+}
+
+/**
+ * Returns the tool set for this proposer's role. Reviewer + researcher
+ * personas get `search_web` (fact-checking / research workflows depend on
+ * real-time external data). Everything else gets `undefined` — the
+ * synthesizer's job is to ideate from existing knowledge, not browse.
+ *
+ * When the operator hasn't enabled search, this returns `undefined`
+ * regardless of role.
+ */
+export function selectProposerTools(
+  role: ProposerRole,
+  searchEnabled: boolean,
+  searchConfig: AppSettings["search"]
+): ToolSet | undefined {
+  if (!searchEnabled) return undefined;
+  if (role !== "reviewer" && role !== "researcher") return undefined;
+  return {
+    search_web: tool({
+      description: "Search the internet for real-time information, facts, and live data.",
+      inputSchema: z.object({ query: z.string() }),
+      execute: async ({ query }, { abortSignal }) => {
+        return searchWeb(query, 5, searchConfig, abortSignal);
+      },
+    }),
+  };
+}
+
+/**
+ * Fact-Check Mandate appended to a proposer's system prompt when it has
+ * access to `search_web`. Without this, the LLM has the tool but no
+ * instruction to use it for verification — proposers reliably hallucinated
+ * library versions despite tool availability.
+ */
+export const FACT_CHECK_MANDATE = `
+
+[FACT-CHECK MANDATE — you have access to search_web]
+You MUST invoke the search_web tool BEFORE making any claim that depends on:
+  - Library or framework versions (e.g., "Next.js 15", "React 19", "Tailwind v4")
+  - API signatures, function names, or recent breaking changes
+  - Real-time facts (news, prices, status, market data)
+  - Specific URLs, package names, or model IDs the user provided
+
+If you cannot verify a claim through search_web (rate-limited, no result, ambiguous), state that explicitly in your draft ("I could not verify X via search; this is my best understanding from training") rather than asserting it with false confidence.`;
+
+export function augmentProposerPromptForTools(
+  basePrompt: string,
+  tools: ToolSet | undefined
+): string {
+  if (!tools || !("search_web" in tools)) return basePrompt;
+  return basePrompt + FACT_CHECK_MANDATE;
 }
 
 // ── Aggregator Prompt ───────────────────────────────────────────────────
@@ -541,35 +630,33 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       try {
         const workerModel = createModel(workerConfig, { projectId, currentPath });
 
-        // Derive UI icon role from persona keywords — works for both static and DPG-generated personas
-        let standardRole: "coder" | "researcher" | "reviewer" | "tool" | "orchestrator" = "coder";
-        const systemPromptLower = proposer.systemPrompt.toLowerCase();
-        const idLower = proposer.id.toLowerCase();
-        if (/review|critic|audit|qa|quality|skeptic|adversar|red.?team|fact.?check/.test(idLower + " " + systemPromptLower)) {
-          standardRole = "reviewer";
-        } else if (/research|analys|architect|domain|expert|chameleon|first.?prin/.test(idLower + " " + systemPromptLower)) {
-          standardRole = "researcher";
-        } else if (/tool|executor|pragmat|deploy|infra|devops|implement/.test(idLower + " " + systemPromptLower)) {
-          standardRole = "tool";
-        }
+        // PM #42 — extracted to a reusable helper so the role detection
+        // (UI icon, tool assignment, prompt augmentation) goes through
+        // one place and stays consistent. The exported `detectProposerRole`
+        // is also used by tests and future eval cases.
+        const standardRole = detectProposerRole(proposer);
 
         const messages: ModelMessage[] = [
           ...safeHistory.slice(-6), // Limit context to 6 text messages
           { role: "user", content: userMessage },
         ];
 
-        // Inject Web Search tool if enabled
-        const proposerTools = searchEnabled 
-          ? {
-              search_web: tool({
-                description: "Search the internet for real-time information, facts, and live data.",
-                inputSchema: z.object({ query: z.string() }),
-                execute: async ({ query }, { abortSignal }) => {
-                  return searchWeb(query, 5, settings.search, abortSignal);
-                },
-              })
-            }
-          : undefined;
+        // PM #42 — role-aware tool assignment. Only reviewer + researcher
+        // personas get `search_web`; coder/tool/creative get no tools (the
+        // aggregator stitches their training-data ideation with the
+        // fact-checked claims from the research personas). When a persona
+        // DOES get search_web, the Fact-Check Mandate is appended to its
+        // system prompt — having the tool without the mandate was the
+        // observed cause of hallucinated library versions.
+        const proposerTools = selectProposerTools(
+          standardRole,
+          searchEnabled,
+          settings.search
+        );
+        const augmentedSystemPrompt = augmentProposerPromptForTools(
+          proposer.systemPrompt,
+          proposerTools
+        );
 
         const PROPOSER_TIMEOUT_MS = 120_000; // 2 minutes — generous for free/slow models
         // AbortSignal.any() requires Node 20.3+. Fall back gracefully on older runtimes.
@@ -582,13 +669,20 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
         const result = await generateText({
           model: workerModel,
-          system: proposer.systemPrompt,
+          // PM #42 — system prompt is augmented with the Fact-Check Mandate
+          // when this proposer was assigned search_web (reviewer / researcher).
+          // For other roles, augmentedSystemPrompt === proposer.systemPrompt
+          // verbatim.
+          system: augmentedSystemPrompt,
           messages,
           temperature: workerConfig.temperature ?? 0.5,
           maxOutputTokens: Math.min(workerConfig.maxTokens ?? 2048, 2048),
           tools: proposerTools,
+          // PM #42 — maxSteps gates on whether THIS proposer has tools.
+          // Previously `searchEnabled ? 3 : 1`, but a coder persona without
+          // tools wasting two tool-call rounds was paying for nothing.
           // @ts-expect-error maxSteps is supported in newer versions but might not be in the local types for generateText
-          maxSteps: searchEnabled ? 3 : 1,
+          maxSteps: proposerTools ? 3 : 1,
           abortSignal: proposerSignal,
         });
 

@@ -38,6 +38,32 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 42. Role-Based Proposer Tooling + Fact-Check Mandate
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (quality + cost; no incident)
+**Symptoms:** No live incident. Surfaced by the 2026-05-27 MoA audit. Two related problems with the previous "blanket search_web for all proposers" model:
+  1. **Quality:** the orchestrator had a CLAUDE.md §3 Fact-Check Mandate (*"never guess library versions"*), but **proposers** — who do the actual factual drafting — did not. They had the `search_web` tool available but no instruction to use it, so they reliably hallucinated library versions despite tool availability.
+  2. **Cost:** a creative-brainstorming persona (no factual content) got search_web that it never used + a `maxSteps: 3` budget for tool-call rounds it never invoked — pure waste.
+**Root Cause:** Original implementation passed the same tools to every proposer when `searchEnabled === true`. Tool availability wasn't role-aware, and the prompt-side fact-check mandate lived only in the orchestrator's system.md, never propagated to per-proposer prompts.
+**Resolution:** Three coordinated changes in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts):
+  1. **`detectProposerRole(proposer)`** — extracted the inline UI-icon-role regex into a reusable helper. Maps persona `id` + `systemPrompt` keywords to `"reviewer" | "researcher" | "tool" | "coder"`. Precedence: reviewer (skeptic/critic/audit/qa/fact-check) > researcher (research/analyst/architect/domain/expert) > tool (deploy/devops/infra/implement) > coder (default).
+  2. **`selectProposerTools(role, searchEnabled, searchConfig)`** — role-aware tool selection. Returns `{ search_web }` only for `reviewer` + `researcher` personas; returns `undefined` for `coder`, `tool`, and creative personas. Returns `undefined` regardless of role when search is disabled at the operator level.
+  3. **`augmentProposerPromptForTools(basePrompt, tools)`** — appends the canonical `FACT_CHECK_MANDATE` to a persona's system prompt when its toolset includes `search_web`. The mandate explicitly names the verification triggers (library/framework versions, API signatures, real-time facts, user-supplied URLs/package names/model IDs) and requires the proposer to state explicitly when verification was impossible rather than guessing.
+
+**Downstream:** `maxSteps` for the proposer's `generateText` call now gates on `proposerTools` truthiness (was `searchEnabled ? 3 : 1`). A coder persona without tools no longer pays for two empty tool-call rounds.
+
+**Deferred to v2:** code-execution access for coder-tagged personas. Each proposer spawning child processes is a new failure surface (session lifecycle, concurrent execution, resource contention). We want eval data on what the simpler v1 change does before adding it.
+
+**Regression Coverage:** [`src/lib/agent/moa-tools.test.ts`](src/lib/agent/moa-tools.test.ts) — 28 cases:
+  - 16 `detectProposerRole` cases covering reviewer/researcher/tool/coder mappings + systemPrompt-keyword fallback (not just id).
+  - 5 `selectProposerTools` cases: reviewer+search → search_web; researcher+search → search_web; coder/tool+search → undefined; search-disabled → undefined for any role.
+  - 4 `augmentProposerPromptForTools` cases: search_web tools → mandate appended; undefined tools → prompt unchanged; empty toolset → prompt unchanged; mandate names canonical verification triggers (regression guard against future "quick prompt tweaks" weakening the language).
+**Doc Updates:** None to CLAUDE.md required — the §3 Fact-Check Mandate already prescribes the rule; this PM extends its scope from "orchestrator only" to "proposer surface as well". If we end up with operator drift on which personas get which tools, codify the role-mapping table in CLAUDE.md.
+**Rule:** Tool assignment for ensemble members is role-aware, not blanket. When you add a new tool that's meaningful for some proposers and not others, extend `selectProposerTools` with the role mapping AND extend `augmentProposerPromptForTools` with the matching prompt mandate. Tools without mandates are ignored by the LLM; mandates without tools tell the LLM to use something it can't reach. Both must move together.
+
+---
+
 ## 41. Eval Harness — Assertion-Based Regression Suite for MoA Behavior
 **Date:** 2026-05
 **Status:** RESOLVED

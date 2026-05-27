@@ -111,6 +111,61 @@ export async function flushAllPendingChats(): Promise<void> {
   await Promise.all(ids.map((id) => flushNow(id)));
 }
 
+/**
+ * Wire SIGTERM / SIGINT to flush every pending chat write before the process
+ * exits (PM #29). Without this, a graceful restart during streaming or an
+ * orchestrated `kill -TERM` lose the last debounce-window (80 ms) of agent
+ * tool outputs because the `setTimeout`-scheduled `flushNow` never fires.
+ *
+ * Module-level side effect — runs once per process. Idempotent via a
+ * globalThis flag so Next.js dev-mode reloads don't stack handlers (each
+ * reload re-evaluates the module; without the flag, signals would fire N
+ * times after N reloads, calling `flushAllPendingChats` N times — harmless
+ * for correctness but wasteful and pollutes telemetry).
+ *
+ * The handler returns synchronously but schedules an async flush. Node won't
+ * exit while file I/O is pending, so the writes complete before process
+ * teardown — verified by the regression test in `chat-store.flush.test.ts`.
+ */
+declare global {
+  var __orchestraChatStoreFlushHandlersInstalled__: boolean | undefined;
+}
+
+function installChatStoreShutdownFlush(): void {
+  if (globalThis.__orchestraChatStoreFlushHandlersInstalled__) return;
+  globalThis.__orchestraChatStoreFlushHandlersInstalled__ = true;
+
+  const onSignal = (sig: string) => {
+    if (pendingFlushes.size === 0) return;
+    console.log(
+      `[chat-store] Received ${sig}, flushing ${pendingFlushes.size} pending chat write(s) before exit.`
+    );
+    // Fire-and-forget on purpose: Node keeps the event loop alive while
+    // safeWriteFile I/O is pending, so writes drain naturally before the
+    // process exits. Awaiting from inside a signal handler isn't necessary
+    // and would only matter if other handlers in the chain raced to call
+    // `process.exit()`, which Orchestra does not do.
+    void flushAllPendingChats().catch((err) => {
+      console.error("[chat-store] SIGTERM flush failed:", err);
+    });
+  };
+
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => onSignal("SIGINT"));
+}
+
+// Skip during Vitest runs — the test runner emits SIGTERM/SIGINT for its own
+// lifecycle (process teardown, watcher restart) and we don't want this
+// handler to log noise or compete with the test's own signal mocks.
+if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
+  installChatStoreShutdownFlush();
+}
+
+/** Test-only: expose the installer so the regression test can opt in. */
+export const __testInternals__ = {
+  installChatStoreShutdownFlush,
+};
+
 /** Test helper / project deletion: drop cache + cancel pending flush for one chat. */
 function evictChatCache(chatId: string): void {
   const pending = pendingFlushes.get(chatId);
@@ -144,8 +199,41 @@ export async function getAllChats(): Promise<ChatListItem[]> {
 }
 
 /**
+ * Records chat files that failed to parse during the last `rebuildChatIndex`.
+ * Reported via `/api/health` and surfaced as an operator-facing banner so
+ * silent two-strike data loss (chat-index corrupt + a chat-file corrupt)
+ * becomes a visible signal instead of an invisible omission (PM #30).
+ *
+ * Module-level Map so it survives across calls (the index doesn't auto-rebuild
+ * on every page load — operator needs to see lingering broken files even on
+ * subsequent `getAllChats` calls that hit the cached index).
+ */
+interface BrokenChatFile {
+  file: string;
+  sizeBytes: number;
+  reason: string;
+  detectedAt: string;
+}
+const brokenChatFiles = new Map<string, BrokenChatFile>();
+
+export function getBrokenChatFiles(): BrokenChatFile[] {
+  return [...brokenChatFiles.values()];
+}
+
+/** Test-only: clear the broken-files record between cases. */
+export function __resetBrokenChatFilesForTest(): void {
+  brokenChatFiles.clear();
+}
+
+/**
  * Scans all chat files to recreate the index.
  * Only called as fallback or after bulk operations.
+ *
+ * PM #30 — files that fail to parse used to be silently skipped (`catch {}`).
+ * Two-strike condition (corrupt index + corrupt chat-file) made the chat
+ * disappear from the sidebar with no log signature. Now we record the file
+ * name + size + reason in `brokenChatFiles` and emit a structured log line
+ * so the operator has a chance to recover the file (or accept the loss).
  */
 export async function rebuildChatIndex(): Promise<ChatListItem[]> {
   await ensureDir(CHATS_DIR);
@@ -156,8 +244,9 @@ export async function rebuildChatIndex(): Promise<ChatListItem[]> {
     // NOTE: CHAT_INDEX_FILE lives in DATA_DIR (data/), not CHATS_DIR (data/chats/).
     // No need to skip it here — it will never appear in the readdir(CHATS_DIR) listing.
     if (!file.endsWith(".json")) continue;
+    const filePath = path.join(CHATS_DIR, file);
     try {
-      const content = await fs.readFile(path.join(CHATS_DIR, file), "utf-8");
+      const content = await fs.readFile(filePath, "utf-8");
       const chat = JSON.parse(content);
       items.push({
         id: chat.id,
@@ -167,7 +256,29 @@ export async function rebuildChatIndex(): Promise<ChatListItem[]> {
         updatedAt: chat.updatedAt,
         messageCount: chat.messages?.length ?? 0,
       });
-    } catch { /* skip corrupted */ }
+      // If a previously broken file is now parseable (operator hand-repaired
+      // it, or the previous error was transient), drop it from the registry.
+      brokenChatFiles.delete(file);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      let sizeBytes = 0;
+      try {
+        const stat = await fs.stat(filePath);
+        sizeBytes = stat.size;
+      } catch { /* file vanished between readdir and stat — leave size 0 */ }
+      brokenChatFiles.set(file, {
+        file,
+        sizeBytes,
+        reason,
+        detectedAt: new Date().toISOString(),
+      });
+      // Structured log so `grep chat_index_broken_file data/logs/*.jsonl`
+      // (or stdout when running `npm run dev`) surfaces every skip with the
+      // exact filename. Replaces the previous silent `catch {}`.
+      console.warn(
+        `[chat-store] chat_index_broken_file ${JSON.stringify({ file, sizeBytes, reason })}`
+      );
+    }
   }
 
   const sorted = items.sort(

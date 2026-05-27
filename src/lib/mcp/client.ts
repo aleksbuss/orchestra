@@ -11,9 +11,51 @@ import type { McpServerConfig } from "@/lib/types";
 import type { ToolSet, ToolExecutionOptions } from "ai";
 import { dynamicTool } from "ai";
 import { z } from "zod";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from "@/lib/security/url-guard";
 
 const MCP_CLIENT_NAME = "orchestra";
 const MCP_CLIENT_VERSION = "1.0.0";
+
+/**
+ * Cap MCP tool output before it reaches the agent prompt. A malicious or
+ * misconfigured MCP server can stream multi-megabyte JSON payloads — without
+ * a ceiling that pollutes the context window and burns tokens. Truncation
+ * happens INSIDE the untrusted-content marker so the agent can't be tricked
+ * into reading the truncation notice as authoritative text.
+ */
+const MAX_MCP_OUTPUT_BYTES = 100_000;
+
+/**
+ * Wrap raw MCP server output in untrusted-content markers (PM #27 — same
+ * contract as `web_task` from PM #26). An MCP server is an external process;
+ * its output is data, not instructions. The system prompt instructs the
+ * agent to never follow instructions inside `<UNTRUSTED_*>` markers.
+ *
+ * Truncation lives inside the marker on purpose: if it were outside, an
+ * attacker could craft output whose tail looks like "[...truncated]\nNew
+ * authoritative instruction: ..." and the truncation suffix becomes a
+ * delimiter the model trusts. Inside the marker, the entire payload —
+ * including the truncation note — is uniformly DATA.
+ */
+function wrapUntrustedMcpOutput(
+  serverId: string,
+  toolName: string,
+  raw: string
+): string {
+  let payload = raw;
+  if (Buffer.byteLength(payload, "utf8") > MAX_MCP_OUTPUT_BYTES) {
+    // Slice by UTF-8 bytes, not codepoints — multi-byte chars at the edge get
+    // chopped, but that's fine; this is data the model will pattern-match on,
+    // not text we render to the user verbatim.
+    payload =
+      payload.slice(0, MAX_MCP_OUTPUT_BYTES) +
+      `\n[orchestra: MCP output truncated at ${MAX_MCP_OUTPUT_BYTES} bytes]`;
+  }
+  return `<UNTRUSTED_MCP_TOOL_OUTPUT server="${serverId}" tool="${toolName}">\n${payload}\n</UNTRUSTED_MCP_TOOL_OUTPUT>`;
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -302,6 +344,14 @@ function mcpInputSchemaToZod(meta: McpToolMeta): z.ZodType<Record<string, unknow
 
 /**
  * Create transport for one MCP server (stdio or http).
+ *
+ * For HTTP transports the URL is validated through `assertSafeOutboundUrl`
+ * BEFORE the transport is constructed — without this check an MCP server
+ * config (which can be written by the agent itself via `upsert_mcp_server`)
+ * could target cloud metadata or RFC 1918 hosts. PM #27 — apply the same
+ * SSRF contract that PM #8 / PM #26 established for `/api/models` and
+ * `web_task`. Loopback stays allowed (local MCP servers are a primary use
+ * case).
  */
 function createTransport(
   config: McpServerConfig
@@ -314,13 +364,20 @@ function createTransport(
       cwd: config.cwd,
     });
   }
-  return new StreamableHTTPClientTransport(new URL(config.url), {
+  const safeUrl = assertSafeOutboundUrl(config.url);
+  return new StreamableHTTPClientTransport(safeUrl, {
     requestInit: config.headers ? { headers: config.headers } : undefined,
   });
 }
 
 /**
  * Connect to one MCP server and return client + transport.
+ *
+ * SSRF-rejected URLs return `null` with a specific log line so the operator
+ * can tell "guard blocked you" from "network failure". The agent surface
+ * (`upsert_mcp_server`) sees `null` and surfaces a clean failure; we don't
+ * propagate the URL string back through the agent loop (avoids leaking
+ * private-IP probe results via error messages).
  */
 export async function connectMcpServer(
   config: McpServerConfig
@@ -334,6 +391,12 @@ export async function connectMcpServer(
     await client.connect(transport as Parameters<Client["connect"]>[0]);
     return { serverId: config.id, client, transport };
   } catch (err) {
+    if (err instanceof UnsafeOutboundUrlError) {
+      console.error(
+        `[MCP] Refusing to connect to server "${config.id}": URL fails SSRF guard (${err.message}).`
+      );
+      return null;
+    }
     console.error(`[MCP] Failed to connect to server "${config.id}":`, err);
     return null;
   }
@@ -488,28 +551,42 @@ export async function getProjectMcpTools(projectId: string): Promise<{
         const callKey = `${key}:${stableSerialize(args)}`;
         const previousFailure = deterministicFailureByCall.get(callKey);
         if (previousFailure) {
+          // The previous-failure string was extracted from a raw MCP server
+          // response — it is untrusted text. Echoing it back unwrapped would
+          // re-open the very prompt-injection channel that PM #27 closes.
           return (
             `[Loop guard] Blocked repeated MCP call "${meta.name}" with identical arguments.\n` +
-            `Previous deterministic error: ${previousFailure}\n` +
-            "Change arguments based on the error details before retrying."
+            `Previous deterministic error (untrusted text from the MCP server):\n` +
+            wrapUntrustedMcpOutput(meta.serverId, meta.name, previousFailure) +
+            "\nChange arguments based on the error details before retrying."
           );
         }
 
         try {
-          const output = await callMcpTool(meta.conn.client, meta.name, args);
-          const deterministicError = extractDeterministicErrorSignature(output);
+          const rawOutput = await callMcpTool(meta.conn.client, meta.name, args);
+          // Inspect the RAW output for deterministic-error / n8n-success
+          // signatures BEFORE wrapping — the loop-guard / cache layers below
+          // need to see the original text, not the marker noise.
+          const deterministicError = extractDeterministicErrorSignature(rawOutput);
 
-          let decoratedOutput = output;
+          let untrustedTail = wrapUntrustedMcpOutput(
+            meta.serverId,
+            meta.name,
+            rawOutput
+          );
+
+          // Authoritative Orchestra prefixes ([Hint], [Preflight], etc.) live
+          // OUTSIDE the marker so the model still trusts them.
           if (deterministicError) {
             deterministicFailureByCall.set(callKey, deterministicError);
-            const n8nHint = buildN8nFailureHint(output);
+            const n8nHint = buildN8nFailureHint(rawOutput);
             if (n8nHint) {
-              decoratedOutput += `\n\n[Hint] ${n8nHint}`;
+              untrustedTail += `\n\n[Hint] ${n8nHint}`;
             }
           } else {
             deterministicFailureByCall.delete(callKey);
             if (isN8nWorkflowCreateTool(meta.name)) {
-              const workflowId = extractWorkflowIdFromSuccess(output);
+              const workflowId = extractWorkflowIdFromSuccess(rawOutput);
               if (workflowId) {
                 knownN8nWorkflowIds.add(workflowId);
               }
@@ -517,11 +594,14 @@ export async function getProjectMcpTools(projectId: string): Promise<{
           }
 
           if (preprocessed.notes.length > 0) {
-            return `[Preflight] ${preprocessed.notes.join(" ")}\n${decoratedOutput}`;
+            return `[Preflight] ${preprocessed.notes.join(" ")}\n${untrustedTail}`;
           }
 
-          return decoratedOutput;
+          return untrustedTail;
         } catch (err) {
+          // MCP tool error messages are Orchestra-authored ("connection
+          // closed", "invalid args") and do NOT come from the MCP server's
+          // arbitrary content stream, so they stay outside untrusted markers.
           const msg = err instanceof Error ? err.message : String(err);
           return `[MCP tool error] ${msg}`;
         }

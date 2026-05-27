@@ -476,3 +476,166 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
     expect(result.drafts.length).toBe(3);
   }, 30_000);
 });
+
+describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
+  // Audit finding: reflection.ts was thoroughly tested but never wired in.
+  // These tests pin the integration: when settings.reflection.enabled is
+  // true, reflection runs after aggregator; when the critic says
+  // shouldRevise, the revisor replaces the aggregator's text. Cost goes
+  // up by 1-2 LLM calls; usage attribution makes that visible to the
+  // operator via the PM #36 budget banner.
+  function settingsWithReflection(): AppSettings {
+    return {
+      ...fakeSettings(),
+      reflection: { enabled: true },
+    };
+  }
+
+  // Helper: stub DPG → 3 personas (analyst, critic, chameleon — includes
+  // skeptic so PM #37 guard doesn't fire). Then proposers return cheap
+  // drafts. Caller queues aggregator + reflection + revisor responses.
+  function mockSwarmThru(aggregatorText: string) {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as never);
+    // 3 proposers
+    for (let i = 0; i < 3; i++) {
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `draft ${i + 1}`,
+        usage: { inputTokens: 50, outputTokens: 30 },
+      } as never);
+    }
+    // Aggregator
+    mockedGenerateText.mockResolvedValueOnce({
+      text: aggregatorText,
+      usage: { inputTokens: 200, outputTokens: 100 },
+    } as never);
+  }
+
+  // IMPORTANT: aggregator stub text MUST exceed 30 characters or
+  // reflection.ts short-circuits (the "skip on trivial response" guard)
+  // and never calls generateText, breaking our call-count expectations.
+  const AGG_TEXT = "Aggregated final consensus answer assembled from expert drafts.";
+  const AGG_TEXT_REVISED = "Aggregated final consensus, bug fixed.";
+
+  it("reflection.enabled=false (or undefined) → NO reflection LLM call", async () => {
+    mockSwarmThru(AGG_TEXT);
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: fakeSettings(), // no reflection setting → disabled by default
+    });
+
+    // 3 proposers + 1 aggregator = 4 calls. NO reflection, NO revisor.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(4);
+    expect(result.text).toBe(AGG_TEXT);
+  }, 30_000);
+
+  it("reflection.enabled=true, critic says CLEAN → reflection fires but text unchanged", async () => {
+    mockSwarmThru(AGG_TEXT);
+    // Reflection call: critic says clean
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '{"shouldRevise": false, "critique": "", "suggestion": ""}',
+      usage: { inputTokens: 80, outputTokens: 20 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: settingsWithReflection(),
+    });
+
+    // 3 proposers + 1 aggregator + 1 reflection = 5 calls. No revisor.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
+    expect(result.text).toBe(AGG_TEXT);
+  }, 30_000);
+
+  it("reflection.enabled=true, critic flags issue → revisor runs and replaces text", async () => {
+    mockSwarmThru(AGG_TEXT);
+    // Reflection call: critic flags
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '{"shouldRevise": true, "critique": "code has a bug", "suggestion": "fix the bug"}',
+      usage: { inputTokens: 80, outputTokens: 30 },
+    } as never);
+    // Revisor produces the corrected text
+    mockedGenerateText.mockResolvedValueOnce({
+      text: AGG_TEXT_REVISED,
+      usage: { inputTokens: 250, outputTokens: 110 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: settingsWithReflection(),
+    });
+
+    // 3 proposers + aggregator + reflection + revisor = 6 calls.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    // Text was replaced by the revisor output.
+    expect(result.text).toBe(AGG_TEXT_REVISED);
+  }, 30_000);
+
+  it("reflection failure is non-fatal — original aggregator text ships", async () => {
+    mockSwarmThru(AGG_TEXT);
+    // Reflection throws (LLM timeout, network blip, anything)
+    mockedGenerateText.mockRejectedValueOnce(new Error("LLM timeout"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: settingsWithReflection(),
+    });
+
+    // 3 proposers + aggregator + reflection (failed) = 5 attempts. The
+    // run completes with the un-revised aggregator output; the reflection
+    // failure is caught inside reflectOnResponse and returns a no-op
+    // result, so no visible error to the user.
+    expect(result.text).toBe(AGG_TEXT);
+  }, 30_000);
+
+  it("cumulativeUsage folds reflection + revisor tokens (PM #36 attribution)", async () => {
+    mockSwarmThru(AGG_TEXT);
+    // Reflection: flags issue
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '{"shouldRevise": true, "critique": "X", "suggestion": "Y"}',
+      usage: { inputTokens: 100, outputTokens: 30 },
+    } as never);
+    // Revisor
+    mockedGenerateText.mockResolvedValueOnce({
+      text: "Revised version of the answer with the correction applied.",
+      usage: { inputTokens: 300, outputTokens: 150 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: settingsWithReflection(),
+    });
+
+    // Expected cumulative inputTokens:
+    //   3 proposers × 50 = 150
+    //   aggregator: 200
+    //   reflection: 100
+    //   revisor: 300
+    //   = 750
+    // (Router via generateObject doesn't carry usage in this mock setup,
+    // so we just assert the lower-bound sum from the LLM calls we mocked.)
+    expect(result.cumulativeUsage).toBeDefined();
+    expect(result.cumulativeUsage!.promptTokens).toBe(750);
+    // Output tokens: 3×30 + 100 + 30 + 150 = 370
+    expect(result.cumulativeUsage!.completionTokens).toBe(370);
+  }, 30_000);
+});

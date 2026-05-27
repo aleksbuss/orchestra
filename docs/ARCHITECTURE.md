@@ -27,7 +27,7 @@ I built this to explore two specific design questions:
 
 **(2) What does "local-first" actually mean for an AI workspace?** Most "self-hosted ChatGPT" projects still depend on cloud databases, vector services, and external auth providers. Orchestra is a forcing function: JSON-on-disk, file-based message bus (SSE), and `safeWriteFile` + `withFileLock` for concurrency. The constraint surfaces interesting trade-offs (see § "Tradeoffs" below).
 
-It is a personal exploration, not a production product. The [`POST_MORTEMS.md`](../POST_MORTEMS.md) registry — twenty-one entries and counting — documents every architectural mistake I made along the way and how the regression is now pinned. The honesty is the point.
+It is a personal exploration, not a production product. The [`POST_MORTEMS.md`](../POST_MORTEMS.md) registry — **forty entries and counting** — documents every architectural mistake found along the way and how the regression is now pinned. The honesty is the point.
 
 ### Origins
 
@@ -39,7 +39,7 @@ Orchestra is a hard-fork of [Eggent](https://github.com/eggent-ai/eggent), subst
 
 | Feature | What it does | Why it's interesting |
 |---|---|---|
-| **Mixture-of-Agents** | Routes each user message through 3–5 dynamically-generated expert personas in parallel, then aggregates. One persona is always a Skeptic. | Higher answer quality than single-model output, especially for ambiguous prompts. Latency cost is parallel, not serial. |
+| **Mixture-of-Agents** | Routes each user message through 3–5 dynamically-generated expert personas in parallel, then aggregates. Skeptic is *enforced by code*, not just by prompt. Embedding-based disagreement detection asks the synthesizer to surface conflicts instead of smoothing them. Optional reflection critic + revisor adds a generator-critic-revisor loop. Aggregator prompt is adapted from togethercomputer/MoA (validated at 65.1% AlpacaEval). | Higher answer quality than single-model output, especially for ambiguous prompts. Latency cost is parallel, not serial. Cost is visible per-chat via PM #36 banner. |
 | **Project Workspaces** | Isolated sandboxes with per-project memory, skills, MCP servers, and file tree. | The agent can read/write files in its own working directory without leaking state across projects. |
 | **Skills System** | Installable capability modules (~30 bundled, more via GitHub). Each skill is a Markdown SKILL.md + supporting scripts. | Skills are model-portable — they describe *intent* and *triggers*, not provider-specific tool calls. |
 | **Project ZIP Export** | One-click download of an entire project (code + chats + metadata) as a single ZIP archive. | Treat Orchestra projects like git repos — portable, shareable, backupable. |
@@ -131,24 +131,36 @@ sequenceDiagram
 
     alt Swarm mode ON
         RA->>Router: classify intent + design personas
-        Router-->>RA: [Analyst, Strategist, Skeptic, Implementer]
-        par Parallel proposers
+        Router-->>RA: [Analyst, Strategist, Implementer, ...]
+        Note over RA: PM #37 — post-validate: inject<br/>canonical Skeptic if LLM forgot
+        par Parallel proposers (Promise.all + stagger + per-call timeout)
             RA->>P: persona 1 prompt
             RA->>P: persona 2 prompt
             RA->>P: persona 3 prompt
-            RA->>P: persona 4 prompt (Skeptic)
+            RA->>P: Skeptic (force-injected if missing)
         end
-        P-->>RA: draft 1
-        P-->>RA: draft 2
-        P-->>RA: draft 3
-        P-->>RA: skeptic critique
-        Note over RA,Agg: PM #2 — aggregator NEVER receives<br/>consecutive user messages
+        P-->>RA: draft 1 + usage
+        P-->>RA: draft 2 + usage
+        P-->>RA: draft 3 + usage
+        P-->>RA: skeptic critique + usage
+        Note over RA: PM #39 — embed drafts,<br/>compute pairwise cosine distance.<br/>If max > 0.35, prepend<br/><<DISAGREEMENT_DETECTED>><br/>marker to aggregator prompt
+        Note over RA,Agg: PM #2 — aggregator NEVER receives<br/>consecutive user messages<br/>PM #40 — system prompt adapted<br/>from togethercomputer/MoA
         RA->>Agg: aggregator prompt + drafts (NO chat history)
-        Agg-->>RA: consensus answer
+        Agg-->>RA: synthesized answer + usage
+
+        opt Reflection enabled (PM #38)
+            RA->>Agg: critic prompt (utility-model)
+            Agg-->>RA: {shouldRevise, critique, suggestion}
+            alt critic flags issue
+                RA->>Agg: revisor prompt (brain-model)
+                Agg-->>RA: revised answer + usage
+            end
+        end
     else Direct mode
         RA->>P: single LLM call with full chat history
         P-->>RA: streamed response
     end
+    Note over RA: PM #36 — fold every call's usage<br/>into chat.cumulativeUsage<br/>(tokens + USD for the banner)
 
     loop For each chunk
         RA->>SSE: stream chunk event

@@ -605,6 +605,77 @@ describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
     expect(result.text).toBe(AGG_TEXT);
   }, 30_000);
 
+  // PM #39 — disagreement marker is prepended to the aggregator prompt
+  // when the embedder reports divergent proposer outputs.
+  it("PM #39 — when disagreement detected, aggregator prompt is prefixed with the marker", async () => {
+    // Re-mock the embeddings module just for this test so the detector
+    // actually runs successfully with controlled divergent vectors.
+    vi.doMock("@/lib/memory/embeddings", () => ({
+      embedTexts: vi.fn().mockResolvedValue([
+        [1, 0, 0, 0], // proposer 1
+        [0, 1, 0, 0], // proposer 2 — orthogonal (cosine distance = 1.0)
+        [0, 0, 1, 0], // proposer 3 — orthogonal
+      ]),
+    }));
+    vi.resetModules();
+    // Re-import the runMoAEnsemble after the dynamic mock so it picks up
+    // the new embeddings stub. We also re-import generateText / Object
+    // mocks since vi.resetModules() wipes the module registry.
+    const { runMoAEnsemble: runWithDisagreementMock } = await import("./moa");
+    const { generateText: gt, generateObject: go } = await import("ai");
+    const gtMock = vi.mocked(gt);
+    const goMock = vi.mocked(go);
+    gtMock.mockReset();
+    goMock.mockReset();
+
+    goMock.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as never);
+    // 3 proposers
+    for (let i = 0; i < 3; i++) {
+      gtMock.mockResolvedValueOnce({
+        text: `Distinct proposer response number ${i + 1} with enough chars`,
+        usage: { inputTokens: 50, outputTokens: 30 },
+      } as never);
+    }
+    // Aggregator
+    gtMock.mockResolvedValueOnce({
+      text: "Synthesized answer that acknowledges the divergence.",
+      usage: { inputTokens: 200, outputTokens: 100 },
+    } as never);
+
+    await runWithDisagreementMock({
+      chatId: "c1",
+      userMessage: "trade-off question",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // The aggregator is the LAST generateText call. Its `messages[0].content`
+    // should contain the disagreement marker prefix.
+    const aggregatorCall = gtMock.mock.calls.at(-1)?.[0] as
+      | { messages?: Array<{ content: string }> }
+      | undefined;
+    expect(aggregatorCall).toBeDefined();
+    const aggregatorContent = aggregatorCall!.messages![0].content;
+    expect(aggregatorContent).toContain("<<DISAGREEMENT_DETECTED>>");
+    expect(aggregatorContent).toContain("DIVERGE significantly");
+    // The original user message and drafts should still be in the prompt
+    // (the marker prepends, doesn't replace).
+    expect(aggregatorContent).toContain("trade-off question");
+    expect(aggregatorContent).toContain("Distinct proposer response number 1");
+
+    vi.doUnmock("@/lib/memory/embeddings");
+  }, 30_000);
+
   it("cumulativeUsage folds reflection + revisor tokens (PM #36 attribution)", async () => {
     mockSwarmThru(AGG_TEXT);
     // Reflection: flags issue

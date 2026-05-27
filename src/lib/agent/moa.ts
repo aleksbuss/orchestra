@@ -15,6 +15,11 @@ import { generateText, generateObject, tool, type ModelMessage } from "ai";
 import { addUsageToCumulative } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
+import {
+  buildDisagreementMarker,
+  DEFAULT_DISAGREEMENT_THRESHOLD,
+  detectDisagreement,
+} from "@/lib/agent/disagreement";
 import { z } from "zod";
 import { createModel } from "@/lib/providers/llm-provider";
 import type { ModelConfig, AppSettings } from "@/lib/types";
@@ -683,7 +688,33 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   });
 
   const aggStart = Date.now();
-  const aggregatorPrompt = buildAggregatorPrompt(userMessage, successfulDrafts);
+
+  // PM #39 — disagreement detection. Embed each draft, compute pairwise
+  // cosine distance, and if the max exceeds the threshold, prepend a
+  // marker to the aggregator prompt telling the synthesizer to surface
+  // the conflict instead of smoothing it away. Non-fatal — embedding
+  // failure falls through to the default aggregator behavior.
+  const disagreement = await detectDisagreement(
+    successfulDrafts.map((d) => ({ text: d.text, role: d.role })),
+    settings,
+    DEFAULT_DISAGREEMENT_THRESHOLD,
+    abortSignal
+  );
+  if (disagreement.ranSuccessfully) {
+    console.log(
+      `[MoA] Disagreement check: max distance ${disagreement.maxDistance.toFixed(3)} (threshold ${disagreement.threshold}), avg ${disagreement.averageDistance.toFixed(3)} across ${disagreement.pairCount} pairs → ${disagreement.detected ? "DETECTED" : "consensus"}`
+    );
+    if (disagreement.detected) {
+      publishUiSyncEvent({
+        topic: "chat",
+        chatId,
+        projectId: projectId ?? null,
+        reason: `[MoA] Expert proposers diverged (cosine distance ${disagreement.maxDistance.toFixed(2)} > ${disagreement.threshold}). Synthesizer will flag the conflict instead of smoothing it.`,
+      });
+    }
+  }
+  const disagreementMarker = buildDisagreementMarker(disagreement);
+  const aggregatorPrompt = disagreementMarker + buildAggregatorPrompt(userMessage, successfulDrafts);
 
   // Use the brain model for aggregation (the main chatModel with full context)
   const brainConfig = resolveWorkerKey(

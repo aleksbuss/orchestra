@@ -1,6 +1,7 @@
 import { getSettings } from "@/lib/storage/settings-store";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { getBrokenChatFiles } from "@/lib/storage/chat-store";
 
 export const dynamic = "force-dynamic";
 
@@ -160,6 +161,26 @@ export async function GET() {
       name: "data_directory",
       status: "error",
       detail: "Data directory not accessible",
+    });
+  }
+
+  // 6. Broken chat files (PM #30)
+  // Files in data/chats/ that failed to parse during the last index rebuild.
+  // Two-strike condition (chat-index.json corrupt + a chat-file corrupt) used
+  // to silently omit those chats from the sidebar. Now we surface them so the
+  // operator can recover the file or accept the loss.
+  const broken = getBrokenChatFiles();
+  if (broken.length > 0) {
+    checks.push({
+      name: "chat_index_integrity",
+      status: "warn",
+      detail: `${broken.length} chat file(s) failed to parse on last rebuild: ${broken.map((b) => b.file).join(", ")}. See PM #30 in POST_MORTEMS.md.`,
+    });
+  } else {
+    checks.push({
+      name: "chat_index_integrity",
+      status: "ok",
+      detail: "All chat files parsed successfully on last rebuild.",
     });
   }
 

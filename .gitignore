@@ -10,7 +10,6 @@
 /coverage
 /test-results
 /playwright-report
-CLAUDE.md
 
 # next.js
 /.next/

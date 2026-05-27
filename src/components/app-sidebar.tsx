@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import {
@@ -229,41 +229,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           </div>
         </SidebarGroup>
 
-        {/* Chat history */}
-        <SidebarGroup>
-          <SidebarGroupLabel className="text-xs font-medium text-muted-foreground flex items-center">
-            <MessagesSquare className="size-3.5 mr-1.5" />
-            Chats
-          </SidebarGroupLabel>
-          <SidebarMenu>
-            {chats.length === 0 && (
-              <SidebarMenuItem>
-                <SidebarMenuButton disabled>
-                  <span className="text-muted-foreground text-xs">
-                    No chats yet
-                  </span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            )}
-            {chats.map((chat) => (
-              <SidebarMenuItem key={chat.id}>
-                <SidebarMenuButton
-                  isActive={activeChatId === chat.id}
-                  onClick={() => handleChatClick(chat.id)}
-                  className="rounded-lg transition-colors"
-                >
-                  <span className="truncate">{chat.title}</span>
-                </SidebarMenuButton>
-                <SidebarMenuAction
-                  onClick={(e) => handleDeleteChat(chat.id, e)}
-                  className="opacity-0 group-hover/menu-item:opacity-100 text-muted-foreground hover:text-destructive transition-colors"
-                >
-                  <Trash2 className="size-3.5" />
-                </SidebarMenuAction>
-              </SidebarMenuItem>
-            ))}
-          </SidebarMenu>
-        </SidebarGroup>
+        {/* Chat history (PM #33 — paginate + filter to keep the sidebar
+           responsive past several hundred chats). */}
+        <SidebarChatList
+          chats={chats}
+          activeChatId={activeChatId}
+          onChatClick={handleChatClick}
+          onDeleteChat={handleDeleteChat}
+        />
 
       </SidebarContent>
 
@@ -345,5 +318,135 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarGroup>
       </SidebarFooter>
     </Sidebar>
+  );
+}
+
+/**
+ * Sidebar chat list (PM #33). Past ~200 chats, rendering the entire list on
+ * every store update — which happens on every SSE sync tick — froze the
+ * sidebar interaction layer on low-end devices. Two cheap mitigations,
+ * deliberately NOT a virtualization library:
+ *   1. Show the first `INITIAL_LIMIT` chats by default. The list is already
+ *      sorted by `updatedAt` desc, so this is "the chats you actually use
+ *      right now"; the rest is one click away.
+ *   2. Live filter by title — when the operator has 1000 chats they search
+ *      by name, not scroll-and-recognise.
+ * If a real user reports lag past these mitigations, add @tanstack/react-virtual
+ * — see CLAUDE.md § "UI Standards" rule on virtualisation thresholds.
+ */
+const INITIAL_LIMIT = 30;
+
+/**
+ * Pure helper for the filter + pagination math. Exported so it can be unit
+ * tested without booting the sidebar provider tree, and called from the
+ * `SidebarChatList` component below. Keeps the React layer dumb.
+ */
+export function filterAndPaginateChats(
+  chats: ReadonlyArray<{ id: string; title?: string }>,
+  filter: string,
+  showAll: boolean,
+  initialLimit: number = INITIAL_LIMIT
+): {
+  visible: typeof chats;
+  hiddenCount: number;
+} {
+  const trimmed = filter.trim();
+  const filtered = trimmed
+    ? chats.filter((c) =>
+        (c.title ?? "").toLowerCase().includes(trimmed.toLowerCase())
+      )
+    : chats;
+  // When the operator searches, ALWAYS show all matches — pagination doesn't
+  // serve a "find this needle" interaction. Pagination only collapses the
+  // unfiltered default view.
+  if (trimmed || showAll) {
+    return { visible: filtered, hiddenCount: 0 };
+  }
+  return {
+    visible: filtered.slice(0, initialLimit),
+    hiddenCount: Math.max(0, filtered.length - initialLimit),
+  };
+}
+
+interface SidebarChatListProps {
+  chats: import("@/lib/types").ChatListItem[];
+  activeChatId: string | null;
+  onChatClick: (id: string) => void;
+  onDeleteChat: (id: string, e: React.MouseEvent) => void;
+}
+
+function SidebarChatList({
+  chats,
+  activeChatId,
+  onChatClick,
+  onDeleteChat,
+}: SidebarChatListProps) {
+  const [filter, setFilter] = useState("");
+  const [showAll, setShowAll] = useState(false);
+
+  const { visible, hiddenCount } = useMemo(
+    () => filterAndPaginateChats(chats, filter, showAll),
+    [chats, filter, showAll]
+  );
+
+  return (
+    <SidebarGroup>
+      <SidebarGroupLabel className="text-xs font-medium text-muted-foreground flex items-center">
+        <MessagesSquare className="size-3.5 mr-1.5" />
+        Chats
+      </SidebarGroupLabel>
+
+      {chats.length > 5 && (
+        <div className="px-2 pb-1">
+          <input
+            type="search"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter chats…"
+            aria-label="Filter chats"
+            className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-xs outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+          />
+        </div>
+      )}
+
+      <SidebarMenu>
+        {visible.length === 0 && (
+          <SidebarMenuItem>
+            <SidebarMenuButton disabled>
+              <span className="text-muted-foreground text-xs">
+                {filter.trim() ? "No matches" : "No chats yet"}
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
+        {visible.map((chat) => (
+          <SidebarMenuItem key={chat.id}>
+            <SidebarMenuButton
+              isActive={activeChatId === chat.id}
+              onClick={() => onChatClick(chat.id)}
+              className="rounded-lg transition-colors"
+            >
+              <span className="truncate">{chat.title}</span>
+            </SidebarMenuButton>
+            <SidebarMenuAction
+              onClick={(e) => onDeleteChat(chat.id, e)}
+              className="opacity-0 group-hover/menu-item:opacity-100 text-muted-foreground hover:text-destructive transition-colors"
+            >
+              <Trash2 className="size-3.5" />
+            </SidebarMenuAction>
+          </SidebarMenuItem>
+        ))}
+        {hiddenCount > 0 && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={() => setShowAll(true)}
+              className="rounded-lg text-xs text-muted-foreground hover:text-foreground"
+            >
+              <span>Show {hiddenCount} more…</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
+      </SidebarMenu>
+    </SidebarGroup>
   );
 }

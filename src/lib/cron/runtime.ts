@@ -2,6 +2,7 @@ import { CronScheduler, recoverStaleCronRunMarkers } from "@/lib/cron/service";
 import { sweepGhostTasks } from "@/lib/agent/ghost-sweeper";
 import { getPendingJobs } from "@/lib/storage/queue-store";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
+import { ensureSweepersScheduled, runAllSweepers } from "@/lib/cron/sweepers";
 
 declare global {
   // eslint-disable-next-line no-var
@@ -80,6 +81,17 @@ export async function ensureCronSchedulerStarted(): Promise<void> {
       // This will only sweep tasks that are NOT actively running (isJobActive=false)
       if (recoverySignal.aborted) return;
       sweepGhostTasks().catch(console.error);
+
+      // 3. Data-directory sweepers (PM #32): tmp/ + orphan queue entries.
+      //    Boot-time run gives the operator immediate cleanup on every
+      //    restart; the recurring interval handles long-running deployments.
+      //    Both gated on the same recovery signal — if shutdown started
+      //    mid-boot, skip the sweep entirely.
+      if (recoverySignal.aborted) return;
+      void runAllSweepers().catch((err) => {
+        console.warn("[TaskQueue] Boot-time sweepers failed:", err);
+      });
+      ensureSweepersScheduled();
     });
   }
   globalThis.__orchestraCronScheduler__.start();

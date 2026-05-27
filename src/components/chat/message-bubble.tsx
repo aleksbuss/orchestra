@@ -1,5 +1,6 @@
 "use client";
 
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { AudioLines } from "lucide-react";
@@ -21,7 +22,28 @@ interface MessageBubbleProps {
   message: UIMessage;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+/**
+ * Wrap the rendered bubble in React.memo (PM #33). syncTick from
+ * `useBackgroundSync` fires on every SSE pulse — without memoisation, the
+ * entire message list re-renders on every tick. For a 500-message chat
+ * that's 500 markdown re-parses + 500 highlight.js code-block re-renders
+ * every few seconds, even though none of the messages have actually
+ * changed.
+ *
+ * The custom comparator is strict by reference for the message OBJECT plus
+ * a `parts.length` shortcut — streaming mid-message produces a new parts
+ * array via spread, so the reference check on `message` catches it. For
+ * the post-stream "tool-result patched in place" case the AI SDK swaps the
+ * entire UIMessage; same reference check catches it. We deliberately do
+ * NOT deep-equal — that's MORE expensive than just re-rendering for the
+ * very rare case the reference shape changes silently.
+ */
+export const MessageBubble = memo(MessageBubbleImpl, (prev, next) => {
+  // Reference-equal message → no re-render needed.
+  return prev.message === next.message;
+});
+
+function MessageBubbleImpl({ message }: MessageBubbleProps) {
   const isUser = message.role === "user";
 
   // Extract text content from parts

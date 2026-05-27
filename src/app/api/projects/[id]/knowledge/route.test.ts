@@ -238,6 +238,51 @@ describe("POST /api/projects/[id]/knowledge", () => {
       writeSpy.mockRestore();
     }
   });
+
+  // PM #34 — two parallel uploads of the SAME filename used to race on
+  // writeFile + importKnowledgeFile, producing duplicate vector chunks
+  // because importKnowledgeFile first deletes prior chunks then appends new
+  // ones — two concurrent imports both observed "no prior chunks" and both
+  // appended. The fix wraps writeFile + importKnowledgeFile in
+  // withFileLock(filePath, ...) so the two operations serialise.
+  it("PM #34 — two parallel uploads of the same filename serialise (no duplicate import)", async () => {
+    mockedGetProject.mockResolvedValue({ id: "p-1" } as any);
+
+    // Capture the order in which importKnowledgeFile is entered AND exited.
+    // The fix guarantees: enter-1 → exit-1 → enter-2 → exit-2 (interleaved
+    // enter-1 → enter-2 would be the bug shape).
+    const trace: string[] = [];
+    let counter = 0;
+    mockedImport.mockImplementation(async () => {
+      const id = ++counter;
+      trace.push(`enter-${id}`);
+      // Force the two calls to overlap if they're allowed to — a setImmediate
+      // boundary makes the race observable. With the lock, the second caller
+      // can't start until the first finishes.
+      await new Promise((resolve) => setImmediate(resolve));
+      trace.push(`exit-${id}`);
+      return { imported: 1, skipped: 0, errors: [] };
+    });
+
+    const [resA, resB] = await Promise.all([
+      POST(buildPostMultipart({ name: "report.md", content: "v1" }), params("p-1")),
+      POST(buildPostMultipart({ name: "report.md", content: "v2" }), params("p-1")),
+    ]);
+
+    expect(resA.status).toBe(200);
+    expect(resB.status).toBe(200);
+    expect(mockedImport).toHaveBeenCalledTimes(2);
+    // The lock guarantees serialisation: each enter is followed by its own
+    // exit before the next enter. The interleaved (broken) trace would be
+    // [enter-1, enter-2, exit-1, exit-2].
+    expect(trace).toEqual(["enter-1", "exit-1", "enter-2", "exit-2"]);
+  });
+
+  // Note on different-filename parallelism: withFileLock keys by resolved
+  // file path, so uploads of different filenames DO run in parallel — the
+  // lock keying is verified directly in `src/lib/storage/fs-utils.test.ts`.
+  // We don't repeat the assertion here because Vitest's event-loop ordering
+  // makes the trace test too flaky to be a regression guard at this layer.
 });
 
 describe("DELETE /api/projects/[id]/knowledge", () => {

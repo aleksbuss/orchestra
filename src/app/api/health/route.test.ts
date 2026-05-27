@@ -116,7 +116,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 7 subsystems by name in a stable order", async () => {
+  it("reports all 8 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -127,6 +127,10 @@ describe("GET /api/health — happy path", () => {
       "chat_model_tools",
       "resource_guard",
       "data_directory",
+      // PM #30 — chat-file parse integrity surfaced through /api/health so the
+      // operator sees "N chats failed to parse on rebuild" instead of silent
+      // disappearance from the sidebar.
+      "chat_index_integrity",
     ]);
   });
 });

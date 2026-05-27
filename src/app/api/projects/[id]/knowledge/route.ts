@@ -6,7 +6,7 @@ import { importKnowledgeFile } from "@/lib/memory/knowledge";
 import { deleteMemoryByMetadata, getChunkCountsByFilename } from "@/lib/memory/memory";
 import { getProject } from "@/lib/storage/project-store";
 import { getSettings } from "@/lib/storage/settings-store";
-import { assertPathInside } from "@/lib/storage/fs-utils";
+import { assertPathInside, withFileLock } from "@/lib/storage/fs-utils";
 
 /**
  * Sanitize a user-supplied filename for use inside the project's knowledge
@@ -114,12 +114,20 @@ export async function POST(
     }
 
     try {
-        // Save file
-        await fs.writeFile(filePath, buffer);
-
-        // Ingest only the uploaded file (removes its old chunks first, so no duplicates)
+        // PM #34 — serialise concurrent uploads of the SAME filename via the
+        // per-file lock. Without this, two parallel POSTs of `report.md` race
+        // on writeFile + importKnowledgeFile, producing duplicate vector
+        // chunks in `data/memory/<projectId>/vectors.json` (importKnowledgeFile
+        // removes the prior chunks then appends new ones; two concurrent
+        // imports both see "no prior chunks" and both append). Uploads to
+        // DIFFERENT filenames proceed in parallel — the lock key is the
+        // filePath, not the directory.
         const settings = await getSettings();
-        const result = await importKnowledgeFile(knowledgeDir, id, settings, safeName);
+        const result = await withFileLock(filePath, async () => {
+            await fs.writeFile(filePath, buffer);
+            // Ingest only the uploaded file (removes its old chunks first, so no duplicates)
+            return importKnowledgeFile(knowledgeDir, id, settings, safeName);
+        });
 
         if (result.errors.length > 0) {
             console.error("Ingestion errors:", result.errors);

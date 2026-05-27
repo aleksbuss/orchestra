@@ -182,4 +182,139 @@ describe("Reflection System (QA Auditor)", () => {
       );
     });
   });
+
+  // PM #38 — usage + modelConfig must surface so the budget banner
+  // (PM #36) can attribute reflection cost. Without these the banner
+  // would silently under-count when the operator enables reflection.
+  describe("PM #38 — usage + modelConfig attribution", () => {
+    it("reflectOnResponse returns usage + modelConfig on success", async () => {
+      const { generateText } = await import("ai");
+      vi.mocked(generateText).mockResolvedValueOnce({
+        text: '{"shouldRevise": true, "critique": "missing X", "suggestion": "add X"}',
+        usage: { inputTokens: 100, outputTokens: 30 },
+      } as never);
+
+      const { reflectOnResponse } = await import("@/lib/agent/reflection");
+      const result = await reflectOnResponse({
+        userMessage: "test",
+        agentResponse: "a".repeat(50),
+        settings: makeSettings({
+          utilityModel: { provider: "openai", model: "gpt-4o-mini" },
+        }),
+      });
+
+      expect(result.shouldRevise).toBe(true);
+      expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 30 });
+      expect(result.modelConfig).toEqual({
+        provider: "openai",
+        model: "gpt-4o-mini",
+      });
+    });
+
+    it("reflectOnResponse short-circuit (< 30 chars) returns NO usage", async () => {
+      const { reflectOnResponse } = await import("@/lib/agent/reflection");
+      const result = await reflectOnResponse({
+        userMessage: "ping",
+        agentResponse: "pong",
+        settings: makeSettings(),
+      });
+      // No LLM call happened — nothing to attribute. Banner adds zero.
+      expect(result.usage).toBeUndefined();
+      expect(result.modelConfig).toBeUndefined();
+    });
+  });
+});
+
+describe("PM #38 — reviseWithCritique", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("returns revised text + usage + modelConfig on success", async () => {
+    const { generateText } = await import("ai");
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: "Revised version with the fix applied.",
+      usage: { inputTokens: 200, outputTokens: 50 },
+    } as never);
+
+    const { reviseWithCritique } = await import("@/lib/agent/reflection");
+    const result = await reviseWithCritique({
+      userMessage: "Write a function",
+      originalResponse: "function foo() {}",
+      critique: "Missing JSDoc",
+      suggestion: "Add a JSDoc comment",
+      settings: makeSettings({
+        chatModel: { provider: "anthropic", model: "claude-sonnet-4-6" },
+      }),
+    });
+
+    expect(result.text).toBe("Revised version with the fix applied.");
+    expect(result.usage).toEqual({ inputTokens: 200, outputTokens: 50 });
+    expect(result.modelConfig).toEqual({
+      provider: "anthropic",
+      model: "claude-sonnet-4-6",
+    });
+  });
+
+  it("returns ORIGINAL text when revisor throws (never blocks the response)", async () => {
+    const { generateText } = await import("ai");
+    vi.mocked(generateText).mockRejectedValueOnce(new Error("LLM timeout"));
+
+    const { reviseWithCritique } = await import("@/lib/agent/reflection");
+    const result = await reviseWithCritique({
+      userMessage: "test",
+      originalResponse: "original answer",
+      critique: "issue",
+      suggestion: "fix",
+      settings: makeSettings(),
+    });
+
+    expect(result.text).toBe("original answer");
+    expect(result.usage).toBeUndefined();
+  });
+
+  it("returns ORIGINAL when revisor produces an empty response (defensive)", async () => {
+    const { generateText } = await import("ai");
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: "   \n  ",
+      usage: { inputTokens: 100, outputTokens: 0 },
+    } as never);
+
+    const { reviseWithCritique } = await import("@/lib/agent/reflection");
+    const result = await reviseWithCritique({
+      userMessage: "test",
+      originalResponse: "good original",
+      critique: "issue",
+      suggestion: "fix",
+      settings: makeSettings(),
+    });
+
+    expect(result.text).toBe("good original");
+  });
+
+  it("modelOverride wins over settings.chatModel", async () => {
+    const { generateText } = await import("ai");
+    const { createModel } = await import("@/lib/providers/llm-provider");
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: "ok",
+      usage: { inputTokens: 50, outputTokens: 10 },
+    } as never);
+
+    const { reviseWithCritique } = await import("@/lib/agent/reflection");
+    await reviseWithCritique({
+      userMessage: "test",
+      originalResponse: "x".repeat(50),
+      critique: "fix it",
+      suggestion: "do this",
+      settings: makeSettings({
+        chatModel: { provider: "openai", model: "gpt-4o" },
+      }),
+      modelOverride: { provider: "anthropic", model: "claude-opus-4-7" },
+    });
+
+    expect(vi.mocked(createModel)).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "claude-opus-4-7" }),
+      expect.anything()
+    );
+  });
 });

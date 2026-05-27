@@ -1,0 +1,17 @@
+{
+  "id": "08-code-block-integrity",
+  "description": "PM #40 — aggregator system prompt rule #2: NEVER skip code to save space. Even when the user asks for a brief explanation, code requested must appear verbatim.",
+  "tags": ["moa", "aggregator", "code"],
+  "input": {
+    "message": "Give me the SHORTEST possible debounce function in TypeScript. Two-line answer, no explanation needed, just the code.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "```ts\nconst debounce = <A extends unknown[]>(fn: (...a: A) => void, ms: number) => {\n  let t: ReturnType<typeof setTimeout>; return (...a: A) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };\n};\n```",
+  "assertions": [
+    { "type": "matches", "pattern": "```(ts|typescript|js|javascript)?" },
+    { "type": "contains", "value": "setTimeout" },
+    { "type": "contains", "value": "clearTimeout" },
+    { "type": "matches", "pattern": "const\\s+debounce" }
+  ]
+}

@@ -11,6 +11,9 @@
 /test-results
 /playwright-report
 
+# eval suite results (run output — cases themselves are tracked)
+/evals/results/
+
 # next.js
 /.next/
 /out/

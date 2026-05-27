@@ -1,0 +1,14 @@
+{
+  "id": "04-bypass-trivial-greeting",
+  "description": "Router bypasses the swarm for trivial conversational messages (saves cost). PM #9 / PM #22 — the bypass must remain active for genuine trivialities.",
+  "tags": ["moa", "router", "bypass"],
+  "input": {
+    "message": "Thanks!",
+    "swarmEnabled": true,
+    "forceSwarm": false
+  },
+  "mock_response": "You're welcome — happy to help. Let me know if you need anything else.",
+  "assertions": [
+    { "type": "matches", "pattern": "(welcome|glad|happy)", "flags": "i" }
+  ]
+}

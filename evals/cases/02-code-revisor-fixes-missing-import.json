@@ -1,0 +1,17 @@
+{
+  "id": "02-code-revisor-fixes-missing-import",
+  "description": "When the reflection critic flags a missing import, the revised response includes it (PM #38 wiring).",
+  "tags": ["moa", "reflection", "code"],
+  "input": {
+    "message": "Write a small React functional component that displays a counter with increment/decrement buttons. Use useState.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "```tsx\nimport React, { useState } from \"react\";\n\nexport function Counter() {\n  const [count, setCount] = useState(0);\n  return (\n    <div>\n      <button onClick={() => setCount(count - 1)}>-</button>\n      <span>{count}</span>\n      <button onClick={() => setCount(count + 1)}>+</button>\n    </div>\n  );\n}\n```",
+  "assertions": [
+    { "type": "contains", "value": "useState" },
+    { "type": "contains", "value": "import" },
+    { "type": "matches", "pattern": "from\\s+['\"]react['\"]" },
+    { "type": "contains", "value": "setCount" }
+  ]
+}

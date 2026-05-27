@@ -171,9 +171,38 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
       abortSignal,
     });
 
+    // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises
+    // "one DPG role is ALWAYS forced to be a QA Auditor / Skeptic", but
+    // the previous implementation relied entirely on a prompt instruction.
+    // A weak utility-model can ignore the instruction and produce 3-5
+    // personas without a critic, leaving the swarm without the
+    // zero-latency fact-checking mandate. We post-validate the LLM's
+    // output and inject the canonical Adversarial Critic if missing.
+    const SKEPTIC_PATTERN = /skeptic|auditor|critic|red.?team|fact.?check|adversari/i;
+    const hasSkeptic = object.personas.some(
+      (p) => SKEPTIC_PATTERN.test(p.id) || SKEPTIC_PATTERN.test(p.role)
+    );
+    let personas = object.personas as MoAProposer[];
+    if (object.requiresSwarm && !hasSkeptic) {
+      console.warn(
+        `[MoA] DPG output missing a Skeptic persona — force-injecting canonical 'critic' (PM #37). Roles received: ${object.personas.map((p) => p.id).join(", ")}`
+      );
+      const canonicalCritic = MOA_PROPOSERS.find((p) => p.id === "critic")!;
+      // Cap at 5 personas total to keep the cost envelope predictable.
+      // If the LLM already returned 5, evict the LAST one (heuristic:
+      // the LLM's tail picks are usually the weakest).
+      personas = [...object.personas];
+      if (personas.length >= 5) personas.pop();
+      personas.push({
+        id: canonicalCritic.id,
+        role: canonicalCritic.role,
+        systemPrompt: canonicalCritic.systemPrompt,
+        color: canonicalCritic.color,
+      });
+    }
     return {
       requiresSwarm: object.requiresSwarm,
-      personas: object.personas,
+      personas,
       usage,
     };
   } catch (err) {

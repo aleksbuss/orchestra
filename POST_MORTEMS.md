@@ -38,6 +38,32 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 37. MoA "QA Auditor Always Forced" Was a Prompt Suggestion, Not Enforced
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (claim-vs-reality gap; CLAUDE.md §1 promised an invariant the code did not enforce)
+**Symptoms:** No live incident, but the 2026-05-27 MoA deep audit found the gap directly. CLAUDE.md §1 reads: *"Zero-Latency Fact-Checking — One of the DPG roles is **always forced** to be a 'QA Auditor / Skeptic'"*. The implementation enforced this via a single line in the DPG Router's prompt — `"VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a 'QA Auditor / Fact-Checker' ..."` — and trusted the LLM to obey. With a weak `utilityModel` (free-tier OpenRouter, small local model), the Router silently produced 3-5 personas with no critic. The code accepted the output verbatim. The static `MOA_PROPOSERS` fallback had a critic (test pinned this), but the DPG output path did not.
+**Detection:** Code-reading audit. `grep -nE 'skeptic|auditor|critic|red.?team' src/lib/agent/moa.ts` returned only (a) the static `MOA_PROPOSERS.critic` constant and (b) the prompt instruction text — no post-validation logic anywhere. The test file confirmed the gap: `moa.test.ts` line 112 asserted `MOA_PROPOSERS.some(...has skeptic)`, but no test exercised the DPG output path with a missing-critic LLM response.
+**Root Cause:** Prompt-as-contract antipattern. Instructions to LLMs are best-effort; weak models drop instructions silently. For invariants the operator depends on, the code must POST-VALIDATE the LLM output and either fix or reject.
+**Resolution:** Added a post-DPG check inside `generateDynamicSwarm` ([`src/lib/agent/moa.ts`](src/lib/agent/moa.ts)):
+  1. Scan `object.personas` for ids/roles matching `/skeptic|auditor|critic|red.?team|fact.?check|adversari/i`.
+  2. If no match AND `requiresSwarm: true` (swarm will actually run): log a warning naming the LLM's roster, then inject the canonical Adversarial Critic from `MOA_PROPOSERS.find(p => p.id === "critic")`.
+  3. Cap at 5 personas total to keep the cost envelope predictable. If the LLM already returned 5, evict the LAST one (heuristic: tail picks are usually the LLM's weakest choices).
+  4. Skip injection on `requiresSwarm: false` — the bypass path doesn't run a swarm at all.
+
+This closes the claim. The Skeptic is now **enforced by code**, not requested by prompt.
+**Regression Coverage:** [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 4 new cases under `describe("PM #37 ...")`:
+  - LLM returns 3 personas without skeptic → critic is injected (drafts count goes 3→4)
+  - LLM already includes a skeptic → no injection (drafts count unchanged)
+  - LLM returns 5 personas with no skeptic → tail is evicted, critic injected (drafts stays at 5)
+  - `requiresSwarm: false` → no injection (bypass path has nothing to enforce)
+
+One pre-existing test was updated: `forceSwarm=true is a no-op when Router already wants the swarm` previously used `MOA_PROPOSERS.slice(0, 3)` (which has no critic — indices 0, 1, 2 are analyst/creative/pragmatist). After PM #37 the guard would inject and bump the call count. Test data changed to `[MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]]` (analyst + critic + chameleon) to keep the original assertion (4 calls) honest while exercising the path with a skeptic actually present.
+**Doc Updates:** None to CLAUDE.md required — the §1 claim "always forced" is now actually true. If the wording is ever weakened, this PM is the regression to remember.
+**Rule:** Whenever a CLAUDE.md or system-prompt invariant is stated as "**always** / **must** / **forced**", verify there is CODE enforcing it — not just a prompt instruction. Prompt-as-contract is a soft suggestion to the LLM. For real invariants, post-validate the LLM output and inject/reject as needed. Audit grep for future PRs: any "MUST ALWAYS" / "ALWAYS forced" in `src/prompts/` and `src/lib/agent/` should be paired with a runtime check in the same module.
+
+---
+
 ## 36. Soft Per-Chat Budget Banner — Token + USD Cost Awareness in the Chat UI
 **Date:** 2026-05
 **Status:** RESOLVED

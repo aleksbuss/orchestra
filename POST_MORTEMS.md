@@ -38,6 +38,29 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 39. MoA Aggregator Silently Smoothed Over Proposer Disagreement — Now Explicit
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (quality issue, no incident; deep-audit finding from the 2026-05-27 MoA roadmap)
+**Symptoms:** No live incident. The 2026-05-27 audit found that when MoA proposers diverge (e.g. 3 say "use React hooks", 2 say "use Zustand"), Orchestra's aggregator picks one direction silently based on "internal knowledge" without surfacing the conflict. Mature multi-agent frameworks call this "sycophantic consensus" — agents agree on the wrong answer because each sees the others' confidence with no explicit signal to surface disagreement. The audit pointed at recent literature (FREE-MAD arxiv 2509.11035, DWC-MAD Springer 2026) where explicit disagreement detection consistently improves multi-agent reasoning quality on benchmarks like AlpacaEval and SWE-Bench.
+**Root Cause:** Orchestra's aggregator received raw proposer outputs and was instructed to "synthesize" — no algorithmic signal about agreement vs disagreement. The LLM-judge synthesis pattern is bias-prone: a confident-sounding minority can win over a hedged-but-correct majority, and the user never sees the tension. Orchestra ALREADY had an embedder available (used by the Blackboard module), so the infrastructure cost of detection was effectively zero — what was missing was the wiring.
+**Resolution:** New module [`src/lib/agent/disagreement.ts`](src/lib/agent/disagreement.ts):
+  1. **`detectDisagreement(drafts, settings, threshold?)`** — embeds each successful draft (truncated to 4000 chars to bound token cost), computes pairwise cosine distance, returns `{ maxDistance, averageDistance, detected, threshold, pairCount, ranSuccessfully }`. Default threshold is **0.35** (empirically: substantively-different-same-topic texts sit at 0.30–0.45 with `text-embedding-3-small`).
+  2. **`buildDisagreementMarker(result)`** — returns the synthesizer-facing prefix when `detected: true`, empty string otherwise. The marker tells the aggregator LLM to *identify the specific point of disagreement, explain trade-offs of each side, then either reconcile with a clear rationale OR flag the open question to the user — never silently pick one side and pretend consensus exists*.
+  3. **Wired into [`runMoAEnsemble`](src/lib/agent/moa.ts)** — runs after `successfulDrafts` is computed, before the aggregator `generateText` call. Always on (no setting toggle — the cost is one embedding call, the quality impact is consistent). Failure is non-fatal: if the embedder is misconfigured or the API is down, `ranSuccessfully: false` falls through to the default aggregator behavior. UI event surfaces detection with the cosine distance and threshold so the operator sees that something interesting happened.
+
+**What this does NOT do:** it does NOT decide which proposer is right. The aggregator still makes that call. The signal just changes the aggregator's job from "synthesize" to "synthesize AND flag the conflict explicitly".
+
+**Cost envelope:** ~1 embedding call per swarm-on turn (≤ 5 drafts × 4000 chars ≈ 5000 tokens through `text-embedding-3-small` at $0.02/M = $0.0001 per turn). Negligible.
+
+**Regression Coverage:**
+  - [`src/lib/agent/disagreement.test.ts`](src/lib/agent/disagreement.test.ts) — 10 cases: < 2 drafts → no signal; identical embeddings → distance 0, not detected; orthogonal embeddings → distance 1, detected; borderline (distance 0.4) crosses default 0.35 threshold; custom threshold (0.5) above actual distance → not detected; embedding API failure → non-fatal; count mismatch → non-fatal; draft text truncated to ≤ 4000 chars; marker is empty when not detected; marker contains synthesizer instructions when detected.
+  - [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 1 new integration case: when embedder returns orthogonal vectors for 3 drafts, the aggregator's `messages[0].content` contains `<<DISAGREEMENT_DETECTED>>` marker AND the original user message AND the draft text (marker prepends, doesn't replace).
+**Doc Updates:** None to CLAUDE.md required — this is feature plumbing, not a new architectural rule. The "Synthesizer must flag conflicts" rule lives inside the marker text itself, which is the natural place for it.
+**Rule:** Multi-agent ensemble systems must NOT rely on the aggregator's LLM judgment alone to detect inter-agent disagreement. Algorithmic signals (embedding distance, voting, confidence scores) catch what the synthesizer would otherwise smooth away. The cost of one embedding call per turn is negligible compared to the quality gain. When adding new ensemble shapes (sequential MoA, hierarchical swarms, etc.), bake an explicit disagreement signal in from the start.
+
+---
+
 ## 38. Reflection Module Was Dead Code — Wired into MoA as Generator-Critic-Revisor Loop
 **Date:** 2026-05
 **Status:** RESOLVED

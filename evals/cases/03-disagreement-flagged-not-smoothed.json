@@ -1,0 +1,18 @@
+{
+  "id": "03-disagreement-flagged-not-smoothed",
+  "description": "When proposers disagree on architecture choice, the synthesized response should surface the trade-off, not silently pick one side (PM #39).",
+  "tags": ["moa", "disagreement", "architecture"],
+  "input": {
+    "message": "For a small team building a real-time multiplayer game backend, should I use Go with goroutines or Node.js with Socket.io? Give me the recommendation.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Both stacks can serve this workload — the choice depends on your team's comfort and the specific scaling shape.\n\n**Go + goroutines** is the right pick if: (a) you expect >5k concurrent connections per node, (b) you have someone on the team comfortable with Go's concurrency primitives, (c) low memory-per-connection matters. Goroutines scale to hundreds of thousands of connections on modest hardware.\n\n**Node.js + Socket.io** is the right pick if: (a) the team is already JavaScript-fluent, (b) you want to share types/code between client and server, (c) the connection count is moderate (<5k per node), (d) you value the ecosystem (Socket.io's room/namespace abstractions are excellent for game lobbies).\n\nThere is a real trade-off here. If forced to pick blind, I'd lean Node.js for a small team starting out — the iteration speed advantage usually outweighs Go's runtime efficiency at the early-stage scale. Revisit if you cross the 5k connection threshold.",
+  "assertions": [
+    { "type": "contains", "value": "trade-off" },
+    { "type": "matches", "pattern": "(both|either)", "flags": "i" },
+    { "type": "contains", "value": "Go" },
+    { "type": "contains", "value": "Node" },
+    { "type": "not_contains", "value": "always use" }
+  ]
+}

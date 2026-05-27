@@ -38,6 +38,37 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 41. Eval Harness — Assertion-Based Regression Suite for MoA Behavior
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (enabler issue — without it, PM #36–#40 are unmeasured improvements)
+**Symptoms:** No live incident. The 2026-05-27 audit identified this as the highest-leverage next step after Phase 2: PM #37/#38/#39/#40 are all "improvements" but the project had ZERO concrete signal on whether they actually improve agent outcomes. A failing reflection could silently make answers worse; an aggressive disagreement threshold could fire on normal substantive prompts and bloat the synthesizer's job; the togethercomputer/MoA prompt is validated on AlpacaEval but not on Orchestra's own prompt distribution. **Without measurement, every following architecture change is slope-of-evidence.**
+**Root Cause:** Unit tests exist for the code (1961 passing as of this PM), but they pin algorithm correctness, not behavioral correctness of the agent. There was no shape for "given prompt X, does the agent's response satisfy property Y?" — every behavioral check was a manual `npm run dev` + Type-and-Eyeball session.
+**Resolution:** New `evals/` directory + harness module:
+  1. **`src/lib/evals/types.ts`** — `EvalCase`, `Assertion`, `CaseResult`, `EvalSuiteResult`. JSON case format (no new dependency vs js-yaml).
+  2. **`src/lib/evals/assertions.ts`** — 3 v1 assertion types (`contains`, `not_contains`, `matches`). Pure functions, no I/O. Human-readable failure reasons.
+  3. **`src/lib/evals/runner.ts`** — `parseCaseFromJson`, `loadAllCases`, `runCase`, `runSuite`. Dual-mode: cases with `mock_response` run deterministically (no LLM cost) for the unit-test path; cases without invoke the real agent when `--real` is set.
+  4. **`scripts/run-evals.ts`** — CLI with `--real` / `--tag` / `--case` / `--json` flags. Colored TTY output by default. Writes structured results to `evals/results/<timestamp>.json` for run-to-run diffs. Exit codes: 0 pass, 1 case-fail, 2 load-error.
+  5. **`evals/cases/` — 10 initial cases** covering: Skeptic-injected swarm correcting false premise (PM #37); reflection-revised code with missing import (PM #38); disagreement-flagged trade-off response (PM #39); Router bypass for trivial greeting (PM #22); medical-advice refusal (safety); no-meta-commentary preamble (PM #40); Russian language mirroring (PM #40 rule #5); code-block integrity under brevity request (PM #40 rule #2); untrusted-content prompt-injection resistance (PM #27); real-agent smoke (requires `--real`).
+  6. **`evals/README.md`** — operator-facing doc: how to run, how to add a case, assertion type reference, tag conventions.
+  7. **`package.json`** — `"evals": "npx tsx scripts/run-evals.ts"`.
+
+**v1 deliberately omits:**
+  - **LLM-as-judge assertions** — would require an LLM call per assertion, burns tokens. Roadmap v2 will add `{ type: "llm_judge", rubric: "..." }` using `settings.utilityModel`.
+  - **HTML diff reports** between runs — operator can diff the JSON files with `jq`; HTML is polish, not core.
+  - **CI integration** — running real-agent evals on every PR requires API keys in secrets and meaningful budget. Operators run locally with `npm run evals -- --real` until a CI-budget story exists.
+
+**What this is NOT:**
+  - Not a replacement for `npm test`. Unit tests = code correctness. Evals = behavioral correctness of the AGENT.
+  - Not a benchmark. No accuracy/F1 metrics, no leaderboard. Pass/fail per case.
+  - Not enforcement. A failing eval doesn't block deploy — it's a signal to investigate (the failure could be an intentional behavior change).
+
+**Regression Coverage:** [`src/lib/evals/assertions.test.ts`](src/lib/evals/assertions.test.ts) — 13 cases pinning each assertion type + the failure-message wording. [`src/lib/evals/runner.test.ts`](src/lib/evals/runner.test.ts) — 18 cases pinning case validation, directory loading, error collection (one bad file doesn't crash the run), filter shapes, mock-response path correctness. Total: 31 new tests (live suite 1961/1961).
+**Doc Updates:** [`evals/README.md`](evals/README.md) is the operator-facing doc. README.md badges already advertise 1961 tests + 41 PMs. No CLAUDE.md change needed — the rule "add an eval case before merging an MoA-behavioral change" can be added in a future PM if we observe operator drift.
+**Rule:** Any change to the agent pipeline (router prompt, aggregator prompt, persona generation logic, reflection loop, disagreement threshold) MUST ship with at least one new eval case that pins the behavior change. The case shows the operator what the change DOES. Reviewers diff the case alongside the code change; if the case isn't there, the behavior change is unmeasured.
+
+---
+
 ## 40. Aggregator Prompt — Replaced Homemade with Validated Together MoA Template
 **Date:** 2026-05
 **Status:** RESOLVED

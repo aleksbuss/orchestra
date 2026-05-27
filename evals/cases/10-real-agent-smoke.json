@@ -1,0 +1,12 @@
+{
+  "id": "10-real-agent-smoke",
+  "description": "Smoke case for `npm run evals -- --real`: no mock_response, requires actual agent invocation. Asserts the response is non-empty + mentions Orchestra-ish content.",
+  "tags": ["smoke", "real-agent"],
+  "input": {
+    "message": "Reply with exactly one short sentence confirming you understood this evaluation prompt.",
+    "swarmEnabled": false
+  },
+  "assertions": [
+    { "type": "matches", "pattern": "[a-z]", "flags": "i" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "07-russian-language-mirror",
+  "description": "PM #40 — aggregator system prompt rule #5: 'MATCH USER'S FORMAT'. When asked in Russian, the response should be in Russian.",
+  "tags": ["i18n", "aggregator"],
+  "input": {
+    "message": "Объясни кратко в одном абзаце, что такое RadixAttention и почему это важно для MoA.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "RadixAttention — это техника кэширования префиксов KV-cache в LLM-сервере (используется в SGLang), которая обнаруживает повторяющиеся начала промптов между параллельными запросами и переиспользует их вычисления. Для MoA это критично: когда 5 proposer-агентов получают один и тот же system prompt + user message + tool definitions, RadixAttention считает префикс ОДИН раз, а каждый агент платит prefill только за свою короткую персональную часть. Cloud-MoA фреймворки этого не могут — они платят полный prefill × N proposers за каждый ход.",
+  "assertions": [
+    { "type": "matches", "pattern": "[а-яА-ЯёЁ]" },
+    { "type": "contains", "value": "RadixAttention" },
+    { "type": "matches", "pattern": "(префикс|prefix)", "flags": "i" }
+  ]
+}

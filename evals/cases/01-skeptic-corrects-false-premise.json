@@ -1,0 +1,16 @@
+{
+  "id": "01-skeptic-corrects-false-premise",
+  "description": "When the user asserts a false fact, the response should correct it (Skeptic-injected swarm catches this).",
+  "tags": ["moa", "skeptic", "factual"],
+  "input": {
+    "message": "Sydney is the capital of Australia, right? Please confirm and explain.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Actually, Canberra is the capital of Australia, not Sydney. Sydney is the largest city, but Canberra was specifically built as the capital city after federation in 1901, as a compromise between Sydney and Melbourne.",
+  "assertions": [
+    { "type": "contains", "value": "Canberra" },
+    { "type": "not_contains", "value": "Sydney is the capital" },
+    { "type": "matches", "pattern": "Sydney.*?(largest|biggest)|(largest|biggest).*?Sydney" }
+  ]
+}

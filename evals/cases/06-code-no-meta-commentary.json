@@ -1,0 +1,18 @@
+{
+  "id": "06-code-no-meta-commentary",
+  "description": "PM #40 — aggregator system prompt forbids 'Based on the drafts above' / 'Here is the synthesis' preambles. Response should start directly with the answer.",
+  "tags": ["moa", "aggregator", "style"],
+  "input": {
+    "message": "How do I check if a file exists in Node.js without throwing?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Use `fs.promises.access`, which resolves on existence and rejects on absence — wrap in a try/catch and treat any rejection as 'not found':\n\n```ts\nimport fs from \"fs/promises\";\n\nasync function fileExists(path: string): Promise<boolean> {\n  try {\n    await fs.access(path);\n    return true;\n  } catch {\n    return false;\n  }\n}\n```\n\nDo NOT use the older `fs.exists` callback — it's been deprecated for years because of TOCTOU race issues. The `access` pattern is the canonical replacement.",
+  "assertions": [
+    { "type": "contains", "value": "fs.access" },
+    { "type": "not_contains", "value": "Based on the drafts" },
+    { "type": "not_contains", "value": "Here is the synthesis" },
+    { "type": "not_contains", "value": "Looking at the responses" },
+    { "type": "not_contains", "value": "After analyzing the experts" }
+  ]
+}

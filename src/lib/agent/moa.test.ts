@@ -59,7 +59,7 @@ vi.mock("@/lib/tools/search-engine", () => ({
   searchWeb: vi.fn(),
 }));
 
-import { runMoAEnsemble, MOA_PROPOSERS } from "./moa";
+import { runMoAEnsemble, MOA_PROPOSERS, AGGREGATOR_SYSTEM_PROMPT } from "./moa";
 import type { AppSettings } from "@/lib/types";
 import { generateText, generateObject } from "ai";
 
@@ -474,6 +474,108 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
     // 3 proposers + 1 aggregator = 4 calls. Same as without the flag.
     expect(mockedGenerateText).toHaveBeenCalledTimes(4);
     expect(result.drafts.length).toBe(3);
+  }, 30_000);
+});
+
+describe("PM #40 — aggregator prompt adapted from togethercomputer/MoA", () => {
+  // Pin the key elements stolen from Together's reference prompt that
+  // validated at 65.1% AlpacaEval (beat GPT-4o 57.5% on OSS models).
+  // If a future PR weakens these, the synthesis quality regresses.
+
+  it("system prompt contains the Together-paper 'critically evaluate ... may be biased' framing", () => {
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/critically evaluate/i);
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/biased.*incomplete.*incorrect|biased.*or incorrect/i);
+  });
+
+  it("system prompt forbids simple replication or vote-aggregation of drafts", () => {
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/NOT simply replicate|not simply replicate/);
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/vote-aggregate|refined.*accurate.*comprehensive/i);
+  });
+
+  it("system prompt cross-references the PM #39 disagreement marker", () => {
+    expect(AGGREGATOR_SYSTEM_PROMPT).toContain("<<DISAGREEMENT_DETECTED>>");
+  });
+
+  it("system prompt preserves Orchestra-specific rules: code blocks + no meta-commentary", () => {
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/code/i);
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/NO META-COMMENTARY|no meta-commentary/i);
+    expect(AGGREGATOR_SYSTEM_PROMPT).toMatch(/Start directly|don'?t begin|do not begin/i);
+  });
+
+  it("aggregator generateText call uses the new system prompt verbatim", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "Aggregated reply long enough to skip reflection short-circuit.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "test",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Aggregator is the LAST call.
+    const aggregatorCall = mockedGenerateText.mock.calls.at(-1)?.[0] as
+      | { system?: string }
+      | undefined;
+    expect(aggregatorCall?.system).toBe(AGGREGATOR_SYSTEM_PROMPT);
+  }, 30_000);
+
+  it("aggregator user content uses numbered-list format (Together MoA convention)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as never);
+    // 3 proposers + aggregator
+    for (let i = 0; i < 3; i++) {
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `Proposer ${i + 1} substantive draft text long enough.`,
+        usage: { inputTokens: 50, outputTokens: 30 },
+      } as never);
+    }
+    mockedGenerateText.mockResolvedValueOnce({
+      text: "Final aggregated reply long enough to skip reflection.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "trade-off question",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    const aggregatorCall = mockedGenerateText.mock.calls.at(-1)?.[0] as
+      | { messages?: Array<{ content: string }> }
+      | undefined;
+    const userContent = aggregatorCall!.messages![0].content;
+    // Numbered list: "1. [Expert role: ...]" / "2. [Expert role: ...]" / ...
+    expect(userContent).toMatch(/^1\. \[Expert role: /m);
+    expect(userContent).toMatch(/^2\. \[Expert role: /m);
+    expect(userContent).toMatch(/^3\. \[Expert role: /m);
+    // Original user request must still be in the prompt verbatim.
+    expect(userContent).toContain("trade-off question");
+    // Closing instruction.
+    expect(userContent).toMatch(/Now produce the final synthesized response/);
   }, 30_000);
 });
 

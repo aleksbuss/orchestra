@@ -38,6 +38,41 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 40. Aggregator Prompt — Replaced Homemade with Validated Together MoA Template
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (quality improvement; no incident. The previous prompt worked but wasn't benchmarked.)
+**Symptoms:** No incident. The 2026-05-27 audit recommended this as a "free quality bump" — the Together AI MoA reference template was published, validated at 65.1% AlpacaEval, and beat GPT-4o (57.5%) using only open-source models. Orchestra's aggregator prompt was homemade with no benchmark behind it.
+**Root Cause:** Original aggregator prompt was written iteratively against subjective observations. It was OK — preserved code blocks, banned meta-commentary, addressed conflicts. But it lacked the seminal Together-paper framing ("critically evaluate ... may be biased or incorrect ... should NOT simply replicate ... should offer a refined, accurate, comprehensive reply") that empirically lifts synthesis quality.
+**Resolution:** Rewrote both surfaces:
+  1. **New `AGGREGATOR_SYSTEM_PROMPT` export** in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) — combines the Together-paper critical-evaluation framing with Orchestra-specific rules (code-block integrity, no meta-commentary, conflict-resolution heuristics). Cross-references the PM #39 `<<DISAGREEMENT_DETECTED>>` marker — when the marker is present in user content, the synthesizer follows its additional instructions instead of smoothing the conflict away.
+  2. **`buildAggregatorPrompt` reformatted** to Together's numbered-list convention (`1. [Expert role: X]\n<draft>\n\n2. [Expert role: Y]\n<draft>\n...`). The previous `═══ DRAFT 1 — ROLE ═══` separator was readable but non-standard; the numbered format is what the validated reference uses and is more compact (saves a few tokens per turn × every Swarm-on call).
+  3. **Identity/rules vs data split** — system prompt carries IDENTITY + RULES (stable across turns, deduped); user content carries ONLY data (original request + numbered drafts + optional disagreement marker). Previously the rules were duplicated in both surfaces.
+
+**Key elements imported from Together MoA template:**
+  - "It is crucial to critically evaluate the information ... recognizing that some of it may be biased, incomplete, or incorrect."
+  - "Your response should NOT simply replicate or vote-aggregate the drafts — it should offer a refined, accurate, and comprehensive reply that goes beyond any individual draft."
+  - "Adhere to the highest standards of accuracy and reliability."
+  - Numbered list: `1. [Expert role: X]\n<draft>` format
+
+**Key Orchestra-specific elements preserved:**
+  - Code block integrity (Orchestra's primary workflow involves code)
+  - No meta-commentary (the "Based on the drafts above..." preamble is a known wart)
+  - Conflict resolution heuristic (pick most modern/stable when factual claims diverge)
+  - PM #39 disagreement marker hook
+
+**Regression Coverage:** [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 6 new cases under `describe("PM #40 ...")`:
+  - System prompt contains "critically evaluate ... may be biased/incomplete/incorrect" framing
+  - System prompt forbids simple replication / vote-aggregation
+  - System prompt cross-references the `<<DISAGREEMENT_DETECTED>>` marker
+  - System prompt preserves Orchestra rules: code blocks + no meta-commentary
+  - Aggregator generateText call uses `AGGREGATOR_SYSTEM_PROMPT` verbatim
+  - User content uses numbered-list format (Together convention) with original request preserved
+**Doc Updates:** None to CLAUDE.md required — prompt-content changes are internal; the contract (synthesize without bias, preserve code, etc.) was already stated in §1.
+**Rule:** When the academic literature has a validated prompt for a specific multi-agent shape, steal it rather than improvising. Cite the source in the export's docstring so future PRs can verify against the original benchmark. Pure-text changes to system prompts should still ship with tests — at minimum verifying that the critical phrases are present, so a future "quick prompt tweak" can't silently regress a published benchmark.
+
+---
+
 ## 39. MoA Aggregator Silently Smoothed Over Proposer Disagreement — Now Explicit
 **Date:** 2026-05
 **Status:** RESOLVED

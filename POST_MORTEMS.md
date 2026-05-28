@@ -38,6 +38,63 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 51. Persistent Successful-Trace Memory — DSPy-Style Bootstrap Fewshot
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, first v4.0 strategic-bet ship)
+**Symptoms:** No live incident. The pattern this addresses is well-known in DSPy / `dspy.BootstrapFewShot`: agent quality scales with high-quality demonstrations in-context, but assembling demonstrations from an external eval harness requires labeled data the operator doesn't have. Orchestra's MoA produces strong *internal* signals on every run (proposer consensus, critic-cleanup, low disagreement) — those signals correlate with "the swarm naturally converged on a good answer". Until PM #51, those signals were thrown away after the run ended. The next prompt got no benefit from the last one going well.
+**Root Cause:** N/A — feature, not bug.
+**Resolution:** New trace-memory subsystem + light MoA wiring.
+
+  1. **`src/lib/agent/trace-memory.ts`** — new module, five public surfaces:
+     - **`computeQualityScore(signals)`** — pure function. Weights: 0.4 proposer success ratio + 0.3 consensus (no disagreement detected) + 0.2 critic clean (0 revision rounds = full weight; 1 = half; 2+ = zero) + 0.1 didn't-hit-reflection-cap. Sum = 1.0; threshold default 0.7 means "at least three of four soft criteria fully satisfied".
+     - **`captureSuccessfulTrace({ userPrompt, finalText, signals, brainConfig, settings })`** — at the end of a MoA run, computes score, embeds the user prompt, persists `data/traces/<id>.json` if score ≥ threshold. Feature-flag-gated via `settings.traceMemory.enabled`. ID = sha256(normalized prompt) → same prompt deduplicates across runs.
+     - **`retrieveRelevantTraces(userPrompt, settings, { k? })`** — at Router time, embeds the prompt and returns top-K stored traces by cosine similarity, filtered to score ≥ threshold. Errors degrade silently to `[]` (Router runs with no few-shots — pre-PM-51 behavior).
+     - **`formatTracesAsFewShots(retrieved)`** — renders the top-K into a `<past_successful_runs>` block with `<example index="N" similarity="0.95" quality="0.85">` markers. Aggressively truncates (prompt 500ch, answer 800ch) — Router prompt budget matters.
+     - **`computeTraceId(userPrompt)`** — stable hash for filename + dedupe.
+
+  2. **`src/lib/agent/moa.ts` Router-side wiring** — at the top of `runMoAEnsemble`, after `routerConfig` is resolved, calls `retrieveRelevantTraces` and threads the rendered block as a new optional 6th parameter `fewShotsBlock` into `generateDynamicSwarm`. Inside the Router prompt the block is appended after the numbered INSTRUCTIONS list so it biases persona generation without interfering with the structured-output schema. Empty string = unchanged Router prompt (exact backward compat when trace memory is off).
+
+  3. **`src/lib/agent/moa.ts` capture-side wiring** — at the end of `runMoAEnsemble` (post-reflection, post-aggregator-finalization), three locals track the reflection loop's behavior: `reflectionRevisionsExecuted` (number of `reviseWithCritique` calls), `reflectionCriticCleanedUp` (loop exited because critic said clean), `reflectionHitCap` (loop exhausted maxRounds without critic ever saying clean). These combine with `disagreement.detected` / `disagreement.maxDistance` (PM #39 result, already computed) and `successfulDrafts.length / drafts.length` (proposer success ratio) into a `TraceSignals` object passed to `captureSuccessfulTrace`. Wrapped in try/catch so a capture failure never bubbles up to the user — the response has already shipped.
+
+  4. **`AppSettings.traceMemory?: { enabled, qualityThreshold?, retrievalK? }`** in [`src/lib/types.ts`](src/lib/types.ts). Default off; operator opts in by adding `{ traceMemory: { enabled: true } }` to `data/settings/settings.json`. UI toggle pending v3.1 settings UI.
+
+**Quality-signal calibration.** The 0.7 threshold is the "good but not perfect" mark by construction:
+  - 0.4 + 0.3 + 0.2 + 0.1 = 1.0 = all signals perfect.
+  - 0.4 + 0.3 + 0.2 + 0 = 0.9 = perfect except reflection hit cap (still high — answer text is fine, just took multiple revisions).
+  - 0.4 + 0.3 + 0 + 0.1 = 0.8 = perfect except 2+ revision rounds (still decent).
+  - 0.4 + 0 + 0.2 + 0.1 = 0.7 = proposers + critic + cap-OK but disagreement was detected — the cutoff: "consensus broke but everything else held".
+  - 0.4 + 0 + 0 + 0 = 0.4 = proposers OK but everything else fell apart.
+  - Below 0.4 = something major went wrong (proposers errored out).
+Operators who want a stricter pool raise the threshold (e.g. 0.85 means "perfect critic AND consensus required"). Operators who want a broader pool lower it.
+
+**Privacy Mode interaction (PM #47).** Capture + retrieval both call `embedTexts(settings.embeddingsModel)`. Under Privacy Mode, the embeddings model is forced local — so embeddings happen on-device, no text leaks. Traces themselves stay on disk. No additional gating needed: the feature is Privacy-Mode-safe by construction.
+
+**Tier compatibility (PM #48).** Traces store `modelConfig: { provider, model }` of the brain (aggregator) that produced `finalText`. Future filtering ("only inject traces from runs that used the frontier tier") is a one-line predicate change; not done yet because the current single-pool design is enough for v1.
+
+**What this is NOT:**
+  - Not external eval data. The quality signal is *internal* to MoA — it correlates with answer correctness but doesn't prove it. False positives are inevitable (a swarm can confidently converge on a wrong answer); the operator can curate by deleting `data/traces/*.json` files they disagree with.
+  - Not a memory of EVERY chat. Sub-threshold runs are silently skipped — the pool stays focused on examples that the swarm itself rates as strong.
+  - Not online learning. There's no model fine-tuning, no gradient update. Pure in-context prompt augmentation.
+  - Not the same as PM #36 cost banner / PM #41 evals / PM #48 tiers. Trace memory is *adaptive prompting*; the others are observability/quality measurement.
+
+**Regression Coverage:** [`src/lib/agent/trace-memory.test.ts`](src/lib/agent/trace-memory.test.ts) — 28 cases:
+  - `computeQualityScore` (8 cases) — perfect → 1.0; all-bad → 0; 0-round reflection + no disagreement + partial proposers → 0.8; 1 reflection round → critic 0.5; 2+ reflection rounds → critic 0; disagreement zeros 0.3 dimension; reflectionHitCap zeros 0.1; ratio clamped to [0,1]; NaN ratio defends to 0.
+  - `computeTraceId` (4 cases) — deterministic; whitespace+case invariant (dedupe); different prompts → different ids; 16-hex format.
+  - `captureSuccessfulTrace` (5 cases) — disabled flag → not captured; score below threshold → not captured; good signals → captured with disk write; embedding failure → not captured; empty embedding vector → not captured.
+  - `retrieveRelevantTraces` (7 cases) — disabled flag → `[]`; k=0 → `[]` without embedding call; no traces → `[]`; top-K sorted by cosine + threshold filter; sub-threshold filtered out; query embed failure → `[]`; dim mismatch skipped.
+  - `formatTracesAsFewShots` (4 cases) — empty input → empty string; renders wrapper + per-trace `<example>`; truncation respected.
+
+  All 130 MoA + privacy + tiers + agent-privacy + trace-memory tests pass (37 + 38 + 12 + 15 + 28).
+
+**Doc Updates:**
+  - [`CLAUDE.md`](CLAUDE.md) — added `data/traces/<id>.json` row to the Data Layout table.
+  - [`README.md`](README.md) v4.0 roadmap — "Persistent successful-trace memory (DSPy-style bootstrap fewshot)" moved from pending to shipped. The first of four v4.0 strategic bets is now closed.
+
+**Rule:** When an agent system already produces strong internal quality signals (consensus, clean critic, low disagreement), those signals are gold for prompt-side improvement loops — don't throw them away at end-of-run. The "DSPy needs labeled data" objection dissolves the moment you realize the swarm's own convergence is a proxy label. Capture-on-quality + retrieval-as-fewshot is the cheapest unsupervised quality improvement available. The trade-off is operator discipline: a poisoned trace pool will subtly degrade future runs, so the operator needs a path to `rm data/traces/<bad-id>.json`. Operator-controlled retention (not auto-sweep) was deliberate for exactly this reason.
+
+---
+
 ## 50. Coder Proposer Gets `code_execution` — Self-Verification Mandate
 **Date:** 2026-05
 **Status:** RESOLVED

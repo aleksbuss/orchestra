@@ -31,6 +31,12 @@ import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { searchWeb } from "@/lib/tools/search-engine";
 import { buildProposerCodeExecutionTool } from "@/lib/tools/code-execution";
 import { getWorkDir } from "@/lib/storage/project-store";
+import {
+  captureSuccessfulTrace,
+  formatTracesAsFewShots,
+  retrieveRelevantTraces,
+  type TraceSignals,
+} from "@/lib/agent/trace-memory";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 
@@ -142,7 +148,12 @@ async function generateDynamicSwarm(
   history: ModelMessage[],
   modelConfig: ModelConfig,
   searchEnabled: boolean,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  // PM #51 — rendered past-trace fewshots block. Empty string when
+  // trace memory is disabled or no relevant traces found. Appended
+  // after the INSTRUCTIONS list so it biases persona generation
+  // without interfering with the structured-output schema.
+  fewShotsBlock: string = ""
 ): Promise<DPGResult> {
   try {
     // Format the last 5 messages for context — content can be string or array (tool-calls)
@@ -191,7 +202,7 @@ INSTRUCTIONS:
    - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
    - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
    This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
-7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}`,
+7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
       abortSignal,
     });
 
@@ -652,7 +663,29 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const routerConfig = resolveWorkerKey(routingModelConfig, settings);
   
   const searchEnabled = settings.search?.enabled && settings.search.provider !== "none";
-  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal);
+
+  // PM #51 — fetch past successful traces similar to this prompt and
+  // render them as few-shots for the Router. When trace memory is off
+  // or no relevant traces exist, this resolves to an empty string and
+  // the Router runs exactly as before (pre-PM-51 behavior, exact
+  // backward compat). Retrieval errors degrade silently to empty.
+  let fewShotsBlock = "";
+  try {
+    const retrieved = await retrieveRelevantTraces(userMessage, settings);
+    if (retrieved.length > 0) {
+      fewShotsBlock = formatTracesAsFewShots(retrieved);
+      console.log(
+        `[MoA] Trace memory: injected ${retrieved.length} past-run fewshot${retrieved.length === 1 ? "" : "s"} (top similarity ${retrieved[0].similarity.toFixed(3)}).`
+      );
+    }
+  } catch (err) {
+    console.warn(
+      "[MoA] Trace-memory retrieval failed (non-fatal):",
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock);
 
   publishUiSyncEvent({
     topic: "chat",
@@ -1099,6 +1132,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     // protects against accidental runaway when the operator sets a
     // maxRounds higher than they meant to. Cost is visible per-turn via
     // PM #36 budget banner.
+    //
+    // PM #51 — three locals track behavior for trace-memory capture:
+    //   - reflectionRevisionsExecuted: number of times reviseWithCritique
+    //     ran (== "rounds where something needed fixing"). Zero means the
+    //     critic was clean from round 1 — strongest quality signal.
+    //   - reflectionCriticCleanedUp: true when the loop exited because
+    //     the critic said `shouldRevise=false` (not because of cap).
+    //   - reflectionHitCap: derived after the loop. True means we ran
+    //     out of rounds without the critic ever cleaning up.
+    let reflectionRevisionsExecuted = 0;
+    let reflectionCriticCleanedUp = false;
+    let reflectionHitCap = false;
     if (settings.reflection?.enabled) {
       const ABSOLUTE_MAX_REFLECTION_ROUNDS = 50;
       const requestedMaxRounds = Math.max(
@@ -1140,6 +1185,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             console.log(
               `[MoA] Reflection round ${round}/${effectiveMaxRounds}: critic clean, stopping.`
             );
+            reflectionCriticCleanedUp = true;
             break;
           }
 
@@ -1168,6 +1214,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
           previousText = finalText;
           finalText = revision.text;
+          reflectionRevisionsExecuted += 1;
 
           // Stopping condition 2: convergence (successive revisions are
           // nearly identical). Skip the convergence check entirely when
@@ -1211,6 +1258,9 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           console.log(
             `[MoA] Reflection hit maxRounds cap (${effectiveMaxRounds}). Shipping current text.`
           );
+          // PM #51 — hit the cap WITHOUT the critic ever cleaning up means
+          // the model couldn't converge. Recorded for trace quality score.
+          if (!reflectionCriticCleanedUp) reflectionHitCap = true;
         }
       } catch (reflectionErr) {
         // Reflection is a quality-improvement pass, never a blocker — log
@@ -1236,11 +1286,55 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       },
     });
 
+    const totalLatencyMs = Date.now() - totalStart;
+
+    // PM #51 — capture this run as a trace if quality signals pass the
+    // threshold. Best-effort; failures are logged but don't affect the
+    // user-facing response. The capture happens AFTER finalText is
+    // finalized (post-reflection) so a low-quality run that needed many
+    // revisions doesn't poison the few-shot pool.
+    try {
+      const traceSignals: TraceSignals = {
+        proposerSuccessRatio:
+          drafts.length === 0
+            ? 0
+            : successfulDrafts.length / drafts.length,
+        disagreementDetected: disagreement.detected,
+        disagreementMaxDistance: disagreement.maxDistance,
+        reflectionRounds: reflectionRevisionsExecuted,
+        reflectionHitCap,
+        totalLatencyMs,
+      };
+      const captureResult = await captureSuccessfulTrace({
+        userPrompt: userMessage,
+        finalText,
+        signals: traceSignals,
+        brainConfig,
+        settings,
+      });
+      if (captureResult.captured) {
+        console.log(
+          `[MoA] Trace memory: captured trace ${captureResult.traceId} (score ${captureResult.qualityScore.toFixed(3)}).`
+        );
+      } else if (settings.traceMemory?.enabled) {
+        // Only log skip reasons when the feature is actually on; otherwise
+        // the "trace-memory disabled" reason fires on every turn.
+        console.log(
+          `[MoA] Trace memory: skipped capture (${captureResult.reason}).`
+        );
+      }
+    } catch (captureErr) {
+      console.warn(
+        "[MoA] Trace-memory capture failed (non-fatal):",
+        captureErr instanceof Error ? captureErr.message : captureErr
+      );
+    }
+
     return {
       text: finalText,
       drafts,
       aggregationLatencyMs,
-      totalLatencyMs: Date.now() - totalStart,
+      totalLatencyMs,
       cumulativeUsage: moaUsage,
     };
   } catch (err) {

@@ -81,3 +81,23 @@ void (async () => {
     console.warn("[Hardware] fingerprint failed (non-fatal):", err);
   }
 })();
+
+// PM #47 — surface privacy-mode state on boot so the operator sees in
+// the dev log whether they're air-gapped. Same fire-and-forget shape.
+void (async () => {
+  try {
+    const { getSettings } = await import("@/lib/storage/settings-store");
+    const settings = await getSettings();
+    if (settings.privacyMode?.enabled) {
+      console.log(
+        "[Privacy] Privacy Mode is ENABLED. runAgent will refuse any non-local model — chatModel, utilityModel, and embeddingsModel must all target ollama / sglang / vllm / custom-loopback."
+      );
+    } else {
+      console.log(
+        "[Privacy] Privacy Mode is off. Enable in settings.json (privacyMode.enabled = true) for air-gapped MoA with local-only backends."
+      );
+    }
+  } catch (err) {
+    console.warn("[Privacy] boot-state read failed (non-fatal):", err);
+  }
+})();

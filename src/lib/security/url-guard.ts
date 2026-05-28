@@ -148,3 +148,59 @@ export function assertSafeOutboundUrl(rawUrl: string): URL {
   }
   return parsed;
 }
+
+/**
+ * Returns true if the host string resolves to a loopback address per
+ * RFC standards (PM #47 — used by Privacy Mode to decide "is this
+ * provider local?" without making the actual fetch).
+ *
+ * Covers:
+ *   - `localhost` (case-insensitive)
+ *   - 127.0.0.0/8 (all of 127.x.y.z, the IPv4 loopback range)
+ *   - `::1` (IPv6 loopback, bare or bracketed `[::1]`)
+ *   - `::ffff:127.x.y.z` IPv4-in-IPv6 form (normalized by WHATWG URL parser
+ *     to `::ffff:7f00:0`-shaped hex — same as the SSRF guard handles)
+ *
+ * Does NOT match private/link-local IPs (10/8, 192.168/16, etc.) —
+ * those are NOT loopback, they're LAN. Privacy Mode rejects those too
+ * because the operator's threat model is "nothing leaves this machine".
+ */
+export function isLoopbackHost(host: string): boolean {
+  if (!host) return false;
+  const lower = host.toLowerCase();
+  if (lower === "localhost") return true;
+  if (lower === "::1" || lower === "[::1]") return true;
+
+  // IPv4 loopback: 127.0.0.0/8.
+  const ipv4 = IPV4_RE.exec(lower);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    return a === 127;
+  }
+
+  // IPv4-in-IPv6 loopback form: ::ffff:7f00:0 ... 7fff:ffff (i.e. anywhere
+  // in 127.0.0.0/8 mapped). Reuse the existing extractor.
+  const stripped = lower.replace(/^\[/, "").replace(/\]$/, "");
+  const embedded = extractEmbeddedIPv4(stripped);
+  if (embedded) {
+    const a = Number(embedded.split(".")[0]);
+    return a === 127;
+  }
+  return false;
+}
+
+/**
+ * Returns true if a URL points at a loopback address. Used by Privacy
+ * Mode to gate `custom` providers — the operator can set a `baseUrl` to
+ * any URL, but Privacy Mode only allows it through if the host is
+ * loopback.
+ */
+export function isLoopbackUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    return isLoopbackHost(url.hostname);
+  } catch {
+    return false;
+  }
+}

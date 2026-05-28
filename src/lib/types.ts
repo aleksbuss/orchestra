@@ -89,6 +89,26 @@ export interface AppSettings {
     /** Default 0.97. Range 0-1; higher = stricter "stop only if nearly identical". */
     convergenceThreshold?: number;
   };
+  /**
+   * Air-gapped MoA mode (PM #47). When enabled, Orchestra refuses to run
+   * any LLM call against a non-loopback provider. `chatModel`, `utilityModel`,
+   * and `embeddingsModel` must ALL resolve to a local backend (ollama,
+   * sglang, vllm, or custom-with-loopback-baseUrl) — otherwise runAgent
+   * fails fast with a clear error before any network call.
+   *
+   * Use cases: legal-discovery review, medical record analysis, gov-
+   * service compliance, "trade-secret" workflows where the operator
+   * needs algorithmic certainty that nothing leaves the machine — not
+   * "we trust the cloud provider's privacy policy" but "the code refuses
+   * to call out".
+   *
+   * UI surfaces a banner whenever this flag is true so the operator AND
+   * any friends sharing the instance see at-a-glance that they are in
+   * air-gapped mode.
+   */
+  privacyMode?: {
+    enabled: boolean;
+  };
   general: {
     darkMode: boolean;
     language: string;

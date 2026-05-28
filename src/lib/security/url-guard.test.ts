@@ -7,7 +7,12 @@
  *   - RFC 1918, 169.254.x.x, 0.0.0.0/8, IPv6 ULA / link-local REJECTED
  */
 import { describe, it, expect } from "vitest";
-import { assertSafeOutboundUrl, UnsafeOutboundUrlError } from "./url-guard";
+import {
+  assertSafeOutboundUrl,
+  isLoopbackHost,
+  isLoopbackUrl,
+  UnsafeOutboundUrlError,
+} from "./url-guard";
 
 describe("assertSafeOutboundUrl — protocol guard", () => {
   it("accepts https", () => {
@@ -139,5 +144,76 @@ describe("assertSafeOutboundUrl — IPv4-in-IPv6 bypass (PM #8 follow-up)", () =
     // Loopback is intentionally allowed throughout this module; the IPv4-in-IPv6
     // path must not invent a stricter rule than the IPv4 path.
     expect(assertSafeOutboundUrl("http://[::ffff:127.0.0.1]/x")).toBeInstanceOf(URL);
+  });
+});
+
+describe("PM #47 — isLoopbackHost", () => {
+  it.each([
+    "localhost",
+    "LOCALHOST",
+    "127.0.0.1",
+    "127.42.99.7",
+    "127.0.0.255",
+    "::1",
+    "[::1]",
+  ])("'%s' → loopback", (host) => {
+    expect(isLoopbackHost(host)).toBe(true);
+  });
+
+  it.each([
+    "api.openai.com",
+    "openrouter.ai",
+    "google.com",
+    "10.0.0.1",
+    "192.168.1.1",
+    "172.16.0.1",
+    "169.254.169.254", // metadata
+    "0.0.0.0",
+    "8.8.8.8",
+    "1.2.3.4",
+    "[::]",
+    "[fe80::1]",
+    "[fc00::1]",
+  ])("'%s' → NOT loopback", (host) => {
+    expect(isLoopbackHost(host)).toBe(false);
+  });
+
+  it("empty string → not loopback (defensive)", () => {
+    expect(isLoopbackHost("")).toBe(false);
+  });
+
+  it("IPv4-in-IPv6 loopback mapped form is treated as loopback", () => {
+    // `::ffff:127.0.0.1` normalises to `::ffff:7f00:1` per WHATWG URL parser.
+    // Our extractor parses it back to 127.0.0.1 → matches the 127/8 check.
+    expect(isLoopbackHost("::ffff:7f00:1")).toBe(true);
+    expect(isLoopbackHost("[::ffff:7f00:1]")).toBe(true);
+  });
+
+  it("IPv4-in-IPv6 non-loopback mapped form is NOT loopback", () => {
+    // ::ffff:1.2.3.4 → ::ffff:102:304 → public IPv4 → not loopback.
+    expect(isLoopbackHost("::ffff:102:304")).toBe(false);
+  });
+});
+
+describe("PM #47 — isLoopbackUrl", () => {
+  it("http://localhost:11434/v1 → loopback", () => {
+    expect(isLoopbackUrl("http://localhost:11434/v1")).toBe(true);
+  });
+
+  it("http://127.0.0.1:30000 → loopback", () => {
+    expect(isLoopbackUrl("http://127.0.0.1:30000")).toBe(true);
+  });
+
+  it("https://api.openai.com → NOT loopback", () => {
+    expect(isLoopbackUrl("https://api.openai.com/v1")).toBe(false);
+  });
+
+  it("file:// → NOT loopback (disallowed protocol)", () => {
+    expect(isLoopbackUrl("file:///etc/passwd")).toBe(false);
+  });
+
+  it("malformed URL → NOT loopback (defensive)", () => {
+    expect(isLoopbackUrl("not a url")).toBe(false);
+    expect(isLoopbackUrl("")).toBe(false);
   });
 });

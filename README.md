@@ -223,8 +223,8 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [x] SGLang / vLLM backend (PM #43, v0.2.0 — prefix-cache reuse for free 3-6× throughput on consumer GPUs)
 - [x] Hardware auto-detect at startup (PM #44 — "I see your RTX 4090, here are 3 recommended MoA configs")
 - [x] **Unlimited refinement toggle** (PM #46 — multi-round reflection with cosine-convergence + hard cap)
+- [x] **Privacy mode** (PM #47 — runAgent refuses non-local providers when `privacyMode.enabled`; UI badge)
 - [ ] Per-role tier model routing (heterogeneous proposers — different model per persona)
-- [ ] Privacy mode badge — hard-disable outbound network during MoA
 
 **v4.0 — Strategic bets**
 - [ ] LoRA-swap personas (one base model + persona adapters)

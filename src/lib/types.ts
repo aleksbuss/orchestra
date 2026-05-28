@@ -152,6 +152,32 @@ export interface AppSettings {
   privacyMode?: {
     enabled: boolean;
   };
+  /**
+   * Persistent successful-trace memory (PM #51). When enabled, Orchestra
+   * captures MoA runs that meet a quality bar (proposer consensus,
+   * clean critic, low latency) and stores them under `data/traces/`.
+   * On future MoA calls, the top-K most-similar past traces are
+   * embedded into the Router system prompt as few-shot examples —
+   * DSPy-style bootstrap fewshot, except keyed on observed agent
+   * behavior instead of an external eval harness.
+   *
+   * Default off — opt-in like everything else that touches disk.
+   * `qualityThreshold` is the minimum score required for capture;
+   * `retrievalK` is the number of past traces injected at inference.
+   * Both have sensible defaults; the operator only needs `enabled: true`.
+   *
+   * Privacy interaction: traces stay on disk, never sent to the
+   * network. Retrieval embeds the user prompt — if the embeddings
+   * model is local (required under Privacy Mode), no text leaves
+   * the machine. The feature is therefore safe under Privacy Mode.
+   */
+  traceMemory?: {
+    enabled: boolean;
+    /** Minimum quality score (0-1) required to capture a trace. Default 0.7. */
+    qualityThreshold?: number;
+    /** Number of past traces to inject as few-shots per Router call. Default 3. */
+    retrievalK?: number;
+  };
   general: {
     darkMode: boolean;
     language: string;

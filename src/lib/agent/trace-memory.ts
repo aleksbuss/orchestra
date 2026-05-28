@@ -211,6 +211,30 @@ export async function captureSuccessfulTrace(
     };
   }
 
+  // PM #54 — score-regression guard. Trace id is a hash of the
+  // normalized prompt, so the same prompt rerun overwrites the previous
+  // trace. If the previous trace had a HIGHER score, the rerun is a
+  // strict degradation of the pool. Skip the write in that case so a
+  // good capture is not silently replaced by a worse one. (We DO write
+  // when scores are equal — that handles the no-op rerun and keeps
+  // `capturedAt` fresh on the most recent observation.)
+  const id = computeTraceId(userPrompt);
+  try {
+    const cache = await loadAllTraces();
+    const existing = cache.get(id);
+    if (existing && existing.qualityScore > score) {
+      return {
+        captured: false,
+        reason: `score ${score.toFixed(3)} < existing ${existing.qualityScore.toFixed(3)} (no regression overwrite)`,
+        qualityScore: score,
+        traceId: id,
+      };
+    }
+  } catch {
+    // Cache load failed → proceed with capture; worst case we overwrite,
+    // which is no worse than the pre-PM-54 behavior.
+  }
+
   // Embed the user prompt for future retrieval. If embedding fails,
   // skip capture — a trace without an embedding is unusable for retrieval.
   let embedding: number[];
@@ -238,7 +262,6 @@ export async function captureSuccessfulTrace(
     };
   }
 
-  const id = computeTraceId(userPrompt);
   const trace: SuccessfulTrace = {
     id,
     userPrompt,

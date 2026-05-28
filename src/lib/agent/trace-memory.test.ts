@@ -285,6 +285,69 @@ describe("PM #51 — captureSuccessfulTrace", () => {
     expect(result.captured).toBe(false);
     expect(result.reason).toMatch(/empty vector/i);
   });
+
+  // PM #54 — score-regression guard: rerunning the same prompt with a
+  // WORSE quality score must not overwrite the better existing trace.
+  it("rerun with lower score does NOT overwrite a better existing trace", async () => {
+    // Seed an existing high-score trace for prompt "hello".
+    const existingId = (await import("./trace-memory")).computeTraceId("hello");
+    __seedTraceMemoryForTests([
+      {
+        id: existingId,
+        userPrompt: "hello",
+        finalText: "great answer",
+        signals: goodSignals,
+        qualityScore: 0.95,
+        modelConfig: { provider: "openai", model: "gpt-4o" },
+        capturedAt: new Date("2026-05-01").toISOString(),
+        embedding: [1, 0, 0, 0],
+      },
+    ]);
+    // Try to overwrite with a lower-but-still-above-threshold score:
+    // we need score >= 0.7 (threshold) AND < 0.95 (existing).
+    // With reflectionRounds=1 → critic dimension = 0.5 * 0.2 = 0.1
+    // → total = 0.4 + 0.3 + 0.1 + 0.1 = 0.9, still < 0.95.
+    const lowerButStillGoodSignals = {
+      ...goodSignals,
+      reflectionRounds: 1,
+    };
+    const result = await captureSuccessfulTrace({
+      userPrompt: "hello",
+      finalText: "worse answer",
+      signals: lowerButStillGoodSignals,
+      brainConfig,
+      settings: baseSettings(),
+    });
+    expect(result.captured).toBe(false);
+    expect(result.reason).toMatch(/no regression overwrite/i);
+    // Embedding was NOT called — we short-circuited before the costly step.
+    expect(mockedEmbedTexts).not.toHaveBeenCalled();
+  });
+
+  it("rerun with equal-or-higher score DOES overwrite (capturedAt freshness)", async () => {
+    const existingId = (await import("./trace-memory")).computeTraceId("hello");
+    __seedTraceMemoryForTests([
+      {
+        id: existingId,
+        userPrompt: "hello",
+        finalText: "old answer",
+        signals: goodSignals,
+        qualityScore: 0.8,
+        modelConfig: { provider: "openai", model: "gpt-4o" },
+        capturedAt: new Date("2026-05-01").toISOString(),
+        embedding: [1, 0, 0, 0],
+      },
+    ]);
+    mockedEmbedTexts.mockResolvedValueOnce([new Array(4).fill(0.5)]);
+    const result = await captureSuccessfulTrace({
+      userPrompt: "hello",
+      finalText: "newer answer",
+      signals: goodSignals, // score = 1.0 > 0.8 → overwrite allowed
+      brainConfig,
+      settings: baseSettings(),
+    });
+    expect(result.captured).toBe(true);
+  });
 });
 
 describe("PM #51 — retrieveRelevantTraces", () => {

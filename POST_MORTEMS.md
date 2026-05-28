@@ -38,6 +38,64 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 54. Audit-Findings Bugfix Bundle — Privacy Hole + Empty-Draft + Score-Regression + Risky-Combo
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P1 (one of the four bugs was a live Privacy Mode bypass)
+**Symptoms:** No live incident. Surfaced by a self-audit at the end of the PM #48–53 push. The audit found four concrete defects in features that had already shipped:
+
+  1. **Privacy hole — `aggregator.tournamentJudgeModel` was not checked by `assertPrivacyModeAllowsSettings`.** An operator in air-gap mode who picked `tournamentJudgeModel = anthropic/claude-opus` silently shipped every MoA call's user prompt + every draft to Anthropic, despite the visible PM #47 air-gap badge. **P1 — silent network egress under a "safe-by-construction" guarantee.**
+
+  2. **`(empty draft)` could land in synthesis OR win a tournament.** Proposers return literal `"(empty draft)"` when `result.text?.trim()` is empty ([moa.ts:914](src/lib/agent/moa.ts)). The `successfulDrafts` filter only excluded the `[Error: ...]` marker, not the empty-draft placeholder. Result: under synthesis the placeholder text ended up in the aggregator's prompt as if it were real content; under tournament the placeholder could literally win — the operator would see `"(empty draft)"` as the assistant's answer. **P2 — narrow but very visible failure mode.**
+
+  3. **`captureSuccessfulTrace` overwrote a better trace with a worse one.** The trace id is `sha256(normalized_prompt)`. A rerun of the same prompt produced the same id and overwrote on disk — without comparing scores. A second attempt that scraped past `qualityThreshold` (0.7) silently degraded a 0.95 trace already in the pool. **P3 — slow quality drift over time.**
+
+  4. **Tournament + `codeExecution.proposerAccess` had no operator warning.** All coder proposers run code in the same project cwd, but only the WINNING draft is shown. Losing proposers' file/process side effects (npm installs, file writes) persist into the chat. **Not a bug, a footgun.** Operators activating both flags had no signal until they noticed mystery files in `data/projects/<id>/`.
+
+The audit also flagged three documentation inaccuracies that needed correction (PM #50 concurrency claim, PM #51 "Privacy-Mode-safe by construction" — partial truth, PM #53 README recipe missing the privacy warning).
+
+**Root Cause:** Each defect has its own:
+  - (1) Privacy: PM #52 introduced `tournamentJudgeModel` AFTER PM #47/#48 had laid down the air-gap check. The audit step "every new LLM call path must extend Privacy Mode enforcement in the same PR" (PM #48's closing rule) was missed.
+  - (2) Empty draft: PM #40's filter design assumed only the `[Error:`-prefixed marker existed. PM-since-forever's empty-draft fallback ([moa.ts:914](src/lib/agent/moa.ts)) added a SECOND failure marker but didn't update the filter.
+  - (3) Score regression: PM #51 designed the storage as "stable id, overwrite on rerun" without considering the asymmetric quality case.
+  - (4) Risky combo: PM #50 and PM #52 each tested their own surface independently. The interaction was never exercised.
+
+**Resolution.** Four code fixes + three doc fixes + a small refactor for testability:
+
+  1. **Privacy guard extended.** [agent.ts:1148-1153](src/lib/agent/agent.ts) — `assertPrivacyModeAllowsSettings` now walks `settings.aggregator.tournamentJudgeModel` against `isLocalProvider`. Matches the exact pattern PM #48 used for `proposerTiers`. The guard rejects **regardless of currently-active mode** — operator may flip mode without re-loading settings, so we treat the configured surface as the threat surface.
+
+  2. **Successful-draft predicate extracted + filter updated.** [moa.ts](src/lib/agent/moa.ts) now exports `isSuccessfulDraft(text)` and `successfulDrafts` filters through it. Predicate excludes both `[Error:` prefix AND the exact `"(empty draft)"` placeholder. Defensive: a draft that *mentions* either marker but isn't one of them is still considered successful.
+
+  3. **Score-regression guard.** [trace-memory.ts](src/lib/agent/trace-memory.ts) `captureSuccessfulTrace` now loads the existing trace (if any) BEFORE embedding the prompt — if the existing score is strictly higher, the function short-circuits with `captured: false` and reason `"... no regression overwrite"`. The embed call is skipped → no LLM cost for the no-write case. Equal scores still overwrite (keeps `capturedAt` fresh).
+
+  4. **Boot warning for risky combo.** [instrumentation-node.ts](src/instrumentation-node.ts) now logs a warning at startup when `aggregator.mode === "tournament"` AND `codeExecution.proposerAccess === true`: "ALL coder proposers will run code in the same project cwd; only the winning draft is shown, but losing proposers' side effects persist". The warning points to per-proposer sandboxing as the future fix.
+
+**Documentation corrections.**
+  - **PM #51** Privacy-Mode block — refined to "no network egress" (true) and called out the disk-rest channel (traces are plaintext under `data/traces/`; threat coverage is the same scope as `data/settings/settings.json`).
+  - **PM #50** Concurrency claim — refined: the 2-permit semaphore caps concurrent *proposer turns*, not concurrent *child processes*. A single proposer can issue multiple sequential `code_execution` calls within its own turn. Also documented PM #54's terminal-runtime caveat: concurrent `runtime: "terminal"` calls with `sessionId: 0` share cwd state.
+  - **README recipes** — tournament recipe now states the Privacy Mode check, coder recipe now states the tournament-combo trap.
+
+**Carried tech debt (NOT fixed in this PR; documented for future):**
+  - **Per-proposer sandbox** under tournament + code_execution. The right fix is each proposer running in an ephemeral subdirectory with teardown after the turn. Complex; defer to a dedicated PR.
+  - **AbortSignal propagation into child processes.** `executeCode` doesn't kill `python`/`node` mid-execution on signal abort. Inherited tech debt from PM #23 follow-up; PM #50 added a new callsite without making it worse, but didn't fix the underlying gap.
+  - **CLI in-memory cache invalidation.** Closing the gap between `npm run trace:delete` and the runtime's in-memory trace cache. Tracked separately; needs either an mtime-poll on read or a file-watch invalidation. Documented in the audit as bug #3 in category C; addressed in a follow-up PR (PM #55 — per-project scoping + cache invalidation).
+
+**Regression Coverage:** 16 new tests across three suites (total 334 → ~350 in the agent + cost + health + scripts surfaces):
+  - [`src/lib/agent/agent-privacy.test.ts`](src/lib/agent/agent-privacy.test.ts) — 4 cases for PM #52 tournament judge: cloud judge rejected; rejected even under synthesis mode (defensive); local accepted; empty model slot skipped.
+  - [`src/lib/agent/trace-memory.test.ts`](src/lib/agent/trace-memory.test.ts) — 2 cases for PM #51 score-regression: lower-but-above-threshold rerun does NOT overwrite (AND embedding is NOT called — short-circuit verified); equal-or-higher rerun DOES overwrite (freshness).
+  - [`src/lib/agent/moa-tools.test.ts`](src/lib/agent/moa-tools.test.ts) — 6 cases for `isSuccessfulDraft`: real draft accepted; error marker rejected; `(empty draft)` placeholder rejected; defensive matches (draft that mentions placeholder isn't rejected); whitespace-only behavior pinned at pre-PM-54 (passes — future PR may strengthen).
+
+  All 334 tests across the agent + cost + health + scripts surfaces pass.
+
+**Doc Updates:**
+  - [`POST_MORTEMS.md`](POST_MORTEMS.md) — PM #51 + PM #50 prose corrected; PM #54 entry added.
+  - [`README.md`](README.md) — Privacy Mode note added to tournament recipe; risky-combo warning added to coder recipe.
+  - No CLAUDE.md change — the rules already require "every LLM call path gated by Privacy Mode" + "feature done means observable" (PM #48 + PM #53 closing notes). This PR closes the gap those rules were supposed to prevent.
+
+**Rule:** Every PM that ships should be followed by an honest self-audit. The four defects in this PR all came from the rules already encoded in CLAUDE.md / earlier PMs — they were violations of "thread Privacy Mode through every new LLM call path", "guard against silent overwrites in shared persistent state", "compose-test feature interactions". The rules existed; the audit step didn't. Future feature PRs MUST include a "feature-interaction inventory" listing every other v3+ feature whose surface overlaps the new code path — and they MUST have explicit test cases for the overlap. PR #53's "feature done means tested + operable + observable" rule is amended: also **audited against every existing opt-in**.
+
+---
+
 ## 53. Operator Tooling & Observability Pass — PM #48–52 Hardening
 **Date:** 2026-05
 **Status:** RESOLVED
@@ -191,7 +249,7 @@ The pattern shipped here is the v3/v4 "feature done means: tested + operable + o
   - Below 0.4 = something major went wrong (proposers errored out).
 Operators who want a stricter pool raise the threshold (e.g. 0.85 means "perfect critic AND consensus required"). Operators who want a broader pool lower it.
 
-**Privacy Mode interaction (PM #47).** Capture + retrieval both call `embedTexts(settings.embeddingsModel)`. Under Privacy Mode, the embeddings model is forced local — so embeddings happen on-device, no text leaks. Traces themselves stay on disk. No additional gating needed: the feature is Privacy-Mode-safe by construction.
+**Privacy Mode interaction (PM #47).** Capture + retrieval both call `embedTexts(settings.embeddingsModel)`. Under Privacy Mode, the embeddings model is forced local — so embeddings happen on-device, no text leaks **over the network**. *Threat-model scope (refined by PM #54):* this protects against the network-egress channel only. The trace files themselves contain plaintext user prompts + final answers under `data/traces/`; disk imaging, host backups, or a process with filesystem read access can still read them. The PM #47 threat model is "code refuses to call out" — that's preserved. If your threat model also covers disk-rest data, treat `data/traces/` as sensitive and protect it the same way you protect `data/settings/settings.json`.
 
 **Tier compatibility (PM #48).** Traces store `modelConfig: { provider, model }` of the brain (aggregator) that produced `finalText`. Future filtering ("only inject traces from runs that used the frontier tier") is a one-line predicate change; not done yet because the current single-pool design is enough for v1.
 
@@ -233,7 +291,7 @@ Operators who want a stricter pool raise the threshold (e.g. 0.85 means "perfect
   3. **`selectProposerTools` extension** in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) — new optional 4th parameter `coderContext?: { settings, cwd }`. When `role === "coder"` AND `settings.codeExecution.enabled` AND `settings.codeExecution.proposerAccess === true` AND a coderContext was passed, the coder persona gets `code_execution` in its `ToolSet`. Otherwise undefined for that role (unchanged from PM #42 behavior).
   4. **`CODE_EXECUTION_MANDATE`** prompt augmentation, the parallel of PM #42's `FACT_CHECK_MANDATE`. When a coder proposer's toolset contains `code_execution`, `augmentProposerPromptForTools` appends the mandate. It names the canonical verification triggers (uncertain API signature, output shape, regex/boundary validation, "will this work?" prompts) AND the canonical NEVERs (no GUI apps, no long-running servers, no infrastructure mutations, no non-exiting commands).
 
-**Concurrency safety.** Each coder proposer runs inside `agentSemaphore.run(...)` which is capped at 2 permits on this hardware tier (see [`semaphore.ts`](src/lib/agent/semaphore.ts)). Even with 5 proposers and all of them coder-tagged (would require 5 explicit coder personas from DPG — typically 1-2), no more than 2 concurrent child processes can be in flight. The `timeout` + `maxOutputLength` from `settings.codeExecution` bound each individual call. **No new concurrency primitive was needed.**
+**Concurrency safety (refined by PM #54).** Each coder proposer runs inside `agentSemaphore.run(...)` which is capped at 2 permits on this hardware tier (see [`semaphore.ts`](src/lib/agent/semaphore.ts)). So **at most 2 proposer turns are in flight at once** — and that's the right invariant for cost. Be careful with the stricter claim: a single proposer can issue multiple SEQUENTIAL `code_execution` calls inside its own turn, so "2 permits" caps concurrent *proposer turns*, not concurrent *child processes*. The per-call `timeout` + `maxOutputLength` from `settings.codeExecution` bound each individual call. Plus PM #54's terminal-runtime caveat: two concurrent proposers using `runtime: "terminal"` with sessionId=0 SHARE the cwd state via `terminalSessions.get(0)` ([`code-execution.ts:481-484`](src/lib/tools/code-execution.ts)). Python and Node.js runtimes spawn fresh processes per call — no shared state, no collision. Terminal collisions are a narrow edge case the operator can avoid by using `python`/`nodejs` runtimes when both code-exec and tournament are on. **No new concurrency primitive added in this PM.**
 
 **AbortSignal threading.** The proposer-side tool inherits `proposerSignal` (the per-proposer 2-minute timeout combined with the request-level abort) through Vercel AI SDK's `tool.execute({ args }, { abortSignal })` parameter — same path as `search_web` in PM #42. The existing `executeCode` doesn't yet consume the signal mid-execution (carried as known tech debt in PM #23 follow-up), but the LLM loop's outer timeout still bounds the call.
 

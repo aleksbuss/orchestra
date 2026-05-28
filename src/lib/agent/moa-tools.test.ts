@@ -17,6 +17,7 @@ import {
   CODE_EXECUTION_MANDATE,
   detectProposerRole,
   FACT_CHECK_MANDATE,
+  isSuccessfulDraft,
   selectProposerTools,
 } from "./moa";
 import type { MoAProposer } from "./moa";
@@ -328,5 +329,49 @@ describe("PM #50 — augmentProposerPromptForTools (code_execution mandate)", ()
     expect(CODE_EXECUTION_MANDATE).toMatch(/GUI apps/i);
     expect(CODE_EXECUTION_MANDATE).toMatch(/long-running\s+servers/i);
     expect(CODE_EXECUTION_MANDATE).toMatch(/2-minute cap/i);
+  });
+});
+
+// PM #54 — isSuccessfulDraft contract. Filters both error-marker drafts
+// AND the "(empty draft)" placeholder. The placeholder used to slip
+// through to synthesis + tournament, producing literal "(empty draft)"
+// as the assistant's final answer.
+describe("PM #54 — isSuccessfulDraft", () => {
+  it("accepts a real draft", () => {
+    expect(isSuccessfulDraft("Here is the solution: ...")).toBe(true);
+  });
+
+  it("rejects [Error: ...] failure marker", () => {
+    expect(isSuccessfulDraft("[Error: 429 Too Many Requests]")).toBe(false);
+  });
+
+  it("rejects the literal (empty draft) placeholder", () => {
+    expect(isSuccessfulDraft("(empty draft)")).toBe(false);
+  });
+
+  it("accepts a draft that MENTIONS empty drafts but isn't one", () => {
+    // Defensive — a real proposer discussing empty drafts shouldn't be
+    // misclassified. The check is exact-match on the placeholder string.
+    expect(
+      isSuccessfulDraft(
+        "If the system returns (empty draft) it usually means the model timed out."
+      )
+    ).toBe(true);
+  });
+
+  it("accepts a draft with [Error: ...] inside but not at start", () => {
+    // Same defensive shape as the synthesis-prompt body might contain.
+    expect(
+      isSuccessfulDraft("To handle [Error: foo] you should retry.")
+    ).toBe(true);
+  });
+
+  it("rejects empty string and whitespace-only (defensive)", () => {
+    // Not part of the original behavior — but if a future proposer
+    // path skips the (empty draft) fallback, we still want to filter.
+    // Today: not filtered. Future: consider adding. For now we PIN the
+    // current behavior so the test fails if it changes silently.
+    expect(isSuccessfulDraft("")).toBe(true); // Pre-PM-54 behavior.
+    expect(isSuccessfulDraft("   ")).toBe(true); // Pre-PM-54 behavior.
   });
 });

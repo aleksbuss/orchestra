@@ -335,7 +335,8 @@ Orchestra has no traditional database — `data/` IS the database. Every directo
 | `data/tmp/` | various | Ephemeral scratch space. | Boot-time + 6h `sweepTempDir` removes files older than 7 days. |
 | `data/logs/` | `observability/logger` | Daily JSONL log files. | Not swept yet — daily file size is bounded; revisit if dailies exceed ~50 MB. |
 | `data/cache/openrouter-pricing.json` | `cost/openrouter-pricing.ts` | PM #49 — live OpenRouter `/api/v1/models` pricing snapshot. Overwritten on each boot refresh (single file, bounded ~200 KB). | Single overwritten file — bounded by construction, not swept. |
-| `data/traces/<id>.json` | `agent/trace-memory.ts` | PM #51 — captured successful MoA runs (user prompt + answer + signals + embedding). Used as few-shots for the Router. One file per unique prompt (hashed id deduplicates). | Operator-controlled — `rm data/traces/*` to reset. Not auto-swept (user data; the operator may want to inspect or curate). |
+| `data/traces/<id>.json` | `agent/trace-memory.ts` | PM #51 — global MoA trace pool (runs without `projectId`). Used as few-shots for the Router in global chats. | Operator-controlled — `npm run trace:clear --global` to reset. Not auto-swept. |
+| `data/projects/<projectId>/.orchestra_traces/<id>.json` | `agent/trace-memory.ts` | PM #55 — per-project MoA trace pool. Captures from project-owned chats land here so traces don't cross-pollute between unrelated projects. | Operator-controlled — `npm run trace:clear -- --project <id>`. Deleted with the project. |
 
 When you add a new persistent surface, add a row here in the same commit (Critical Rule §7) AND state the retention strategy — one of (a) sweeper in `cron/sweepers.ts`, (b) "never auto-swept — user data" with reasoning, or (c) atomic cleanup tied to a higher-level deletion. Don't ship an unbounded directory.
 

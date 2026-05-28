@@ -38,6 +38,51 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 46. Multi-Round Reflection with Cosine-Convergence + Hard Cap
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, not defect — PM #38 single-pass was already shipping)
+**Symptoms:** No live incident. PM #38 wired reflection.ts as a single-pass generator-critic-revisor loop — but this was the conservative shape. The local-first power-user story (PM #43/#44) makes multi-round refinement actually viable: at $0/token on a 4090, the operator can iterate until convergence without bankruptcy risk. Cloud users would be bankrupt in 50 rounds; that's why PM #38 capped at 1.
+**Root Cause:** N/A — design extension, not bug fix.
+**Resolution:** Extended `settings.reflection` with two new opt-in fields:
+  - **`maxRounds: number`** (default 1 = preserves PM #38 single-pass; operator can set 5/10/50). Code-level hard cap at `ABSOLUTE_MAX_REFLECTION_ROUNDS = 50` regardless of operator value — protects against accidental runaway loops on cloud providers.
+  - **`convergenceThreshold: number`** (default 0.97, range 0-1, clamped defensively). When successive revisions have cosine similarity above this, the loop exits early — the LLM is oscillating between rephrasings, no more progress.
+
+**Implementation:** [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) reflection block now loops:
+  1. Call `reflectOnResponse(currentText)` → critic returns `{ shouldRevise, critique, suggestion }`.
+  2. If `!shouldRevise` → exit (critic clean).
+  3. Call `reviseWithCritique(currentText, critique, suggestion)` → revised text.
+  4. Embed previous + current text via `embedTexts`. Compute cosine similarity.
+  5. If similarity ≥ `convergenceThreshold` → exit (convergence).
+  6. Otherwise loop, incrementing round counter against `effectiveMaxRounds`.
+
+**Stopping conditions:**
+  - Critic returns `shouldRevise: false` (the natural stop).
+  - Cosine similarity between successive revisions ≥ threshold (oscillation guard).
+  - Round counter reaches `effectiveMaxRounds = min(operator.maxRounds, 50)` (hard cap).
+
+**Cost envelope per turn (Swarm-ON + reflection.maxRounds=N):**
+  - Router (DPG): 1 call
+  - Proposers: 3-5 calls
+  - Aggregator: 1 call
+  - Reflection rounds: up to `2N + 1` calls (N revisions + N+1 reflections, where the last reflection returns clean OR cap fires) + N embedding calls
+  - **Worst case at maxRounds=10:** ~26 calls per user turn. Cost-banner from PM #36 makes this visible; hard cap at 50 protects against config typos like `maxRounds: 9999`.
+
+**Convergence-check cost:** one `embedTexts` call per round of revision (skipped when `maxRounds === 1` — no possible oscillation). At `text-embedding-3-small` ($0.02/M tokens), this is ~$0.0001 per round. Negligible vs the revisor LLM call.
+
+**Module dependencies:** moa.ts now imports `embedTexts` directly from `lib/memory/embeddings`. The local `cosineSimilarity` helper inlined here matches the implementation in `disagreement.ts` and `blackboard.ts` (third copy). If a fourth caller materialises, extract to `lib/memory/embeddings.ts`. Marked in code comments.
+
+**Regression Coverage:** [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts) — 5 new cases under `describe("PM #46 — multi-round reflection with convergence + hard cap")`:
+  - `maxRounds: 1` preserves PM #38 single-pass behavior (6 LLM calls: 3 proposers + aggregator + reflect + revise).
+  - Convergence stops the loop early when revision embeddings are near-identical (cosine = 1.0 → exit after round 1 despite maxRounds=5).
+  - Non-converged embeddings + persistently-flagging critic → loops to `maxRounds` cap (3 revisions when maxRounds=3).
+  - Hard cap (ABSOLUTE_MAX = 50) protects against `maxRounds: 999` runaway — test completes without hanging.
+  - `convergenceThreshold` clamped to `[0, 1]` (defensive against operator typos like 1.5 or -0.5).
+**Doc Updates:** [`README.md`](README.md) roadmap — moved "Unlimited refinement toggle" from "v3.0 pending" to "v3.0 shipped".
+**Rule:** Multi-iteration agent loops need TWO stopping conditions: a natural signal (critic says clean) AND a safety net (cosine convergence over output embeddings). Either alone is insufficient — natural signals can be missed by weak critics; convergence checks can be fooled by rephrasings the operator considers meaningful. Pair them, then add a code-level hard cap that overrides operator config — operators inevitably type `999` when they meant `9`.
+
+---
+
 ## 45. Self-Audit Bug-Fix Bundle — Unified Skeptic Detection + Embeddings Type-Drift + Eval Polish
 **Date:** 2026-05
 **Status:** RESOLVED

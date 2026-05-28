@@ -220,10 +220,10 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [ ] Live-pricing fetch from OpenRouter `/api/v1/models`
 
 **v3.0 — Local-first power mode**
-- [ ] SGLang / vLLM backend with `n=5` fan-out (RadixAttention prefix sharing → 3-6× free throughput)
-- [ ] Per-role tier model routing (heterogeneous proposers)
-- [ ] Hardware auto-detect at startup — "I see your RTX 4090, here are 3 recommended MoA configs"
-- [ ] Unlimited refinement toggle (works in local; would bankrupt cloud)
+- [x] SGLang / vLLM backend (PM #43, v0.2.0 — prefix-cache reuse for free 3-6× throughput on consumer GPUs)
+- [x] Hardware auto-detect at startup (PM #44 — "I see your RTX 4090, here are 3 recommended MoA configs")
+- [x] **Unlimited refinement toggle** (PM #46 — multi-round reflection with cosine-convergence + hard cap)
+- [ ] Per-role tier model routing (heterogeneous proposers — different model per persona)
 - [ ] Privacy mode badge — hard-disable outbound network during MoA
 
 **v4.0 — Strategic bets**

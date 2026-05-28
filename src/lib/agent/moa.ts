@@ -32,12 +32,21 @@ import { searchWeb } from "@/lib/tools/search-engine";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 
+/**
+ * PM #48 — model tier hint. The DPG Router can suggest a tier per
+ * persona (skeptic → fast, analyst → balanced, coder → frontier).
+ * If omitted, Orchestra derives one from the persona's detected role.
+ */
+export type ProposerTier = "fast" | "balanced" | "frontier";
+
 export interface MoAProposer {
   id: string;
   role: string;
   systemPrompt: string;
   /** Color accent for UI (tailwind) */
   color: string;
+  /** PM #48 — optional tier hint. See `resolveProposerModelConfig`. */
+  modelTier?: ProposerTier;
 }
 
 export const MOA_PROPOSERS: MoAProposer[] = [
@@ -153,7 +162,8 @@ async function generateDynamicSwarm(
           id: z.string().describe("A short snake_case id (e.g. 'tax_lawyer')"),
           role: z.string().describe("The human-readable Title/Role of the expert (e.g. 'Senior Tax Attorney')"),
           systemPrompt: z.string().describe("The specific system prompt Rules and Guidelines for this expert. MUST follow structure: [GOAL] ... [RULES] ... [FORMAT]"),
-          color: z.enum(["slate", "gray", "zinc", "neutral", "stone", "red", "orange", "amber", "yellow", "lime", "green", "emerald", "teal", "cyan", "sky", "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose"]).describe("A distinct tailwind color for UI representation")
+          color: z.enum(["slate", "gray", "zinc", "neutral", "stone", "red", "orange", "amber", "yellow", "lime", "green", "emerald", "teal", "cyan", "sky", "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose"]).describe("A distinct tailwind color for UI representation"),
+          modelTier: z.enum(["fast", "balanced", "frontier"]).optional().describe("PM #48 — suggested model tier. 'fast' for skeptic/critic/QA personas (cheap, just evaluates). 'balanced' for analyst/researcher (mid quality). 'frontier' for coder/architect/synthesis-heavy personas (best quality). Omit to let Orchestra derive from the role automatically.")
         })).min(3).max(5).describe("List of exactly 3 to 5 highly specialized experts required to answer the user request. Only used if requiresSwarm is true.")
       }),
       prompt: `You are the Orchestra Auto-Swarm Router. 
@@ -174,7 +184,12 @@ INSTRUCTIONS:
    [RULES] 2-3 strict guidelines they must follow (e.g., "Always hunt for edge cases", "Never propose complex solutions").
    [FORMAT] How they should format their answer.
 5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail.
-${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}`,
+6. (PM #48 — model tier hint): for each expert, set \`modelTier\` to "fast" / "balanced" / "frontier":
+   - "fast" for QA / Skeptic / Critic / Reviewer personas — they evaluate, not synthesize. Cheap reliable models are enough.
+   - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
+   - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
+   This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
+7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}`,
       abortSignal,
     });
 
@@ -271,6 +286,64 @@ function cosineSimilarity(a: number[], b: number[]): number {
 // new failure surface; we want eval data first.
 
 export type ProposerRole = "coder" | "researcher" | "reviewer" | "tool" | "orchestrator";
+
+/**
+ * PM #48 — derive a tier hint from the persona's detected role. Used as
+ * fallback when the LLM didn't pick a `modelTier` explicitly.
+ *
+ * Mapping rationale:
+ *   - reviewer (skeptic/critic/QA) → fast: their job is to find faults,
+ *     not produce long deep synthesis. Cheap reliable models suffice.
+ *   - researcher (analyst/domain-expert/architect) → balanced: clarity
+ *     + factual accuracy matter more than raw reasoning depth.
+ *   - tool (deploy/devops/implementer-without-design) → balanced: same.
+ *   - coder (the fallback / design-heavy / synthesis-heavy) → frontier:
+ *     output quality scales with model size on these tasks.
+ */
+export function deriveTierFromRole(role: ProposerRole): ProposerTier {
+  switch (role) {
+    case "reviewer":
+      return "fast";
+    case "researcher":
+    case "tool":
+      return "balanced";
+    case "coder":
+      return "frontier";
+    case "orchestrator":
+      // Orchestrator personas don't run as proposers in current MoA, but
+      // if a future flow uses them, default conservatively to balanced.
+      return "balanced";
+    default:
+      return "balanced";
+  }
+}
+
+/**
+ * PM #48 — resolve a proposer's actual ModelConfig from settings + tier.
+ *
+ * Priority order:
+ *   1. If `settings.proposerTiers[picked]` has a configured model →
+ *      use it (with API-key inheritance via `resolveWorkerKey`).
+ *   2. Otherwise fall back to `defaultWorkerConfig` (the pre-PM-48
+ *      uniform behavior — exact backward compat for operators who
+ *      don't configure tiers).
+ *
+ * `picked` = persona's explicit `modelTier` (if LLM provided one), else
+ * the tier derived from `detectProposerRole(persona)`.
+ */
+export function resolveProposerModelConfig(
+  proposer: MoAProposer,
+  defaultWorkerConfig: ModelConfig,
+  settings: AppSettings
+): { config: ModelConfig; tier: ProposerTier } {
+  const tier = proposer.modelTier ?? deriveTierFromRole(detectProposerRole(proposer));
+  const tiers = settings.proposerTiers;
+  const tierConfig = tiers?.[tier];
+  if (!tierConfig || !tierConfig.model) {
+    return { config: defaultWorkerConfig, tier };
+  }
+  return { config: resolveWorkerKey(tierConfig, settings), tier };
+}
 
 export function detectProposerRole(proposer: MoAProposer): ProposerRole {
   // PM #45 — include `role` in the blob. Previously this helper looked
@@ -660,8 +733,20 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         },
       });
 
+      // PM #48 — resolve the per-proposer ModelConfig. When the operator
+      // hasn't configured `settings.proposerTiers`, this returns
+      // `workerConfig` for every proposer (exact pre-PM-48 behavior). When
+      // they have, each proposer lands on the tier matching its picked-or-
+      // derived tier (Skeptic → fast, Coder → frontier, etc.). Resolved
+      // outside the try/catch so the error branch can attribute its (zero)
+      // usage to the same provider/model that would have run.
+      const { config: proposerConfig, tier: proposerTier } =
+        resolveProposerModelConfig(proposer, workerConfig, settings);
+      const resolvedProvider = proposerConfig.provider;
+      const resolvedModel = proposerConfig.model;
+
       try {
-        const workerModel = createModel(workerConfig, { projectId, currentPath });
+        const workerModel = createModel(proposerConfig, { projectId, currentPath });
 
         // PM #42 — extracted to a reusable helper so the role detection
         // (UI icon, tool assignment, prompt augmentation) goes through
@@ -708,8 +793,11 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // verbatim.
           system: augmentedSystemPrompt,
           messages,
-          temperature: workerConfig.temperature ?? 0.5,
-          maxOutputTokens: Math.min(workerConfig.maxTokens ?? 2048, 2048),
+          // PM #48 — temperature/maxTokens read from the RESOLVED config
+          // (proposerConfig), not workerConfig. A tier slot can override
+          // both alongside the model id.
+          temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
+          maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 2048),
           tools: proposerTools,
           // PM #42 — maxSteps gates on whether THIS proposer has tools.
           // Previously `searchEnabled ? 3 : 1`, but a coder persona without
@@ -744,6 +832,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           text,
           latencyMs,
           rawUsage: result.usage,
+          // PM #48 — carry the resolved provider/model so the post-reduce
+          // usage attribution lands on the actual model that ran, not the
+          // uniform workerConfig. Without this, PM #36's per-call cost
+          // banner mis-attributes spend whenever tiers route proposers to
+          // different providers.
+          resolvedProvider,
+          resolvedModel,
+          resolvedTier: proposerTier,
         };
       } catch (err) {
         const latencyMs = Date.now() - pStart;
@@ -768,6 +864,9 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           role: proposer.role,
           text: `[Error: ${errMsg}]`,
           latencyMs,
+          resolvedProvider,
+          resolvedModel,
+          resolvedTier: proposerTier,
         };
       }
     });
@@ -779,12 +878,17 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   // PM #36 — fold each successful proposer's usage into the running total.
   // Reduce runs single-threaded after Promise.all settles, so no race here.
+  // PM #48 — attribute usage to the RESOLVED provider/model (the tier the
+  // proposer actually used), not the uniform workerConfig. With per-role
+  // tiers a single MoA call can hit 3 different providers; uniform
+  // attribution would mis-bill all of them to whichever model happens to
+  // be in workerConfig.
   for (const d of draftsWithUsage) {
     if ("rawUsage" in d && d.rawUsage) {
       moaUsage = addUsageToCumulative(
         moaUsage,
-        workerConfig.provider,
-        workerConfig.model,
+        d.resolvedProvider,
+        d.resolvedModel,
         d.rawUsage
       );
     }

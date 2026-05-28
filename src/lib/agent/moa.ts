@@ -15,6 +15,7 @@ import { generateText, generateObject, tool, type ModelMessage, type ToolSet } f
 import { addUsageToCumulative } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
+import { embedTexts } from "@/lib/memory/embeddings";
 import {
   buildDisagreementMarker,
   DEFAULT_DISAGREEMENT_THRESHOLD,
@@ -228,6 +229,24 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
       // misses the Router's tokens for this turn (a small undercount).
     };
   }
+}
+
+// ── Local cosine similarity (PM #46 convergence check) ─────────────────
+// Same algorithm as in `disagreement.ts` and `blackboard.ts`. Inlined here
+// to keep the import surface tight; if a fourth caller materialises,
+// extract to `src/lib/memory/embeddings.ts`.
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 // ── Proposer role + tool plumbing (PM #42) ──────────────────────────────
@@ -890,34 +909,70 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       aggResult.usage
     );
 
-    // PM #38 — generator-critic-revisor loop. Wires the previously-dead
-    // reflection.ts module into the MoA flow. When the operator enables
-    // `settings.reflection.enabled`, the aggregator output is reviewed by
-    // a cheap utility-model critic; flagged issues trigger one revisor
-    // pass on the brain model. Capped at ONE round — the cost is now
-    // visible in the budget banner (PM #36), but two-round runaway is
-    // architecturally easy and we don't want to ship that footgun yet.
+    // PM #38 (single round) + PM #46 (multi-round) — generator-critic-
+    // revisor loop. When the operator enables settings.reflection.enabled,
+    // the aggregator output is reviewed by the utility-model critic; when
+    // the critic flags issues, the brain-model revisor produces a fixed
+    // version, the critic re-examines, etc.
+    //
+    // Two stopping conditions:
+    //   1. Critic returns shouldRevise=false → answer is good, exit.
+    //   2. Successive revisions are nearly identical (cosine similarity
+    //      over embeddings > convergenceThreshold) → the model is
+    //      oscillating between rephrasings; exit to avoid waste.
+    //
+    // Plus a code-level hard cap (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 50`)
+    // protects against accidental runaway when the operator sets a
+    // maxRounds higher than they meant to. Cost is visible per-turn via
+    // PM #36 budget banner.
     if (settings.reflection?.enabled) {
+      const ABSOLUTE_MAX_REFLECTION_ROUNDS = 50;
+      const requestedMaxRounds = Math.max(
+        1,
+        Math.floor(settings.reflection.maxRounds ?? 1)
+      );
+      const effectiveMaxRounds = Math.min(
+        requestedMaxRounds,
+        ABSOLUTE_MAX_REFLECTION_ROUNDS
+      );
+      const convergenceThreshold = Math.min(
+        1,
+        Math.max(0, settings.reflection.convergenceThreshold ?? 0.97)
+      );
+
       try {
-        const reflection = await reflectOnResponse({
-          userMessage,
-          agentResponse: finalText,
-          settings,
-          projectId,
-          abortSignal,
-        });
-        if (reflection.usage && reflection.modelConfig) {
-          moaUsage = addUsageToCumulative(
-            moaUsage,
-            reflection.modelConfig.provider,
-            reflection.modelConfig.model,
-            reflection.usage
-          );
-        }
-        if (reflection.shouldRevise && reflection.critique) {
+        let previousText: string | null = null;
+        let round = 0;
+        while (round < effectiveMaxRounds) {
+          round += 1;
+          const reflection = await reflectOnResponse({
+            userMessage,
+            agentResponse: finalText,
+            settings,
+            projectId,
+            abortSignal,
+          });
+          if (reflection.usage && reflection.modelConfig) {
+            moaUsage = addUsageToCumulative(
+              moaUsage,
+              reflection.modelConfig.provider,
+              reflection.modelConfig.model,
+              reflection.usage
+            );
+          }
+
+          // Stopping condition 1: critic says we're done.
+          if (!reflection.shouldRevise || !reflection.critique) {
+            console.log(
+              `[MoA] Reflection round ${round}/${effectiveMaxRounds}: critic clean, stopping.`
+            );
+            break;
+          }
+
           console.log(
-            `[MoA] Reflection flagged the aggregator output — revising. Critique: ${reflection.critique.slice(0, 120)}`
+            `[MoA] Reflection round ${round}/${effectiveMaxRounds}: revising. Critique: ${reflection.critique.slice(0, 120)}`
           );
+
           const revision = await reviseWithCritique({
             userMessage,
             originalResponse: finalText,
@@ -936,9 +991,51 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
               revision.usage
             );
           }
+
+          previousText = finalText;
           finalText = revision.text;
+
+          // Stopping condition 2: convergence (successive revisions are
+          // nearly identical). Skip the convergence check entirely when
+          // maxRounds === 1 (no chance for oscillation; saves an embed).
+          if (effectiveMaxRounds > 1 && previousText) {
+            try {
+              const [embA, embB] = await embedTexts(
+                [
+                  previousText.slice(0, 4000),
+                  finalText.slice(0, 4000),
+                ],
+                {
+                  provider: settings.embeddingsModel.provider,
+                  model: settings.embeddingsModel.model,
+                  apiKey: settings.embeddingsModel.apiKey,
+                  baseUrl: settings.embeddingsModel.baseUrl,
+                  dimensions: settings.embeddingsModel.dimensions,
+                }
+              );
+              const similarity = cosineSimilarity(embA, embB);
+              if (similarity >= convergenceThreshold) {
+                console.log(
+                  `[MoA] Reflection round ${round}/${effectiveMaxRounds}: converged (cosine ${similarity.toFixed(3)} >= ${convergenceThreshold}), stopping.`
+                );
+                break;
+              }
+              console.log(
+                `[MoA] Reflection round ${round}/${effectiveMaxRounds}: revision applied (cosine ${similarity.toFixed(3)} < ${convergenceThreshold}, continuing).`
+              );
+            } catch (embedErr) {
+              // Embedding failure is non-fatal — drop the convergence
+              // check for this round, keep looping on the critic signal.
+              console.warn(
+                "[MoA] Convergence check embedding failed (non-fatal):",
+                embedErr instanceof Error ? embedErr.message : String(embedErr)
+              );
+            }
+          }
+        }
+        if (round >= effectiveMaxRounds && effectiveMaxRounds > 1) {
           console.log(
-            `[MoA] Reflection revision applied (${finalText.length} chars after revise)`
+            `[MoA] Reflection hit maxRounds cap (${effectiveMaxRounds}). Shipping current text.`
           );
         }
       } catch (reflectionErr) {

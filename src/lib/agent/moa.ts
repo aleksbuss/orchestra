@@ -11,7 +11,7 @@
  *                ──▶ [Proposer₃ (Minimalist)]
  */
 
-import { generateText, generateObject, tool, type ModelMessage, type ToolSet } from "ai";
+import { generateText, type ModelMessage } from "ai";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
@@ -21,15 +21,12 @@ import {
   DEFAULT_DISAGREEMENT_THRESHOLD,
   detectDisagreement,
 } from "@/lib/agent/disagreement";
-import { z } from "zod";
 import { createModel } from "@/lib/providers/llm-provider";
-import type { ModelConfig, AppSettings } from "@/lib/types";
+import type { AppSettings } from "@/lib/types";
 import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
 import { agentSemaphore } from "./semaphore";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
-import { searchWeb } from "@/lib/tools/search-engine";
-import { buildProposerCodeExecutionTool } from "@/lib/tools/code-execution";
 import { getWorkDir } from "@/lib/storage/project-store";
 import {
   captureSuccessfulTrace,
@@ -40,225 +37,40 @@ import {
 import { runTournamentAggregation } from "@/lib/agent/tournament-aggregator";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
+//
+// PM #57 — extracted to `moa-personas.ts` to bring this file back under
+// the 1500-line hard cap. All symbols re-exported below for callers
+// and tests that import from `./moa`.
 
-/**
- * PM #48 — model tier hint. The DPG Router can suggest a tier per
- * persona (skeptic → fast, analyst → balanced, coder → frontier).
- * If omitted, Orchestra derives one from the persona's detected role.
- */
-export type ProposerTier = "fast" | "balanced" | "frontier";
+export {
+  type ProposerTier,
+  type MoAProposer,
+  type ProposerRole,
+  MOA_PROPOSERS,
+  deriveTierFromRole,
+  detectProposerRole,
+  resolveWorkerKey,
+  resolveProposerModelConfig,
+} from "@/lib/agent/moa-personas";
 
-export interface MoAProposer {
-  id: string;
-  role: string;
-  systemPrompt: string;
-  /** Color accent for UI (tailwind) */
-  color: string;
-  /** PM #48 — optional tier hint. See `resolveProposerModelConfig`. */
-  modelTier?: ProposerTier;
-}
+import {
+  detectProposerRole,
+  resolveProposerModelConfig,
+  resolveWorkerKey,
+} from "@/lib/agent/moa-personas";
 
-export const MOA_PROPOSERS: MoAProposer[] = [
-  {
-    id: "analyst",
-    role: "First-Principles Analyst",
-    color: "violet",
-    systemPrompt: `You are a First-Principles Analyst. Your approach is structured, logical, and deeply truth-seeking.
-
-RULES:
-- Break down the user's request into its fundamental truths and constraints.
-- Strip away assumptions and focus only on verified facts and core logic.
-- Do NOT jump to the simplest solution; instead, dissect the problem space thoroughly.
-- Define clearly what is known, what is unknown, and what is required to solve the task.
-
-Respond directly to the user's request. Keep your output highly structured, analytical, and devoid of emotional language.`,
-  },
-  {
-    id: "creative",
-    role: "Lateral-Thinking Creative",
-    color: "amber",
-    systemPrompt: `You are a Lateral-Thinking Creative. Your approach is unorthodox, brainstorm-heavy, and paradigm-shifting.
-
-RULES:
-- Do NOT settle for the obvious, standard answer.
-- Connect the user's request to seemingly unrelated fields or metaphors to find non-obvious solutions.
-- Brainstorm multiple outside-the-box approaches.
-- If writing code or designing a system, propose bleeding-edge, highly innovative, or extremely elegant patterns.
-
-Respond directly to the user's request. Be bold, visionary, and expansive in your thinking.`,
-  },
-  {
-    id: "pragmatist",
-    role: "Pragmatic Executor",
-    color: "emerald",
-    systemPrompt: `You are a Pragmatic Executor. Your philosophy is "Occam's Razor" and "You Aren't Gonna Need It" (YAGNI).
-
-RULES:
-- Find the absolute maximum-leverage, lowest-complexity path to the user's goal.
-- Ruthlessly eliminate boilerplate, over-engineering, and unnecessary steps.
-- Explain the simplest, most direct way to get the job done right now.
-- If providing code or a plan, make it concise, stupidly simple, and immediately actionable.
-
-Respond directly to the user's request. Cut the fluff. Show the fastest working path.`,
-  },
-  {
-    id: "critic",
-    role: "Adversarial Critic",
-    color: "rose",
-    systemPrompt: `You are an Adversarial Critic and Red-Teamer. Your approach is deeply skeptical, paranoid, and detail-oriented.
-
-RULES:
-- Assume the premise might be flawed. Hunt for edge cases, logical fallacies, biases, and potential breaking points.
-- If reviewing code or a system, look for security vulnerabilities, race conditions, or unhandled exceptions.
-- If evaluating a plan, emphasize what could go wrong and why it might fail.
-- Challenge optimistic assumptions forcefully. Provide strict mitigations.
-
-Respond directly to the user's request. Keep your analysis relentless and bulletproof.`,
-  },
-  {
-    id: "chameleon",
-    role: "Domain Expert Chameleon",
-    color: "blue",
-    systemPrompt: `You are a Domain Expert Chameleon. You dynamically adapt to become the world's leading authority internally on the specific topic requested.
-
-RULES:
-- Instantly identify the specific professional domain of the user's request (e.g., Marketing, Corporate Law, Advanced React Architecture, Behavioral Psychology).
-- Adopt the terminology, best practices, and historical context of that exact domain.
-- Provide a response that would impress a 10-year veteran of that specific industry.
-- Ground your advice in the established "Gold Standards" of that particular field.
-
-Respond directly to the user's request with the supreme confidence of an apex expert in that exact domain.`,
-  },
-];
 
 // ── Dynamic Persona Generation (DPG) ────────────────────────────────────
+//
+// PM #57 — extracted to `moa-router.ts`. Re-export for callers/tests.
 
-export interface DPGResult {
-  requiresSwarm: boolean;
-  personas: MoAProposer[];
-  /** Router LLM usage so the caller can fold it into the chat cumulative (PM #36). */
-  usage?: import("@/lib/cost/accumulator").RawUsage;
-}
+export {
+  generateDynamicSwarm,
+  type DPGResult,
+} from "@/lib/agent/moa-router";
 
-/**
- * Dynamically generates 3-5 hyper-specialized expert personas tailored to the user's prompt.
- * Includes Intelligent Bypass: evaluates if the task actually needs a swarm.
- */
-async function generateDynamicSwarm(
-  userMessage: string,
-  history: ModelMessage[],
-  modelConfig: ModelConfig,
-  searchEnabled: boolean,
-  abortSignal?: AbortSignal,
-  // PM #51 — rendered past-trace fewshots block. Empty string when
-  // trace memory is disabled or no relevant traces found. Appended
-  // after the INSTRUCTIONS list so it biases persona generation
-  // without interfering with the structured-output schema.
-  fewShotsBlock: string = ""
-): Promise<DPGResult> {
-  try {
-    // Format the last 5 messages for context — content can be string or array (tool-calls)
-    const recentContext = history.slice(-5).map(m => {
-      const text = typeof m.content === "string"
-        ? m.content
-        : Array.isArray(m.content)
-          ? m.content.map(p => (typeof p === "object" && p !== null && "text" in p ? (p as {text: string}).text : "")).join(" ")
-          : String(m.content);
-      return `[${m.role.toUpperCase()}]: ${text.slice(0, 500)}`;
-    }).join("\n");
+import { generateDynamicSwarm } from "@/lib/agent/moa-router";
 
-    const routerModel = createModel(modelConfig, {});
-    const { object, usage } = await generateObject({
-      model: routerModel,
-      schema: z.object({
-        requiresSwarm: z.boolean().describe("Set to false ONLY IF the user's message is a simple conversational reply (e.g. 'thanks', 'hello') or a trivial task that a single AI agent can handle easily without needing a committee of diverse experts."),
-        personas: z.array(z.object({
-          id: z.string().describe("A short snake_case id (e.g. 'tax_lawyer')"),
-          role: z.string().describe("The human-readable Title/Role of the expert (e.g. 'Senior Tax Attorney')"),
-          systemPrompt: z.string().describe("The specific system prompt Rules and Guidelines for this expert. MUST follow structure: [GOAL] ... [RULES] ... [FORMAT]"),
-          color: z.enum(["slate", "gray", "zinc", "neutral", "stone", "red", "orange", "amber", "yellow", "lime", "green", "emerald", "teal", "cyan", "sky", "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose"]).describe("A distinct tailwind color for UI representation"),
-          modelTier: z.enum(["fast", "balanced", "frontier"]).optional().describe("PM #48 — suggested model tier. 'fast' for skeptic/critic/QA personas (cheap, just evaluates). 'balanced' for analyst/researcher (mid quality). 'frontier' for coder/architect/synthesis-heavy personas (best quality). Omit to let Orchestra derive from the role automatically.")
-        })).min(3).max(5).describe("List of exactly 3 to 5 highly specialized experts required to answer the user request. Only used if requiresSwarm is true.")
-      }),
-      prompt: `You are the Orchestra Auto-Swarm Router. 
-The user has submitted a request. Your job is to determine if a "Dream Team" of experts is needed.
-
-RECENT CONTEXT:
-${recentContext}
-
-CURRENT USER REQUEST (truncated if too long):
-${userMessage.slice(0, 2000)}
-
-INSTRUCTIONS:
-1. If the request is trivial, conversational, or a simple code edit, set requiresSwarm to false.
-2. If the request requires multi-faceted analysis, deep architecture, creative brainstorming, or complex problem solving, set requiresSwarm to true.
-3. If true, assemble 3 to 5 hyper-specialized domain experts. Do NOT use generic roles.
-4. For each expert, provide a highly specific systemPrompt using this exact structure:
-   [GOAL] What they are trying to achieve from their narrow perspective.
-   [RULES] 2-3 strict guidelines they must follow (e.g., "Always hunt for edge cases", "Never propose complex solutions").
-   [FORMAT] How they should format their answer.
-5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail.
-6. (PM #48 — model tier hint): for each expert, set \`modelTier\` to "fast" / "balanced" / "frontier":
-   - "fast" for QA / Skeptic / Critic / Reviewer personas — they evaluate, not synthesize. Cheap reliable models are enough.
-   - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
-   - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
-   This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
-7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
-      abortSignal,
-    });
-
-    // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises
-    // "one DPG role is ALWAYS forced to be a QA Auditor / Skeptic", but
-    // the previous implementation relied entirely on a prompt instruction.
-    // A weak utility-model can ignore the instruction and produce 3-5
-    // personas without a critic, leaving the swarm without the
-    // zero-latency fact-checking mandate. We post-validate the LLM's
-    // output and inject the canonical Adversarial Critic if missing.
-    //
-    // PM #45 — skeptic detection now goes through `detectProposerRole`
-    // (the same helper PM #42's tool routing uses). Previously this site
-    // had its own narrower SKEPTIC_PATTERN that missed "qa", "quality",
-    // "review" — so a DPG-returned persona like "qa_engineer" would be
-    // classified as a reviewer by PM #42 (gets search_web) but NOT seen
-    // as a skeptic by PM #37 → critic was force-injected anyway, leaving
-    // the swarm with two reviewer-shape personas competing for the same
-    // role. Single source of truth fixes the inconsistency.
-    const hasSkeptic = (object.personas as MoAProposer[]).some(
-      (p) => detectProposerRole(p) === "reviewer"
-    );
-    let personas = object.personas as MoAProposer[];
-    if (object.requiresSwarm && !hasSkeptic) {
-      console.warn(
-        `[MoA] DPG output missing a Skeptic persona — force-injecting canonical 'critic' (PM #37). Roles received: ${object.personas.map((p) => p.id).join(", ")}`
-      );
-      const canonicalCritic = MOA_PROPOSERS.find((p) => p.id === "critic")!;
-      // Cap at 5 personas total to keep the cost envelope predictable.
-      // If the LLM already returned 5, evict the LAST one (heuristic:
-      // the LLM's tail picks are usually the weakest).
-      personas = [...object.personas];
-      if (personas.length >= 5) personas.pop();
-      personas.push({
-        id: canonicalCritic.id,
-        role: canonicalCritic.role,
-        systemPrompt: canonicalCritic.systemPrompt,
-        color: canonicalCritic.color,
-      });
-    }
-    return {
-      requiresSwarm: object.requiresSwarm,
-      personas,
-      usage,
-    };
-  } catch (err) {
-    console.error("[MoA] Dynamic Persona Generation failed. Falling back to universal presets.", err);
-    return {
-      requiresSwarm: true,
-      personas: MOA_PROPOSERS,
-      // Usage is unknown when the Router crashes; the chat banner just
-      // misses the Router's tokens for this turn (a small undercount).
-    };
-  }
-}
 
 // ── Local cosine similarity (PM #46 convergence check) ─────────────────
 // Same algorithm as in `disagreement.ts` and `blackboard.ts`. Inlined here
@@ -278,238 +90,25 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// ── Proposer role + tool plumbing (PM #42) ──────────────────────────────
+// ── Proposer role + tool plumbing (PM #42 + #50) ────────────────────────
 //
-// Per-role tool assignment. Previously every proposer got `search_web` when
-// search was enabled (blanket access) — a creative-brainstorming persona
-// would have access to web search it never used, and the prompt didn't
-// mandate verification, so fact-heavy personas often hallucinated library
-// versions despite having the tool available.
-//
-// PM #42 splits this in two:
-//   1. Role-aware tool selection — only reviewer/researcher personas get
-//      `search_web`. Coder/tool/creative get no tools (focus on synthesis
-//      from training data; cost stays bounded).
-//   2. Prompt augmentation — personas that DO get search_web also get the
-//      Fact-Check Mandate appended to their system prompt, telling them to
-//      VERIFY library versions / API signatures / real-time facts BEFORE
-//      drafting an answer.
-//
-// Code-execution-for-coder-personas is deliberately deferred to v2:
-// process/session lifecycle from N parallel proposers spawning code is a
-// new failure surface; we want eval data first.
+// PM #57 — extracted to `moa-proposer-tools.ts`. Symbols re-exported
+// below for backward compatibility with callers and tests.
 
-export type ProposerRole = "coder" | "researcher" | "reviewer" | "tool" | "orchestrator";
+export {
+  selectProposerTools,
+  augmentProposerPromptForTools,
+  isSuccessfulDraft,
+  FACT_CHECK_MANDATE,
+  CODE_EXECUTION_MANDATE,
+} from "@/lib/agent/moa-proposer-tools";
 
-/**
- * PM #48 — derive a tier hint from the persona's detected role. Used as
- * fallback when the LLM didn't pick a `modelTier` explicitly.
- *
- * Mapping rationale:
- *   - reviewer (skeptic/critic/QA) → fast: their job is to find faults,
- *     not produce long deep synthesis. Cheap reliable models suffice.
- *   - researcher (analyst/domain-expert/architect) → balanced: clarity
- *     + factual accuracy matter more than raw reasoning depth.
- *   - tool (deploy/devops/implementer-without-design) → balanced: same.
- *   - coder (the fallback / design-heavy / synthesis-heavy) → frontier:
- *     output quality scales with model size on these tasks.
- */
-export function deriveTierFromRole(role: ProposerRole): ProposerTier {
-  switch (role) {
-    case "reviewer":
-      return "fast";
-    case "researcher":
-    case "tool":
-      return "balanced";
-    case "coder":
-      return "frontier";
-    case "orchestrator":
-      // Orchestrator personas don't run as proposers in current MoA, but
-      // if a future flow uses them, default conservatively to balanced.
-      return "balanced";
-    default:
-      return "balanced";
-  }
-}
+import {
+  selectProposerTools,
+  augmentProposerPromptForTools,
+  isSuccessfulDraft,
+} from "@/lib/agent/moa-proposer-tools";
 
-/**
- * PM #48 — resolve a proposer's actual ModelConfig from settings + tier.
- *
- * Priority order:
- *   1. If `settings.proposerTiers[picked]` has a configured model →
- *      use it (with API-key inheritance via `resolveWorkerKey`).
- *   2. Otherwise fall back to `defaultWorkerConfig` (the pre-PM-48
- *      uniform behavior — exact backward compat for operators who
- *      don't configure tiers).
- *
- * `picked` = persona's explicit `modelTier` (if LLM provided one), else
- * the tier derived from `detectProposerRole(persona)`.
- */
-export function resolveProposerModelConfig(
-  proposer: MoAProposer,
-  defaultWorkerConfig: ModelConfig,
-  settings: AppSettings
-): { config: ModelConfig; tier: ProposerTier } {
-  const tier = proposer.modelTier ?? deriveTierFromRole(detectProposerRole(proposer));
-  const tiers = settings.proposerTiers;
-  const tierConfig = tiers?.[tier];
-  if (!tierConfig || !tierConfig.model) {
-    return { config: defaultWorkerConfig, tier };
-  }
-  return { config: resolveWorkerKey(tierConfig, settings), tier };
-}
-
-export function detectProposerRole(proposer: MoAProposer): ProposerRole {
-  // PM #45 — include `role` in the blob. Previously this helper looked
-  // only at id + systemPrompt, but personas like `{ id: "beta", role:
-  // "Code Reviewer", systemPrompt: "..." }` would slip through if the
-  // role keyword appeared only in `role`. The pre-PM-45 SKEPTIC_PATTERN
-  // (which this helper replaces in `generateDynamicSwarm`) explicitly
-  // checked id || role, so the migration must too.
-  const blob = (proposer.id + " " + proposer.role + " " + proposer.systemPrompt).toLowerCase();
-  if (/review|critic|audit|qa|quality|skeptic|adversar|red.?team|fact.?check/.test(blob)) {
-    return "reviewer";
-  }
-  if (/research|analys|architect|domain|expert|chameleon|first.?prin/.test(blob)) {
-    return "researcher";
-  }
-  if (/tool|executor|pragmat|deploy|infra|devops|implement/.test(blob)) {
-    return "tool";
-  }
-  return "coder";
-}
-
-/**
- * Returns the tool set for this proposer's role.
- *   - reviewer / researcher → `search_web` (fact-checking depends on
- *     real-time external data; the Fact-Check Mandate stops them from
- *     hallucinating library versions).
- *   - coder → `code_execution` when both `settings.codeExecution.enabled`
- *     AND `settings.codeExecution.proposerAccess` are true (PM #50,
- *     opt-in). Lets the coder self-verify snippets before drafting.
- *   - everything else → `undefined`.
- *
- * A persona can get BOTH tools — e.g. if it has both reviewer and
- * coder keywords (rare; `detectProposerRole` returns a single role,
- * so in practice each persona gets one tool family).
- */
-export function selectProposerTools(
-  role: ProposerRole,
-  searchEnabled: boolean,
-  searchConfig: AppSettings["search"],
-  coderContext?: {
-    settings: AppSettings;
-    cwd: string;
-  }
-): ToolSet | undefined {
-  const out: ToolSet = {};
-
-  if (searchEnabled && (role === "reviewer" || role === "researcher")) {
-    out.search_web = tool({
-      description: "Search the internet for real-time information, facts, and live data.",
-      inputSchema: z.object({ query: z.string() }),
-      execute: async ({ query }, { abortSignal }) => {
-        return searchWeb(query, 5, searchConfig, abortSignal);
-      },
-    });
-  }
-
-  // PM #50 — opt-in code_execution for coder personas. Gated on BOTH
-  // the global enable flag (existing operator config) AND the new
-  // per-proposer flag (the deferral from PM #42 demanded explicit
-  // opt-in because each proposer × child process is a new failure
-  // surface). The tool factory lives in code-execution.ts to avoid
-  // pulling the orchestrator's full createAgentTools dependency tree
-  // into moa.ts.
-  if (
-    role === "coder" &&
-    coderContext &&
-    coderContext.settings.codeExecution.enabled &&
-    coderContext.settings.codeExecution.proposerAccess === true
-  ) {
-    out.code_execution = buildProposerCodeExecutionTool(
-      coderContext.settings,
-      coderContext.cwd
-    );
-  }
-
-  if (Object.keys(out).length === 0) return undefined;
-  return out;
-}
-
-/**
- * Fact-Check Mandate appended to a proposer's system prompt when it has
- * access to `search_web`. Without this, the LLM has the tool but no
- * instruction to use it for verification — proposers reliably hallucinated
- * library versions despite tool availability.
- */
-export const FACT_CHECK_MANDATE = `
-
-[FACT-CHECK MANDATE — you have access to search_web]
-You MUST invoke the search_web tool BEFORE making any claim that depends on:
-  - Library or framework versions (e.g., "Next.js 15", "React 19", "Tailwind v4")
-  - API signatures, function names, or recent breaking changes
-  - Real-time facts (news, prices, status, market data)
-  - Specific URLs, package names, or model IDs the user provided
-
-If you cannot verify a claim through search_web (rate-limited, no result, ambiguous), state that explicitly in your draft ("I could not verify X via search; this is my best understanding from training") rather than asserting it with false confidence.`;
-
-/**
- * PM #50 — Mirror of FACT_CHECK_MANDATE for the code_execution tool.
- * Without an explicit instruction, the LLM has the tool but no reason
- * to use it — same failure mode as PM #42's pre-mandate search_web
- * (proposers hallucinated library versions despite tool availability).
- *
- * Verification triggers are scoped to coder work: type-checking,
- * API-signature confirmation, output-format validation, runtime
- * behavior of a snippet. NOT for: building products, running servers,
- * one-shot installs that produce no useful verification signal.
- */
-export const CODE_EXECUTION_MANDATE = `
-
-[CODE-EXECUTION MANDATE — you have access to code_execution]
-You SHOULD invoke the code_execution tool BEFORE drafting code when:
-  - A library API signature is uncertain (run a 2-line check to confirm).
-  - The exact output shape of a function matters to the user's task.
-  - A regex, parsing rule, or boundary condition needs empirical validation.
-  - The user explicitly asked "will this work?" — run it and show them.
-
-Do NOT use code_execution for: launching GUI apps, starting long-running
-servers, infrastructure-mutating commands, or anything that doesn't exit
-on its own. Your proposer turn has a 2-minute cap — keep snippets tight.
-
-When verification succeeds, mention the verified fact concretely in your
-draft. When it fails or times out, state that explicitly ("I tried X
-via code_execution; it returned Y") rather than guessing.`;
-
-export function augmentProposerPromptForTools(
-  basePrompt: string,
-  tools: ToolSet | undefined
-): string {
-  if (!tools) return basePrompt;
-  let augmented = basePrompt;
-  if ("search_web" in tools) augmented += FACT_CHECK_MANDATE;
-  if ("code_execution" in tools) augmented += CODE_EXECUTION_MANDATE;
-  return augmented;
-}
-
-/**
- * PM #54 — true success predicate for a proposer's draft text.
- * Excludes both the explicit `[Error: ...]` failure marker (proposer
- * threw) AND the `(empty draft)` placeholder (proposer returned empty).
- * Previously only `[Error:` was filtered, so an empty placeholder could
- * (a) land in the synthesis aggregator's prompt as if it were a real
- * draft and (b) win a tournament — the operator would see literal
- * "(empty draft)" as the assistant's final answer.
- *
- * Exported so the contract has its own focused test independent of the
- * runMoAEnsemble end-to-end mock setup.
- */
-export function isSuccessfulDraft(text: string): boolean {
-  if (text.startsWith("[Error:")) return false;
-  if (text === "(empty draft)") return false;
-  return true;
-}
 
 // ── Aggregator Prompt ───────────────────────────────────────────────────
 // PM #40 — synthesis prompt adapted from Together AI's MoA paper template
@@ -602,24 +201,7 @@ export interface MoAResult {
   cumulativeUsage?: import("@/lib/types").ChatUsage;
 }
 
-/**
- * Resolve the API key for a given model config.
- * Mirrors the key resolution logic from runAgent.
- */
-function resolveWorkerKey(config: ModelConfig, settings: AppSettings): ModelConfig {
-  if (config.apiKey) return config;
-
-  const provider = config.provider;
-  const vaultKey = settings.providerApiKeys?.[provider];
-  if (vaultKey) {
-    return { ...config, apiKey: vaultKey };
-  }
-  if (settings.chatModel.provider === provider && settings.chatModel.apiKey) {
-    return { ...config, apiKey: settings.chatModel.apiKey };
-  }
-  // Fall through to env vars (handled by createModel)
-  return config;
-}
+// PM #57 — `resolveWorkerKey` moved to moa-personas.ts (imported at top).
 
 /**
  * Execute the full Mixture-of-Agents pipeline:

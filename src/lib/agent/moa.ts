@@ -690,7 +690,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // backward compat). Retrieval errors degrade silently to empty.
   let fewShotsBlock = "";
   try {
-    const retrieved = await retrieveRelevantTraces(userMessage, settings);
+    // PM #55 — pass projectId for per-project scoping. Global chats
+    // (projectId undefined) retrieve from the global pool, project
+    // chats from their own pool. No cross-project contamination.
+    const retrieved = await retrieveRelevantTraces(userMessage, settings, {
+      projectId,
+    });
     if (retrieved.length > 0) {
       fewShotsBlock = formatTracesAsFewShots(retrieved);
       console.log(
@@ -1173,6 +1178,9 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             reflectionRounds: 0,
             reflectionHitCap: false,
             totalLatencyMs,
+            // PM #55 — record mode so retrieval can later filter or
+            // weight traces by aggregator path.
+            aggregatorMode: "tournament",
           };
           const captureResult = await captureSuccessfulTrace({
             userPrompt: userMessage,
@@ -1180,6 +1188,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             signals: traceSignals,
             brainConfig,
             settings,
+            projectId,
           });
           if (captureResult.captured) {
             console.log(
@@ -1434,6 +1443,9 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         reflectionRounds: reflectionRevisionsExecuted,
         reflectionHitCap,
         totalLatencyMs,
+        // PM #55 — record mode so retrieval can later filter/weight
+        // traces by aggregator path. Default = "synthesis" here.
+        aggregatorMode: "synthesis",
       };
       const captureResult = await captureSuccessfulTrace({
         userPrompt: userMessage,
@@ -1441,6 +1453,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         signals: traceSignals,
         brainConfig,
         settings,
+        projectId,
       });
       if (captureResult.captured) {
         console.log(

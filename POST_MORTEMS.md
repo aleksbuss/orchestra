@@ -38,6 +38,77 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 55. Per-Project Trace Scoping + CLI Cache Invalidation + Aggregator-Mode Metadata
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (cross-project contamination + stale-cache reads — both visible to operator on first multi-project use)
+**Symptoms:** Three distinct issues, all from the PM #48-53 audit, addressed in a single design pass because they touch the same surface:
+
+  1. **Cross-project contamination.** PM #51 stored all traces in one shared global pool at `data/traces/`. An operator using Orchestra across `proj-react` and `proj-legal-audit` saw "build a React component" traces injected as Router few-shots when working on legal-doc analysis. The traces are semantically irrelevant; the cosine retrieval can't tell the difference.
+
+  2. **CLI deletions invisible to runtime.** `npm run trace:delete <id>` writes to disk but the runtime keeps the in-memory `inMemoryTraces` map populated from the first `loadAllTraces` call. A "deleted" trace continued being injected as a few-shot until the operator restarted the server. The PM #53 CLI shipped without a path to invalidate.
+
+  3. **`aggregatorMode` not recorded.** Tournament-mode traces had `reflectionRounds=0` (no reflection ran in that path), while synthesis-mode traces had whatever the loop actually executed. Retrieval saw both with no signal to filter on. An operator who toggled modes accumulated mixed-mode traces in one pool with no path to disambiguate.
+
+**Root Cause.**
+  - (1) PM #51 single-pool design was the v1 "ship simple" choice. Per-project was deferred to "future work" but the audit found cross-pollution earlier than expected — by the second project the operator opens.
+  - (2) PM #51's in-memory cache had no mtime sentinel. The CLI's correctness assumption ("delete from disk = gone") wasn't true for the running process.
+  - (3) PM #52's tournament path captured traces but didn't tag them with the path that produced them. Two writers feeding one pool with no schema discrimination.
+
+**Resolution.** Five coordinated changes in [`src/lib/agent/trace-memory.ts`](src/lib/agent/trace-memory.ts):
+
+  1. **Per-scope storage.** `dataDir()/traces/<id>.json` is the global pool (preserves pre-PM-55 layout — backward compat). `dataDir()/projects/<projectId>/.orchestra_traces/<id>.json` is the per-project pool. The `.orchestra_` prefix matches the convention `.orchestra_blackboard.json` (PM #4) — "Orchestra-managed metadata inside the project directory". An undefined/null/empty projectId always lands in the global pool.
+
+  2. **Scope-aware load/capture/retrieve.** `captureSuccessfulTrace` accepts `projectId`; resolves the right directory; updates the right cache. `retrieveRelevantTraces` accepts `projectId` in its options; reads ONLY from the matching scope. Project A's retrieval cannot see Project B's traces, period.
+
+  3. **mtime-based cache invalidation.** New `ScopeCache` carries `dirMtimeMs`. Every `loadAllTraces` call does `fs.stat(dir)` and compares to the cached mtime — if changed (CLI deletion, manual `rm`, atomic write from another process), the cache is invalidated and rebuilt from disk. POSIX directory mtime updates on unlink/rename, so the invalidation is correct without external file watchers. Bonus: in-process captures bump the mtime baseline after the write so the next read doesn't trigger a redundant disk scan from our own activity.
+
+  4. **`TraceSignals.aggregatorMode` + `SuccessfulTrace.projectId` metadata.** Both fields are optional for backward compat — pre-PM-55 traces (no `aggregatorMode`) are treated as synthesis-mode. moa.ts now records the mode that produced `finalText` for both paths (synthesis path + tournament path). Future retrieval-side filtering ("inject only traces from runs that used the same mode I'm currently in") becomes a one-line predicate.
+
+  5. **CLI extended with scope flags.** `scripts/trace-memory-admin.ts` learned `--global` (default), `--project <id>`, and `--all`. `list` and `stats` walk the requested scope; `clear` and `delete` enforce a single scope per call (no `--all` allowed — preventing accidental cross-scope wipe). `show <id>` searches the requested scope; under `--all` it walks global + every project pool and stops at the first hit. The `parseScope` helper is exported and unit-tested.
+
+**Backward compatibility.**
+  - Pre-PM-55 traces continue to live at `data/traces/` (now explicitly the "global pool"). Global chats keep using it — no migration needed.
+  - `SuccessfulTrace.projectId` and `TraceSignals.aggregatorMode` are optional. Old captures lack both; reads remain correct (`projectId` undefined treated as global; missing `aggregatorMode` treated as synthesis).
+  - CLI default (no flag) is `--global` — same behavior as the PM #53 CLI shipped with.
+
+**Operator UX gain — concrete example.**
+
+Before PM #55, an operator running two projects saw confused few-shot injection:
+```
+[MoA] Trace memory: injected 3 past-run fewshots (top similarity 0.412)
+   ^^ but the prompt is about legal audit, and the highest-sim trace is
+      "Write a React component for a tooltip"
+```
+
+After PM #55, project-scoped chats inject only project-relevant traces:
+```
+[MoA] Trace memory: injected 2 past-run fewshots (top similarity 0.847)
+   ^^ both prior traces are legal-audit runs from the same project
+```
+
+**Tournament-mode-aware traces.** With `aggregatorMode` now recorded, a future PR can implement "only inject same-mode traces" or "weight cross-mode traces lower". v1 of PM #55 just records the field; the retrieval predicate stays simple (no mode filter). Operators who frequently switch modes within one project may want to bring this filter in via PR.
+
+**Tech debt explicitly NOT addressed:**
+  - **Existing global traces migration.** Operators with a populated global pool from pre-PM-55 chats will continue to see those as global. Re-attribution to project pools requires the operator to clear-and-recapture, OR a custom migration script (not shipping with this PR).
+  - **`--all` write operations.** `clear --all` and `delete --all` are explicitly refused — `clear --global` and per-project clears are the supported paths.
+  - **PM #54 carried items** (per-proposer sandbox, AbortSignal into child processes) stay open.
+
+**Regression Coverage:** 14 new tests across two suites:
+  - [`src/lib/agent/trace-memory.test.ts`](src/lib/agent/trace-memory.test.ts) — 5 new PM-#55 cases (30 → 35 total): capture without projectId → global path; capture with projectId → per-project nested path with `projectId` in the trace JSON; project A retrieval does NOT see project B's traces; empty projectId string normalizes to global (defensive); mtime invalidation — after out-of-band file removal + dir-mtime bump, next read sees the deletion.
+  - [`scripts/trace-memory-admin.test.ts`](scripts/trace-memory-admin.test.ts) — 9 new cases (7 → 16 total) for `parseScope` (default global, `--global`, `--all`, `--project <id>`, `--project` without id → defensive global, `--all` overrides `--project`) and `dirForScope` / `projectTracesDir` path resolution.
+
+  All 348 agent + cost + health + scripts tests pass.
+
+**Doc Updates:**
+  - [`CLAUDE.md`](CLAUDE.md) data layout table: global pool row reworded; new per-project row added with retention path (`npm run trace:clear -- --project <id>` and delete-with-project).
+  - [`README.md`](README.md) trace-memory recipe: CLI examples updated with `-- --global`/`--project <id>`/`--all` flags; cross-project scoping paragraph added.
+  - No CLAUDE.md rule change — the doc-as-code retention contract from PM #32/#53 already requires data-layout updates on new persistent surfaces. This PR follows that rule.
+
+**Rule:** When a feature persists data ACROSS sessions AND can be edited out-of-band (CLI, manual fs operations, external sync), the in-memory cache MUST have an invalidation path. The cheapest and most reliable signal is the parent directory's mtime — POSIX guarantees it updates on any add/remove/rename, and `fs.stat` is fast (sub-ms on hot inodes). Compare-on-read costs nothing and prevents the entire class of "I deleted it but the runtime still sees it" bugs. Also: any feature that emits to a globally-shared structure (one pool for all callers) needs a scope dimension. The "ship simple, scope later" version of PM #51 was the right v1 choice but the audit caught the consequence within one operator-month — scope-aware should be the v1 design for v3+ features.
+
+---
+
 ## 54. Audit-Findings Bugfix Bundle — Privacy Hole + Empty-Draft + Score-Regression + Risky-Combo
 **Date:** 2026-05
 **Status:** RESOLVED

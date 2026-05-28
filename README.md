@@ -318,14 +318,16 @@ Captures successful MoA runs and injects the top-K most similar past traces as R
 Inspect / curate the pool from the command line:
 
 ```bash
-npm run trace:list         # table of all captured traces by score
-npm run trace:show <id>    # full trace (signals + prompt + answer)
-npm run trace:stats        # pool size, score distribution, age
-npm run trace:delete <id>  # remove a single trace
-npm run trace:clear        # wipe everything (typed confirmation required)
+npm run trace:list                          # global pool (default)
+npm run trace:list -- --all                 # global + every project's pool
+npm run trace:list -- --project <id>        # one project's pool
+npm run trace:show -- <id>                  # full trace (across scopes if needed)
+npm run trace:stats -- --project <id>       # pool size, score distribution
+npm run trace:delete -- <id> --project <id> # remove one trace from a project's pool
+npm run trace:clear -- --project <id>       # wipe one pool (typed confirmation)
 ```
 
-The trace pool is local-only (`data/traces/`) and never auto-swept — operator-controlled retention so you can curate biased or off-topic captures.
+Trace pools are scoped (PM #55) — captures from project-owned chats land under `data/projects/<id>/.orchestra_traces/` and retrieval for that project ONLY reads from its own pool, so unrelated projects don't poison each other's Router prompt. Global chats (no projectId) use `data/traces/`. Operator-controlled retention.
 
 ### Multi-round reflection (PM #46)
 

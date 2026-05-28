@@ -60,6 +60,12 @@ export interface TraceSignals {
   reflectionHitCap: boolean;
   /** Total wall-clock for the MoA run in milliseconds. */
   totalLatencyMs: number;
+  /**
+   * PM #55 — which aggregator path produced `finalText` ("synthesis"
+   * the default, "tournament" PM #52). Optional so pre-PM-55 traces
+   * remain readable; missing field = synthesis-mode trace.
+   */
+  aggregatorMode?: "synthesis" | "tournament";
 }
 
 export interface SuccessfulTrace {
@@ -72,6 +78,12 @@ export interface SuccessfulTrace {
   modelConfig: { provider: string; model: string };
   capturedAt: string;
   embedding: number[];
+  /**
+   * PM #55 — owning project at capture time. Undefined for global-pool
+   * traces. Used by retrieval to enforce per-project scoping AND
+   * surfaced by the CLI's `trace:list --project <id>` filter.
+   */
+  projectId?: string;
 }
 
 /**
@@ -122,25 +134,96 @@ function dataDir(): string {
   return process.env.ORCHESTRA_DATA_DIR || path.join(process.cwd(), "data");
 }
 
-function tracesDir(): string {
-  return path.join(dataDir(), "traces");
+/**
+ * PM #55 — per-project trace scoping. A run with `projectId` lands in
+ * the project's own trace pool; runs without (global chats) go to the
+ * shared global pool. The previous design used one global pool for
+ * everything, which meant a "build React component" trace from project
+ * A would be injected as a fewshot into project B's unrelated Router
+ * prompts (cross-project contamination).
+ *
+ *   - global → `data/traces/<id>.json` (backward compat — pre-PM-55
+ *     traces stay readable without migration).
+ *   - project → `data/projects/<projectId>/.orchestra_traces/<id>.json`.
+ *     The `.orchestra_` prefix matches the convention used by
+ *     `.orchestra_blackboard.json` (PM #4) for "Orchestra-managed
+ *     metadata inside the project directory".
+ *
+ * A null/undefined/empty projectId always resolves to the global pool.
+ */
+const GLOBAL_SCOPE_KEY = "__global__";
+
+function scopeKey(projectId?: string | null): string {
+  if (!projectId || projectId.trim() === "") return GLOBAL_SCOPE_KEY;
+  return projectId;
 }
 
-function tracePath(id: string): string {
-  return path.join(tracesDir(), `${id}.json`);
+function scopeDir(projectId?: string | null): string {
+  if (scopeKey(projectId) === GLOBAL_SCOPE_KEY) {
+    return path.join(dataDir(), "traces");
+  }
+  return path.join(dataDir(), "projects", projectId!, ".orchestra_traces");
 }
 
-let inMemoryTraces: Map<string, SuccessfulTrace> | null = null;
+function tracePath(id: string, projectId?: string | null): string {
+  return path.join(scopeDir(projectId), `${id}.json`);
+}
 
-async function loadAllTraces(): Promise<Map<string, SuccessfulTrace>> {
-  if (inMemoryTraces) return inMemoryTraces;
+/**
+ * Per-scope cache with mtime invalidation. PM #55 — when the operator
+ * deletes traces via `npm run trace:delete`, the runtime previously
+ * kept serving the deleted trace from in-memory cache until restart.
+ * By comparing the directory's mtimeMs on each `loadAllTraces` call we
+ * detect external mutations (POSIX guarantees dir mtime updates on
+ * unlink/rename) and reload cleanly. Pure-memory ops (in-process
+ * captures) update both the in-memory map AND the mtime baseline so
+ * the next read doesn't trigger a redundant disk scan.
+ */
+interface ScopeCache {
+  traces: Map<string, SuccessfulTrace>;
+  dirMtimeMs: number;
+}
+
+let cachesByScope: Map<string, ScopeCache> = new Map();
+
+async function loadAllTraces(
+  projectId?: string | null
+): Promise<Map<string, SuccessfulTrace>> {
+  const key = scopeKey(projectId);
+  const dir = scopeDir(projectId);
+
+  let stat: import("fs").Stats | null = null;
+  try {
+    stat = await fs.stat(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // Directory doesn't exist → return cached (possibly test-seeded)
+      // entry if one exists; otherwise an empty map. Without the seeded
+      // check we'd silently wipe in-memory state when tests bypass the
+      // disk layer via `__seedTraceMemoryForTests`.
+      const existing = cachesByScope.get(key);
+      if (existing) return existing.traces;
+      const empty = new Map<string, SuccessfulTrace>();
+      cachesByScope.set(key, { traces: empty, dirMtimeMs: -1 });
+      return empty;
+    }
+    throw err;
+  }
+
+  const currentMtime = stat.mtimeMs;
+  const existing = cachesByScope.get(key);
+  if (existing && existing.dirMtimeMs === currentMtime) {
+    return existing.traces;
+  }
+
+  // Cold load or invalidated (mtime changed).
   const cache = new Map<string, SuccessfulTrace>();
   let dirEntries: string[];
   try {
-    dirEntries = await fs.readdir(tracesDir());
+    dirEntries = await fs.readdir(dir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      inMemoryTraces = cache;
+      cachesByScope.set(key, { traces: cache, dirMtimeMs: -1 });
       return cache;
     }
     throw err;
@@ -148,7 +231,7 @@ async function loadAllTraces(): Promise<Map<string, SuccessfulTrace>> {
   for (const entry of dirEntries) {
     if (!entry.endsWith(".json")) continue;
     try {
-      const raw = await fs.readFile(path.join(tracesDir(), entry), "utf-8");
+      const raw = await fs.readFile(path.join(dir, entry), "utf-8");
       const parsed = JSON.parse(raw) as SuccessfulTrace;
       if (
         typeof parsed?.id !== "string" ||
@@ -165,7 +248,7 @@ async function loadAllTraces(): Promise<Map<string, SuccessfulTrace>> {
       continue;
     }
   }
-  inMemoryTraces = cache;
+  cachesByScope.set(key, { traces: cache, dirMtimeMs: currentMtime });
   return cache;
 }
 
@@ -175,6 +258,12 @@ export interface CaptureTraceInput {
   signals: TraceSignals;
   brainConfig: ModelConfig;
   settings: AppSettings;
+  /**
+   * PM #55 — optional project owner. Pass the same projectId
+   * `runMoAEnsemble` received. Undefined / null / empty string lands
+   * the trace in the global pool (pre-PM-55 layout, backward compat).
+   */
+  projectId?: string | null;
 }
 
 export interface CaptureTraceResult {
@@ -197,7 +286,8 @@ export interface CaptureTraceResult {
 export async function captureSuccessfulTrace(
   input: CaptureTraceInput
 ): Promise<CaptureTraceResult> {
-  const { settings, userPrompt, finalText, signals, brainConfig } = input;
+  const { settings, userPrompt, finalText, signals, brainConfig, projectId } =
+    input;
   if (!settings.traceMemory?.enabled) {
     return { captured: false, reason: "trace-memory disabled", qualityScore: 0 };
   }
@@ -218,9 +308,12 @@ export async function captureSuccessfulTrace(
   // good capture is not silently replaced by a worse one. (We DO write
   // when scores are equal — that handles the no-op rerun and keeps
   // `capturedAt` fresh on the most recent observation.)
+  // PM #55 — regression check runs against the SAME scope (project or
+  // global) the new trace would land in. A high-score trace in global
+  // shouldn't block a project-scoped capture and vice versa.
   const id = computeTraceId(userPrompt);
   try {
-    const cache = await loadAllTraces();
+    const cache = await loadAllTraces(projectId);
     const existing = cache.get(id);
     if (existing && existing.qualityScore > score) {
       return {
@@ -262,6 +355,8 @@ export async function captureSuccessfulTrace(
     };
   }
 
+  const normalizedProjectId =
+    projectId && projectId.trim() !== "" ? projectId : undefined;
   const trace: SuccessfulTrace = {
     id,
     userPrompt,
@@ -271,11 +366,13 @@ export async function captureSuccessfulTrace(
     modelConfig: { provider: brainConfig.provider, model: brainConfig.model },
     capturedAt: new Date().toISOString(),
     embedding,
+    ...(normalizedProjectId ? { projectId: normalizedProjectId } : {}),
   };
 
   try {
-    await fs.mkdir(tracesDir(), { recursive: true });
-    await safeWriteFile(tracePath(id), JSON.stringify(trace, null, 2));
+    const dir = scopeDir(projectId);
+    await fs.mkdir(dir, { recursive: true });
+    await safeWriteFile(tracePath(id, projectId), JSON.stringify(trace, null, 2));
   } catch (err) {
     return {
       captured: false,
@@ -285,7 +382,20 @@ export async function captureSuccessfulTrace(
   }
 
   // Update the in-memory cache so this trace is retrievable immediately.
-  if (inMemoryTraces) inMemoryTraces.set(id, trace);
+  // PM #55 — also bump the scope's mtime baseline to the directory's
+  // current mtime so the next loadAllTraces doesn't trigger a spurious
+  // disk rescan from THIS write.
+  const key = scopeKey(projectId);
+  const existing = cachesByScope.get(key);
+  if (existing) {
+    existing.traces.set(id, trace);
+    try {
+      const stat = await fs.stat(scopeDir(projectId));
+      existing.dirMtimeMs = stat.mtimeMs;
+    } catch {
+      // Stat failure non-fatal — next read will reload from disk.
+    }
+  }
   return { captured: true, qualityScore: score, traceId: id };
 }
 
@@ -308,16 +418,20 @@ export interface RetrievedTrace {
 export async function retrieveRelevantTraces(
   userPrompt: string,
   settings: AppSettings,
-  options: { k?: number } = {}
+  options: { k?: number; projectId?: string | null } = {}
 ): Promise<RetrievedTrace[]> {
   if (!settings.traceMemory?.enabled) return [];
   const k = Math.max(0, Math.floor(options.k ?? settings.traceMemory.retrievalK ?? 3));
   if (k === 0) return [];
   const threshold = clamp01(settings.traceMemory.qualityThreshold ?? 0.7);
 
+  // PM #55 — scope retrieval. Project-owned chat retrieves ONLY from
+  // its own pool (no cross-project contamination). Global chats
+  // retrieve from the global pool. The previous design read from one
+  // shared map across all projects.
   let cache: Map<string, SuccessfulTrace>;
   try {
-    cache = await loadAllTraces();
+    cache = await loadAllTraces(options.projectId);
   } catch {
     return [];
   }
@@ -397,9 +511,17 @@ function truncate(text: string, max: number): string {
 
 /* Test-only seams — never used in production. */
 export function __resetTraceMemoryForTests(): void {
-  inMemoryTraces = null;
+  cachesByScope = new Map();
 }
 
-export function __seedTraceMemoryForTests(traces: SuccessfulTrace[]): void {
-  inMemoryTraces = new Map(traces.map((t) => [t.id, t]));
+export function __seedTraceMemoryForTests(
+  traces: SuccessfulTrace[],
+  projectId?: string | null
+): void {
+  const key = scopeKey(projectId);
+  cachesByScope.set(key, {
+    traces: new Map(traces.map((t) => [t.id, t])),
+    // High mtime baseline so reload on next read doesn't fire.
+    dirMtimeMs: Number.MAX_SAFE_INTEGER,
+  });
 }

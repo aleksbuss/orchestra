@@ -1129,6 +1129,22 @@ export function assertPrivacyModeAllowsSettings(
       `embeddingsModel = ${settings.embeddingsModel.provider}/${settings.embeddingsModel.model}`
     );
   }
+  // PM #48 — proposerTiers also leak the user prompt if any configured
+  // tier resolves to a non-local backend. The MoA dispatch path uses
+  // `resolveProposerModelConfig` which falls back to `chatModel`/worker
+  // when a tier is unset, so we only check tiers the operator actually
+  // configured (has a `model` set).
+  const tiers = settings.proposerTiers;
+  if (tiers) {
+    for (const tierName of ["fast", "balanced", "frontier"] as const) {
+      const tierCfg = tiers[tierName];
+      if (tierCfg?.model && !isLocalProvider(tierCfg)) {
+        violations.push(
+          `proposerTiers.${tierName} = ${tierCfg.provider}/${tierCfg.model}`
+        );
+      }
+    }
+  }
   if (violations.length > 0) {
     throw new Error(
       `Privacy Mode is enabled, but these models target a non-local backend:\n  ` +

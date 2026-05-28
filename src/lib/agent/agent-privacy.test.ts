@@ -193,4 +193,127 @@ describe("PM #47 — assertPrivacyModeAllowsSettings", () => {
       expect(msg).toMatch(/ollama|sglang|vllm/);
     }
   });
+
+  // PM #48 — Privacy Mode must also reject non-local proposerTiers.
+  // A cloud "fast" tier silently routes Skeptic proposers off-box even
+  // when chatModel/utilityModel/embeddingsModel are all local.
+  describe("PM #48 — proposerTiers enforcement", () => {
+    it("rejects cloud fast tier when privacyMode enabled", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              fast: {
+                provider: "anthropic",
+                model: "claude-haiku-4-5-20251001",
+                apiKey: "anth-key",
+              },
+            },
+          })
+        )
+      ).toThrow(/proposerTiers\.fast.*anthropic/);
+    });
+
+    it("rejects cloud balanced or frontier tier", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              balanced: {
+                provider: "openai",
+                model: "gpt-4o-mini",
+                apiKey: "openai-key",
+              },
+            },
+          })
+        )
+      ).toThrow(/proposerTiers\.balanced.*openai/);
+
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              frontier: {
+                provider: "google",
+                model: "gemini-2.0-flash",
+                apiKey: "g-key",
+              },
+            },
+          })
+        )
+      ).toThrow(/proposerTiers\.frontier.*google/);
+    });
+
+    it("accepts all-local tiers (ollama + sglang + vllm)", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              fast: {
+                provider: "ollama",
+                model: "qwen2.5:3b",
+                baseUrl: "http://localhost:11434",
+              },
+              balanced: {
+                provider: "sglang",
+                model: "qwen2.5:7b",
+                baseUrl: "http://127.0.0.1:30000",
+              },
+              frontier: {
+                provider: "vllm",
+                model: "qwen2.5-coder:32b",
+                baseUrl: "http://localhost:8000",
+              },
+            },
+          })
+        )
+      ).not.toThrow();
+    });
+
+    it("skips tier slots with empty model (unconfigured slots fall back to worker)", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              // Empty slot — operator wired the UI but never picked a model.
+              // Should be skipped, not treated as a violation.
+              fast: { provider: "anthropic", model: "", apiKey: "" },
+            },
+          })
+        )
+      ).not.toThrow();
+    });
+
+    it("flags ALL violating tiers in the same error message (not just first)", () => {
+      try {
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            proposerTiers: {
+              fast: {
+                provider: "anthropic",
+                model: "claude-haiku",
+                apiKey: "k",
+              },
+              frontier: {
+                provider: "openai",
+                model: "gpt-4o",
+                apiKey: "k",
+              },
+            },
+          })
+        );
+        throw new Error("expected throw, none happened");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        expect(msg).toMatch(/proposerTiers\.fast/);
+        expect(msg).toMatch(/proposerTiers\.frontier/);
+      }
+    });
+  });
 });

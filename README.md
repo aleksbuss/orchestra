@@ -224,7 +224,7 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [x] Hardware auto-detect at startup (PM #44 — "I see your RTX 4090, here are 3 recommended MoA configs")
 - [x] **Unlimited refinement toggle** (PM #46 — multi-round reflection with cosine-convergence + hard cap)
 - [x] **Privacy mode** (PM #47 — runAgent refuses non-local providers when `privacyMode.enabled`; UI badge)
-- [ ] Per-role tier model routing (heterogeneous proposers — different model per persona)
+- [x] **Per-role tier model routing** (PM #48 — Skeptic → fast, Coder → frontier; Anthropic's Opus/Sonnet pattern; cost-shape win)
 
 **v4.0 — Strategic bets**
 - [ ] LoRA-swap personas (one base model + persona adapters)

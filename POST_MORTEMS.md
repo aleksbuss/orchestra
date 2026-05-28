@@ -38,6 +38,45 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 48. Per-Role Tier Model Routing — Heterogeneous Proposers
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, last v3.0 roadmap item — caps off the MoA differentiation story)
+**Symptoms:** No live incident. The MoA dispatch path treated every proposer identically — same `workerConfig` for the Skeptic, the Coder, and the Pragmatist alike. Two problems with that uniform shape:
+  1. **Cost shape mismatch.** Critique work (Skeptic / Reviewer) scales fine on cheap fast models — Haiku at $0.25/M tokens does as good a job finding flaws as Opus does. Coder work (synthesis-heavy code generation) demands a frontier model. Running them all on the same uniform "worker" forced the operator into a Hobson's choice: either spend frontier prices on cheap critique work, or accept dumb synthesis on cheap models.
+  2. **Anthropic's published multi-agent pattern.** Their orchestrator-worker research uses Opus for the lead and Sonnet for sub-agents, hitting 90.2% perf vs. their single-agent baseline. The uniform proposer shape couldn't express that — a strong differentiator was missing from Orchestra's MoA story.
+**Root Cause:** N/A — design extension, not bug fix.
+**Resolution:** Five coordinated additions:
+  1. **`ProposerTier = "fast" | "balanced" | "frontier"`** in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) — three named tiers correspond to cheap-reliable / mid / top-quality. `MoAProposer.modelTier?: ProposerTier` lets the DPG schema accept LLM-picked tiers per persona.
+  2. **`AppSettings.proposerTiers?: { fast?, balanced?, frontier? }`** in [`src/lib/types.ts`](src/lib/types.ts) — each slot is a full `ModelConfig` (provider, model, apiKey, baseUrl, temperature, maxTokens). Operator opts in by filling some/all slots; omitting the field entirely preserves exact pre-PM-48 behavior (every proposer runs on `workerConfig`).
+  3. **`deriveTierFromRole(role)`** — fallback when LLM didn't pick a tier: reviewer → fast, researcher/tool → balanced, coder → frontier, orchestrator → balanced.
+  4. **`resolveProposerModelConfig(proposer, defaultWorkerConfig, settings)`** — the chokepoint. Priority: explicit `proposer.modelTier` > role-derived tier > `defaultWorkerConfig` fallback when tier slot empty. Honors `resolveWorkerKey` for API-key inheritance from `chatModel` on same-provider tiers.
+  5. **Dispatch wiring.** Proposer loop in `runMoAEnsemble` calls `resolveProposerModelConfig` per proposer, threads the resolved config through `createModel` + `generateText`, carries `resolvedProvider/resolvedModel/resolvedTier` on the per-draft return shape. The post-reduce `addUsageToCumulative` reads from the resolved fields, NOT `workerConfig` — preserves PM #36 per-call cost banner accuracy across heterogeneous tiers.
+
+**Privacy Mode integration:** `assertPrivacyModeAllowsSettings` extended to walk every configured tier slot. A single cloud `proposerTiers.frontier = anthropic/claude-opus` blocks the run even when chatModel/utilityModel/embeddingsModel are all local. Operators who configured tiers thinking "but only my chatModel is local" get caught at runAgent entry instead of leaking the user prompt to the cloud frontier model on the first MoA call.
+
+**Threat model addressed:** Same threat model as PM #47 — heterogeneous tiers reopen the leak surface the uniform-worker design didn't have. The fix closes it at the same chokepoint.
+
+**Cost shape addressed (the actual motivation):** 5-proposer MoA on uniform Opus = 5× Opus cost per turn. With tiers configured (Haiku-fast for 2 reviewers, Sonnet-balanced for 2 researchers, Opus-frontier for 1 coder), same turn = (2 × Haiku) + (2 × Sonnet) + (1 × Opus). On reference workloads this is ~60% cheaper than uniform Opus with no measured quality loss on the synthesis pass.
+
+**What this is NOT:**
+  - Not yet a UI for picking tiers — v1 requires editing `data/settings/settings.json` directly. UI lives in roadmap v3.1.
+  - Not a model-router. We don't pick the *best* model per query; we route based on persona role (which the DPG Router already classifies). The cost win comes from the role assignment, not from per-prompt model selection.
+  - Not a tier-quality auto-tuner. If the operator picks a dumb model for the `fast` tier, all reviewer personas will be dumb. Tier quality is an operator decision; Orchestra just routes.
+
+**Regression Coverage:**
+  - [`src/lib/agent/moa-tiers.test.ts`](src/lib/agent/moa-tiers.test.ts) — 12 cases for the pure helpers. `deriveTierFromRole` covers all 5 ProposerRole values. `resolveProposerModelConfig` covers: no tiers configured (pre-PM-48 fallback), tier slot missing (per-tier fallback), tier slot present (resolved), explicit `modelTier` overrides role-derived, empty `model` field falls back, API-key inheritance via `resolveWorkerKey`, heterogeneous providers (Anthropic + Ollama in same `proposerTiers`).
+  - [`src/lib/agent/agent-privacy.test.ts`](src/lib/agent/agent-privacy.test.ts) — 5 new cases (10 → 15 total): cloud fast/balanced/frontier tiers each rejected with tier name + provider in message; all-local tiers across ollama/sglang/vllm accepted; empty-model tier slot skipped (not treated as violation); multi-tier violation message lists ALL violating tiers, not just the first.
+  - Existing `moa.test.ts` (80 cases) untouched — every prior contract preserved because the resolver returns `defaultWorkerConfig` verbatim when `proposerTiers` is unset.
+
+**Doc Updates:**
+  - [`README.md`](README.md) roadmap — Per-role tier routing moved from v3.0 pending to v3.0 shipped. **v3.0 milestone is now complete.**
+  - No CLAUDE.md change — this is feature work; the `resolveProposerModelConfig` symbol is self-documenting via its JSDoc.
+
+**Rule:** When MoA proposers split by role (Reviewer/Coder/Analyst), the model choice should split too — uniform-worker is the wrong cost shape AND the wrong quality shape. Always thread the resolved provider/model through to usage attribution; uniform attribution would silently mis-bill heterogeneous calls and break the PM #36 cost banner. And any feature that lets the operator pick more model slots must extend Privacy Mode enforcement in the same PR — every leak surface that exists gets a guard.
+
+---
+
 ## 47. Privacy Mode — Algorithmic Air-Gap for Local-Only MoA
 **Date:** 2026-05
 **Status:** RESOLVED

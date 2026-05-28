@@ -38,6 +38,58 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 52. Tournament Aggregator — Borda Count for Code/Math/Factual Tasks
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, second v4.0 strategic-bet ship)
+**Symptoms:** No live incident. PM #40's synthesis aggregator (togethercomputer/MoA shape) is correct for *open-ended* prompts where each proposer brings a unique angle and merging adds value. It is the **wrong shape** for code/math/factual prompts where one proposer got the right answer and the others were wrong — the synthesizer smooths the correct draft into a worse Frankenstein answer that incorporates errors from the losing drafts. The "everything is a synthesis problem" stance is a known weakness of plain MoA pipelines; tournament aggregators (vote-based selection) are the established alternative.
+**Root Cause:** N/A — design extension, not bug fix.
+**Resolution:** Two coordinated additions:
+
+  1. **`src/lib/agent/tournament-aggregator.ts`** — new module, three public surfaces:
+     - **`bordaCount(rankings, allDraftIds)`** — pure function. For each judge's permutation of N candidates, the i-th-ranked candidate gets `N-1-i` points (1st = N-1, last = 0). Sum across judges. Ties broken by lower sum-of-rank-positions (closer-to-top wins). Drafts the judge omitted score 0 (no negative weight). Invalid / duplicate ids in a ranking are silently dropped — never crash the run.
+     - **`runTournamentAggregation({ drafts, userMessage, judgeConfig, judgeCount, abortSignal })`** — K judges run in parallel via `Promise.all`, each gets a `generateObject` call with the JUDGE_SYSTEM_PROMPT + all drafts + a Zod schema enforcing `rankedProposerIds: string[]`. Failures are non-fatal (individual judge timeouts don't fail the run); Borda runs over whichever subset succeeded. 60s per-judge timeout via `AbortSignal.any` (graceful fallback to timeout-only on older Node).
+     - When zero judges succeed → empty `winnerProposerId` (caller falls back to synthesis instead of silently picking a random draft).
+
+  2. **`runMoAEnsemble` mode branch** in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts). When `settings.aggregator?.mode === "tournament"`, the tournament path runs instead of the synthesis `generateText`. The winning draft (verbatim) becomes `finalText`. Reflection is skipped — the answer is already a proposer draft; running the critic-reviser against it would just re-judge what was just judged. Trace memory (PM #51) still captures the run with `reflectionRounds=0` in signals. Falls back to synthesis if all judges fail (better degraded output than no output).
+
+  3. **`AppSettings.aggregator?: { mode, tournamentJudgeCount?, tournamentJudgeModel? }`** in [`src/lib/types.ts`](src/lib/types.ts). Default `mode: "synthesis"` (current behavior, exact backward compat). `tournamentJudgeCount` default 1 — K=1 is the cheapest tournament shape (degenerates to "judge picks best"). K=3 gives true Borda consensus. `tournamentJudgeModel` lets the operator route judges to a different (cheaper) tier; falls back to the brain config when omitted.
+
+**Cost shape.**
+  - Synthesis (status quo): 1 brain call producing long output (~2000-4000 tokens).
+  - Tournament K=1: 1 judge call producing short ranking (~50-100 tokens). Cheaper.
+  - Tournament K=3: 3 judges in parallel. ~3× judge input tokens but still ~10% of synthesis output. Often cheaper than synthesis when drafts are long.
+  - Tournament K=3 + fast judge model (PM #48 tier hint): ~10× cheaper than synthesis on frontier brain config.
+
+**Quality shape.**
+  - Synthesis: best for open-ended writing, brainstorming, multi-angle perspectives.
+  - Tournament: best for code/math/factual answers where one draft is right and others wrong. The Borda K=3 ensemble averages judge variance — single-judge prompt drift is smoothed.
+  - **Recommended use:** switch to tournament for chats focused on bug-fixing / API design / code-review / fact-extraction; keep synthesis for writing-heavy / strategy / brainstorming chats.
+
+**Privacy Mode (PM #47).** Judge calls are regular LLM calls — already gated by `assertPrivacyModeAllowsSettings` through `chatModel` / `tournamentJudgeModel`. No new network surface. No additional gating needed.
+
+**Tier compatibility (PM #48).** `tournamentJudgeModel` is a full `ModelConfig`; operators can route judges to `proposerTiers.fast` to slash judge cost. The brain (synthesis) model setting still applies as fallback.
+
+**Trace memory (PM #51).** Tournament runs DO capture traces. `reflectionRounds=0` because there's no reflection in tournament mode — this is semantically correct (no revisions were needed because no synthesis happened). The trace's `finalText` is the verbatim winning draft.
+
+**Operator UX caveat (v1 limitations):**
+  - Not a per-prompt mode toggle. v1 is global per chat — operator picks tournament OR synthesis. Future: classifier-based mode selection (treat the chat's prompt class as the routing input).
+  - Not a hybrid. Pure tournament discards synthesis benefits (no formatting cleanup, no combining unique strengths). Operators with prompts that mostly need tournament BUT occasionally benefit from synthesis should switch modes between chats, not within.
+
+**Regression Coverage:** [`src/lib/agent/tournament-aggregator.test.ts`](src/lib/agent/tournament-aggregator.test.ts) — 15 cases:
+  - **`bordaCount`** (8 cases): single-judge picks first-in-ranking; K=3 unanimous consensus → highest points; K=3 split votes → broad-support winner; tie-break by sum-of-positions (closer-to-top wins); invalid IDs silently dropped; duplicate IDs deduped; zero rankings → all-zero scores; omitted draft → 0 points.
+  - **`runTournamentAggregation`** (7 cases): single judge → winning text is the draft verbatim; K=3 judges run in parallel and combine via Borda; partial judge failures (some succeed, some fail) → Borda over the subset still picks winner; all judges fail → empty winnerProposerId (signals fallback); usage accumulates across K judges; `judgeCount: 0` floors to 1.
+
+  All 145 MoA + privacy + tier + agent-privacy + trace + tournament tests pass (37 + 38 + 12 + 15 + 28 + 15).
+
+**Doc Updates:**
+  - [`README.md`](README.md) v4.0 roadmap — "Tournament aggregator (Borda count for code/math/factual tasks)" moved from pending to shipped. Two of four v4.0 strategic bets are now closed (trace memory + tournament).
+  - No CLAUDE.md change required — the aggregator-mode setting is operator-facing config, not a coding-time invariant. The existing PM #40 + PM #51 rules continue to apply for the synthesis-mode default path.
+
+**Rule:** A single aggregator algorithm cannot be optimal across the full prompt distribution. Synthesis-by-default + tournament-on-demand gives the operator a knob that maps cleanly to the prompt class they're sending. When you find an algorithm that fails on a specific prompt category (here: synthesis on code/math/factual), the answer is rarely "make the algorithm smarter" — it's usually "make the algorithm a setting and add an alternative". Cost and quality both win when the operator can route per workload. Future v4.x work: a Router-side classifier that auto-picks the mode based on the user prompt, eliminating the global-toggle constraint.
+
+---
+
 ## 51. Persistent Successful-Trace Memory — DSPy-Style Bootstrap Fewshot
 **Date:** 2026-05
 **Status:** RESOLVED

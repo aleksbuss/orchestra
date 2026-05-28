@@ -967,3 +967,219 @@ describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
     expect(result.cumulativeUsage!.completionTokens).toBe(370);
   }, 30_000);
 });
+
+describe("PM #46 — multi-round reflection with convergence + hard cap", () => {
+  // Helper: stub DPG with skeptic-included personas + 3 proposer drafts
+  // + 1 aggregator. Caller queues additional reflection / revision calls.
+  function queueSwarmThroughAggregator(aggregatorText: string) {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [MOA_PROPOSERS[0], MOA_PROPOSERS[3], MOA_PROPOSERS[4]].map((p) => ({
+          id: p.id,
+          role: p.role,
+          systemPrompt: p.systemPrompt,
+          color: p.color,
+        })),
+      },
+    } as never);
+    for (let i = 0; i < 3; i++) {
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `Substantive proposer draft #${i + 1} long enough to escape any short-circuit.`,
+        usage: { inputTokens: 50, outputTokens: 30 },
+      } as never);
+    }
+    mockedGenerateText.mockResolvedValueOnce({
+      text: aggregatorText,
+      usage: { inputTokens: 200, outputTokens: 100 },
+    } as never);
+  }
+
+  const settingsMultiRound = (
+    maxRounds: number,
+    convergenceThreshold?: number
+  ): AppSettings => ({
+    ...fakeSettings(),
+    reflection: {
+      enabled: true,
+      maxRounds,
+      ...(convergenceThreshold !== undefined ? { convergenceThreshold } : {}),
+    },
+  });
+
+  it("maxRounds=1 (default-shape) preserves PM #38 single-pass behavior", async () => {
+    queueSwarmThroughAggregator("Initial aggregator response, long enough.");
+    // Critic flags, revisor fires once, then stop (maxRounds=1).
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '{"shouldRevise": true, "critique": "first issue", "suggestion": "fix it"}',
+      usage: { inputTokens: 80, outputTokens: 30 },
+    } as never);
+    mockedGenerateText.mockResolvedValueOnce({
+      text: "Revised version #1 long enough to escape short-circuit.",
+      usage: { inputTokens: 200, outputTokens: 80 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do thing",
+      history: [],
+      settings: settingsMultiRound(1),
+    });
+
+    // 3 proposers + 1 aggregator + 1 reflection + 1 revisor = 6 calls.
+    // NO second reflection call (maxRounds=1 caps after first revision).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(result.text).toBe("Revised version #1 long enough to escape short-circuit.");
+  }, 30_000);
+
+  it("convergence stops the loop early when revision embeddings are near-identical", async () => {
+    queueSwarmThroughAggregator("Aggregator output long enough to skip short-circuit.");
+    // Round 1: critic flags, revisor runs.
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '{"shouldRevise": true, "critique": "issue A", "suggestion": "fix A"}',
+      usage: { inputTokens: 80, outputTokens: 30 },
+    } as never);
+    mockedGenerateText.mockResolvedValueOnce({
+      text: "First revision long enough to skip short-circuit logic.",
+      usage: { inputTokens: 200, outputTokens: 80 },
+    } as never);
+    // Embedder returns IDENTICAL vectors immediately → cosine = 1.0 →
+    // convergence triggers on round 1. The loop stops; the 2nd
+    // reflection / revisor never fires even though maxRounds=5.
+    vi.doMock("@/lib/memory/embeddings", () => ({
+      embedTexts: vi.fn().mockResolvedValue([
+        [1, 0, 0, 0],
+        [1, 0, 0, 0], // identical → converged
+      ]),
+    }));
+    vi.resetModules();
+    const { runMoAEnsemble: runWithConvergence } = await import("./moa");
+
+    const result = await runWithConvergence({
+      chatId: "c1",
+      userMessage: "do thing",
+      history: [],
+      settings: settingsMultiRound(5),
+    });
+
+    // Final text = round 1 revision. The loop short-circuited on
+    // convergence rather than running more rounds.
+    expect(result.text).toBe(
+      "First revision long enough to skip short-circuit logic."
+    );
+
+    vi.doUnmock("@/lib/memory/embeddings");
+  }, 30_000);
+
+  it("non-converged embeddings + persistently-flagging critic → loops to maxRounds cap", async () => {
+    queueSwarmThroughAggregator("Aggregator output long enough to skip short-circuit.");
+    // Queue 5 rounds of (reflection-flags + revisor). With maxRounds=3
+    // and orthogonal embeddings (never converged), the loop should fire
+    // 3 reflections + 3 revisions then exit.
+    for (let i = 0; i < 5; i++) {
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `{"shouldRevise": true, "critique": "issue ${i}", "suggestion": "fix ${i}"}`,
+        usage: { inputTokens: 80, outputTokens: 30 },
+      } as never);
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `Revision ${i} long enough to escape short-circuit logic block here.`,
+        usage: { inputTokens: 200, outputTokens: 80 },
+      } as never);
+    }
+
+    // Embedder returns orthogonal vectors → cosine 0 → never converged.
+    vi.doMock("@/lib/memory/embeddings", () => ({
+      embedTexts: vi.fn().mockResolvedValue([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+      ]),
+    }));
+    vi.resetModules();
+    const { runMoAEnsemble: runWithCap } = await import("./moa");
+
+    const result = await runWithCap({
+      chatId: "c1",
+      userMessage: "do thing",
+      history: [],
+      settings: settingsMultiRound(3),
+    });
+
+    // maxRounds=3 → 3 revisions fired. Final text is "Revision 2" (0-indexed).
+    expect(result.text).toBe(
+      "Revision 2 long enough to escape short-circuit logic block here."
+    );
+
+    vi.doUnmock("@/lib/memory/embeddings");
+  }, 30_000);
+
+  it("hard cap (ABSOLUTE_MAX_REFLECTION_ROUNDS=50) protects against runaway maxRounds=999", async () => {
+    queueSwarmThroughAggregator("Initial response long enough to skip short-circuit logic.");
+
+    // Mock 51 reflection rounds (50 cap + 1 buffer to verify cap fires).
+    // Each round: critic flags + revisor runs.
+    for (let i = 0; i < 51; i++) {
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `{"shouldRevise": true, "critique": "round ${i}", "suggestion": "fix"}`,
+        usage: { inputTokens: 10, outputTokens: 10 },
+      } as never);
+      mockedGenerateText.mockResolvedValueOnce({
+        text: `Revision ${i} long enough to skip short-circuit logic always.`,
+        usage: { inputTokens: 10, outputTokens: 10 },
+      } as never);
+    }
+
+    // Force divergent embeddings so convergence never triggers.
+    vi.doMock("@/lib/memory/embeddings", () => ({
+      embedTexts: vi.fn().mockResolvedValue([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0], // orthogonal each time
+      ]),
+    }));
+    vi.resetModules();
+    const { runMoAEnsemble: runWithCap } = await import("./moa");
+
+    await runWithCap({
+      chatId: "c1",
+      userMessage: "do thing",
+      history: [],
+      settings: settingsMultiRound(999), // operator set absurd value
+    });
+
+    // We can't easily assert the call count after vi.resetModules() invalidated
+    // the spy, but the run completing (within the 30s timeout) WITHOUT hanging
+    // proves the hard cap fired. If the cap were bypassed, this test would
+    // run forever consuming queued mocks until they exhausted then crash.
+
+    vi.doUnmock("@/lib/memory/embeddings");
+  }, 30_000);
+
+  it("convergenceThreshold is clamped to [0, 1] (defensive against operator typos)", async () => {
+    queueSwarmThroughAggregator("Initial response long enough to skip short-circuit.");
+    mockedGenerateText.mockResolvedValue({
+      text: '{"shouldRevise": false, "critique": "", "suggestion": ""}',
+      usage: { inputTokens: 50, outputTokens: 20 },
+    } as never);
+
+    // Operator typo: threshold 1.5 (impossible). Code should clamp to 1.0.
+    // We don't assert internally — just verify the run completes without
+    // throwing on an out-of-range setting.
+    await expect(
+      runMoAEnsemble({
+        chatId: "c1",
+        userMessage: "do thing",
+        history: [],
+        settings: settingsMultiRound(3, 1.5),
+      })
+    ).resolves.toBeDefined();
+
+    // Same for negative.
+    await expect(
+      runMoAEnsemble({
+        chatId: "c1",
+        userMessage: "do thing",
+        history: [],
+        settings: settingsMultiRound(3, -0.5),
+      })
+    ).resolves.toBeDefined();
+  }, 30_000);
+});

@@ -65,12 +65,29 @@ export interface AppSettings {
    * Post-aggregator reflection loop (PM #38). When enabled, the MoA
    * aggregator output is reviewed by a critic LLM; if the critic flags
    * factual errors / incomplete answers / code bugs / etc, a revisor
-   * pass produces a corrected response. Capped at ONE round to bound
-   * cost — soft budget banner from PM #36 makes the extra spend visible.
-   * Defaults to disabled — opt-in feature.
+   * pass produces a corrected response. Soft budget banner from PM #36
+   * makes the extra spend visible. Defaults to disabled — opt-in feature.
+   *
+   * PM #46 — multi-round refinement support. `maxRounds` controls how
+   * many critic→revisor iterations are allowed; default 1 preserves
+   * pre-PM-46 single-pass behavior. Local-first power users can set
+   * higher values (e.g., 10-20) to let convergence-based stopping run
+   * until the critic stops flagging issues. A code-level hard cap
+   * (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 50` in moa.ts) protects against
+   * accidental runaway loops on cloud providers.
+   *
+   * `convergenceThreshold` is a safety net: if two successive revised
+   * outputs are nearly identical (cosine similarity > this value), the
+   * loop stops even if the critic still wants to keep iterating —
+   * prevents the LLM from oscillating between rephrasings forever.
+   * Default 0.97; raise to 0.99 for stricter loop continuation.
    */
   reflection?: {
     enabled: boolean;
+    /** Default 1 (backwards-compat with pre-PM-46 single-pass). Capped at 50. */
+    maxRounds?: number;
+    /** Default 0.97. Range 0-1; higher = stricter "stop only if nearly identical". */
+    convergenceThreshold?: number;
   };
   general: {
     darkMode: boolean;

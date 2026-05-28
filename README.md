@@ -214,9 +214,9 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [x] Embedding-based disagreement detection
 - [x] Validated togethercomputer/MoA aggregator prompt
 
-**v2.1 — Measurement & quality**
+**v2.1 — Measurement & quality** (shipped)
 - [x] Eval harness — assertion-based regression suite (PM #41, 10 cases + 31 test pinning)
-- [~] Tools inside proposers — **partial**: PM #42 wired `search_web` to reviewer + researcher with Fact-Check Mandate; coder→`code_execution` still deferred (child-process lifecycle)
+- [x] Tools inside proposers — `search_web` for reviewer + researcher with Fact-Check Mandate (PM #42); `code_execution` for coder with Code-Exec Mandate, opt-in via `proposerAccess` (PM #50)
 - [x] **Live-pricing fetch from OpenRouter** `/api/v1/models` (PM #49 — 24h cache, disk-warm, Privacy-Mode-aware)
 
 **v3.0 — Local-first power mode**

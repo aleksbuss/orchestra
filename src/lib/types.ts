@@ -48,6 +48,18 @@ export interface AppSettings {
     enabled: boolean;
     timeout: number; // seconds
     maxOutputLength: number; // characters
+    /**
+     * PM #50 — opt-in: give the coder-tagged MoA proposers access to
+     * `code_execution` (self-verify code before drafting). Default false
+     * — deliberately conservative because each coder proposer spawning
+     * child processes is a new failure surface (PM #42 deferral note).
+     *
+     * When enabled, a coder persona runs Python/Node snippets to
+     * validate output during its proposer turn. The agent semaphore
+     * (2 permits) naturally caps concurrent child processes; per-run
+     * limits come from `timeout` + `maxOutputLength` above.
+     */
+    proposerAccess?: boolean;
   };
   memory: {
     enabled: boolean;

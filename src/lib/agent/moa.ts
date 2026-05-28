@@ -29,6 +29,8 @@ import { agentSemaphore } from "./semaphore";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
 import { searchWeb } from "@/lib/tools/search-engine";
+import { buildProposerCodeExecutionTool } from "@/lib/tools/code-execution";
+import { getWorkDir } from "@/lib/storage/project-store";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 
@@ -366,30 +368,61 @@ export function detectProposerRole(proposer: MoAProposer): ProposerRole {
 }
 
 /**
- * Returns the tool set for this proposer's role. Reviewer + researcher
- * personas get `search_web` (fact-checking / research workflows depend on
- * real-time external data). Everything else gets `undefined` — the
- * synthesizer's job is to ideate from existing knowledge, not browse.
+ * Returns the tool set for this proposer's role.
+ *   - reviewer / researcher → `search_web` (fact-checking depends on
+ *     real-time external data; the Fact-Check Mandate stops them from
+ *     hallucinating library versions).
+ *   - coder → `code_execution` when both `settings.codeExecution.enabled`
+ *     AND `settings.codeExecution.proposerAccess` are true (PM #50,
+ *     opt-in). Lets the coder self-verify snippets before drafting.
+ *   - everything else → `undefined`.
  *
- * When the operator hasn't enabled search, this returns `undefined`
- * regardless of role.
+ * A persona can get BOTH tools — e.g. if it has both reviewer and
+ * coder keywords (rare; `detectProposerRole` returns a single role,
+ * so in practice each persona gets one tool family).
  */
 export function selectProposerTools(
   role: ProposerRole,
   searchEnabled: boolean,
-  searchConfig: AppSettings["search"]
+  searchConfig: AppSettings["search"],
+  coderContext?: {
+    settings: AppSettings;
+    cwd: string;
+  }
 ): ToolSet | undefined {
-  if (!searchEnabled) return undefined;
-  if (role !== "reviewer" && role !== "researcher") return undefined;
-  return {
-    search_web: tool({
+  const out: ToolSet = {};
+
+  if (searchEnabled && (role === "reviewer" || role === "researcher")) {
+    out.search_web = tool({
       description: "Search the internet for real-time information, facts, and live data.",
       inputSchema: z.object({ query: z.string() }),
       execute: async ({ query }, { abortSignal }) => {
         return searchWeb(query, 5, searchConfig, abortSignal);
       },
-    }),
-  };
+    });
+  }
+
+  // PM #50 — opt-in code_execution for coder personas. Gated on BOTH
+  // the global enable flag (existing operator config) AND the new
+  // per-proposer flag (the deferral from PM #42 demanded explicit
+  // opt-in because each proposer × child process is a new failure
+  // surface). The tool factory lives in code-execution.ts to avoid
+  // pulling the orchestrator's full createAgentTools dependency tree
+  // into moa.ts.
+  if (
+    role === "coder" &&
+    coderContext &&
+    coderContext.settings.codeExecution.enabled &&
+    coderContext.settings.codeExecution.proposerAccess === true
+  ) {
+    out.code_execution = buildProposerCodeExecutionTool(
+      coderContext.settings,
+      coderContext.cwd
+    );
+  }
+
+  if (Object.keys(out).length === 0) return undefined;
+  return out;
 }
 
 /**
@@ -409,12 +442,43 @@ You MUST invoke the search_web tool BEFORE making any claim that depends on:
 
 If you cannot verify a claim through search_web (rate-limited, no result, ambiguous), state that explicitly in your draft ("I could not verify X via search; this is my best understanding from training") rather than asserting it with false confidence.`;
 
+/**
+ * PM #50 — Mirror of FACT_CHECK_MANDATE for the code_execution tool.
+ * Without an explicit instruction, the LLM has the tool but no reason
+ * to use it — same failure mode as PM #42's pre-mandate search_web
+ * (proposers hallucinated library versions despite tool availability).
+ *
+ * Verification triggers are scoped to coder work: type-checking,
+ * API-signature confirmation, output-format validation, runtime
+ * behavior of a snippet. NOT for: building products, running servers,
+ * one-shot installs that produce no useful verification signal.
+ */
+export const CODE_EXECUTION_MANDATE = `
+
+[CODE-EXECUTION MANDATE — you have access to code_execution]
+You SHOULD invoke the code_execution tool BEFORE drafting code when:
+  - A library API signature is uncertain (run a 2-line check to confirm).
+  - The exact output shape of a function matters to the user's task.
+  - A regex, parsing rule, or boundary condition needs empirical validation.
+  - The user explicitly asked "will this work?" — run it and show them.
+
+Do NOT use code_execution for: launching GUI apps, starting long-running
+servers, infrastructure-mutating commands, or anything that doesn't exit
+on its own. Your proposer turn has a 2-minute cap — keep snippets tight.
+
+When verification succeeds, mention the verified fact concretely in your
+draft. When it fails or times out, state that explicitly ("I tried X
+via code_execution; it returned Y") rather than guessing.`;
+
 export function augmentProposerPromptForTools(
   basePrompt: string,
   tools: ToolSet | undefined
 ): string {
-  if (!tools || !("search_web" in tools)) return basePrompt;
-  return basePrompt + FACT_CHECK_MANDATE;
+  if (!tools) return basePrompt;
+  let augmented = basePrompt;
+  if ("search_web" in tools) augmented += FACT_CHECK_MANDATE;
+  if ("code_execution" in tools) augmented += CODE_EXECUTION_MANDATE;
+  return augmented;
 }
 
 // ── Aggregator Prompt ───────────────────────────────────────────────────
@@ -759,17 +823,23 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           { role: "user", content: userMessage },
         ];
 
-        // PM #42 — role-aware tool assignment. Only reviewer + researcher
-        // personas get `search_web`; coder/tool/creative get no tools (the
-        // aggregator stitches their training-data ideation with the
-        // fact-checked claims from the research personas). When a persona
-        // DOES get search_web, the Fact-Check Mandate is appended to its
-        // system prompt — having the tool without the mandate was the
-        // observed cause of hallucinated library versions.
+        // PM #42 — role-aware tool assignment. Reviewer + researcher get
+        // `search_web` (with the Fact-Check Mandate). PM #50 extends this
+        // to give coder personas `code_execution` when the operator has
+        // opted in via `settings.codeExecution.proposerAccess === true`
+        // (off by default — child-process-per-proposer is a heavier
+        // failure surface than search_web and warrants explicit consent).
         const proposerTools = selectProposerTools(
           standardRole,
           searchEnabled,
-          settings.search
+          settings.search,
+          {
+            settings,
+            // Proposers run in the project root (or sandbox root for
+            // global chats). Sub-paths aren't supported on the proposer
+            // surface — they're synthesizers, not navigators.
+            cwd: getWorkDir(projectId),
+          }
         );
         const augmentedSystemPrompt = augmentProposerPromptForTools(
           proposer.systemPrompt,

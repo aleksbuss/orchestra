@@ -37,10 +37,17 @@ import path from "path";
 import readline from "readline/promises";
 import { stdin, stdout } from "process";
 
-const ROOT = process.cwd();
-const DATA_DIR = process.env.ORCHESTRA_DATA_DIR ?? path.join(ROOT, "data");
-const GLOBAL_TRACES_DIR = path.join(DATA_DIR, "traces");
-const PROJECTS_DIR = path.join(DATA_DIR, "projects");
+// Resolve lazily so tests can override ORCHESTRA_DATA_DIR per-case
+// without losing the override to module-load-time caching.
+function dataDir(): string {
+  return process.env.ORCHESTRA_DATA_DIR ?? path.join(process.cwd(), "data");
+}
+function globalTracesDir(): string {
+  return path.join(dataDir(), "traces");
+}
+function projectsDir(): string {
+  return path.join(dataDir(), "projects");
+}
 
 interface OnDiskTrace {
   id: string;
@@ -74,11 +81,11 @@ function parseScope(argv: string[]): Scope {
 }
 
 function projectTracesDir(projectId: string): string {
-  return path.join(PROJECTS_DIR, projectId, ".orchestra_traces");
+  return path.join(projectsDir(), projectId, ".orchestra_traces");
 }
 
 function dirForScope(scope: Exclude<Scope, { kind: "all" }>): string {
-  if (scope.kind === "global") return GLOBAL_TRACES_DIR;
+  if (scope.kind === "global") return globalTracesDir();
   return projectTracesDir(scope.projectId);
 }
 
@@ -109,7 +116,7 @@ async function loadTracesFromDir(
 
 async function listProjectIds(): Promise<string[]> {
   try {
-    const entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+    const entries = await fs.readdir(projectsDir(), { withFileTypes: true });
     return entries.filter((e) => e.isDirectory()).map((e) => e.name);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -120,7 +127,7 @@ async function listProjectIds(): Promise<string[]> {
 async function loadTraces(scope: Scope): Promise<TraceWithScope[]> {
   if (scope.kind === "all") {
     const result: TraceWithScope[] = [];
-    result.push(...(await loadTracesFromDir(GLOBAL_TRACES_DIR, "global")));
+    result.push(...(await loadTracesFromDir(globalTracesDir(), "global")));
     const projectIds = await listProjectIds();
     for (const pid of projectIds) {
       result.push(...(await loadTracesFromDir(projectTracesDir(pid), pid)));
@@ -184,12 +191,12 @@ async function cmdShow(id: string | undefined, scope: Scope): Promise<number> {
   // Show across whichever scope matches first under --all.
   const candidates: Array<{ dir: string; label: string }> = [];
   if (scope.kind === "all") {
-    candidates.push({ dir: GLOBAL_TRACES_DIR, label: "global" });
+    candidates.push({ dir: globalTracesDir(), label: "global" });
     for (const pid of await listProjectIds()) {
       candidates.push({ dir: projectTracesDir(pid), label: pid });
     }
   } else if (scope.kind === "global") {
-    candidates.push({ dir: GLOBAL_TRACES_DIR, label: "global" });
+    candidates.push({ dir: globalTracesDir(), label: "global" });
   } else {
     candidates.push({
       dir: projectTracesDir(scope.projectId),
@@ -405,5 +412,16 @@ if (invokedDirectly) {
   );
 }
 
-// Test-only exports.
-export { parseScope, dirForScope, projectTracesDir };
+// Test-only exports. The subcommand handlers are exported so unit
+// tests can exercise their I/O paths with a temp data dir without
+// shelling out to npm/tsx (slow + leaks process state).
+export {
+  parseScope,
+  dirForScope,
+  projectTracesDir,
+  loadTraces as __loadTracesForTests,
+  cmdList as __cmdListForTests,
+  cmdShow as __cmdShowForTests,
+  cmdDelete as __cmdDeleteForTests,
+  cmdStats as __cmdStatsForTests,
+};

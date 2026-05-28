@@ -185,6 +185,13 @@ export async function GET() {
   }
 
   // 7. Aggregator mode (PM #53 — surface PM #52 state)
+  // PM #56 — emit a `warn` row when the probe can't read settings rather
+  // than silently disappearing from the subsystem list. The audit found
+  // that a corrupt settings.json was dropping three new probes from the
+  // /health response — operators monitoring "11 subsystems" would see 8
+  // with no signal that the others failed. Now: absence is impossible;
+  // status: "warn" with a "couldn't read settings" detail makes the
+  // failure visible.
   try {
     const settings = await getSettings();
     const mode = settings.aggregator?.mode ?? "synthesis";
@@ -197,8 +204,12 @@ export async function GET() {
           ? `Tournament mode active (K=${judgeCount} judge${judgeCount === 1 ? "" : "s"}). See PM #52.`
           : `Synthesis mode (default). Set settings.aggregator.mode = "tournament" for code/math/factual prompts. See PM #52.`,
     });
-  } catch {
-    // Silently skip — settings already produced its own check above.
+  } catch (err) {
+    checks.push({
+      name: "aggregator_mode",
+      status: "warn",
+      detail: `Could not read settings to determine aggregator mode: ${err instanceof Error ? err.message : String(err)}. Defaults to synthesis at runtime.`,
+    });
   }
 
   // 8. Trace memory pool (PM #53 — surface PM #51 state)
@@ -232,8 +243,14 @@ export async function GET() {
             : `Trace memory enabled. Pool size: ${traceCount} trace(s). Inspect with \`npm run trace:list\`.`,
       });
     }
-  } catch {
-    // Silently skip.
+  } catch (err) {
+    // PM #56 — visible warn instead of silent skip (same rationale as
+    // aggregator_mode above).
+    checks.push({
+      name: "trace_memory",
+      status: "warn",
+      detail: `Could not probe trace-memory state: ${err instanceof Error ? err.message : String(err)}.`,
+    });
   }
 
   // 9. OpenRouter pricing cache (PM #53 — surface PM #49 state)
@@ -278,8 +295,15 @@ export async function GET() {
           : `Cache fresh. ${entryCount} models priced; age ${ageHours?.toFixed(1) ?? "?"}h.`,
       });
     }
-  } catch {
-    // Silently skip — the hardcoded fallback always works.
+  } catch (err) {
+    // PM #56 — visible warn instead of silent skip. Hardcoded fallback
+    // always works at runtime, but the operator should see that the
+    // cache probe couldn't run.
+    checks.push({
+      name: "openrouter_pricing_cache",
+      status: "warn",
+      detail: `Could not probe openrouter pricing cache: ${err instanceof Error ? err.message : String(err)}. Runtime falls back to hardcoded prices in pricing.ts.`,
+    });
   }
 
   const totalMs = Date.now() - startTotal;

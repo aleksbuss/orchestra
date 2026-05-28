@@ -1183,3 +1183,138 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
     ).resolves.toBeDefined();
   }, 30_000);
 });
+
+// PM #56 — integration coverage that PM #52 deferred: end-to-end
+// tournament path with all judges failing should fall through to the
+// synthesis aggregator. PR #52 unit-tested that `bordaCount` returns
+// empty winnerProposerId when zero judges succeed; this test pins that
+// runMoAEnsemble actually runs synthesis as the fallback (so the user
+// sees a real answer, not "(tournament failed)").
+describe("PM #56 — tournament-failure fallback to synthesis (PM #52 closure)", () => {
+  // PM #56 — `vi.clearAllMocks()` in the top-level beforeEach clears
+  // call history but does NOT empty the `mockResolvedValueOnce` queue.
+  // The PM #46 reflection tests above us queue 10 Once-mocks per case
+  // and only consume some — the leftovers shift our mock sequence.
+  // `mockReset()` empties the queue + restores default implementation.
+  beforeEach(() => {
+    mockedGenerateText.mockReset();
+    mockedGenerateObject.mockReset();
+  });
+
+  function tournamentSettings(): AppSettings {
+    return {
+      ...fakeSettings(),
+      aggregator: {
+        mode: "tournament",
+        tournamentJudgeCount: 2,
+      },
+    };
+  }
+
+  it("all judges fail → synthesis runs and produces the final text", async () => {
+    // Router: requiresSwarm with 3 personas.
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          {
+            id: "skeptic",
+            role: "QA Auditor",
+            systemPrompt: "[GOAL] Find flaws. [RULES] - [FORMAT] markdown",
+            color: "rose",
+          },
+          {
+            id: "coder",
+            role: "Senior Coder",
+            systemPrompt: "[GOAL] Code. [RULES] - [FORMAT] markdown",
+            color: "violet",
+          },
+          {
+            id: "analyst",
+            role: "Analyst",
+            systemPrompt: "[GOAL] Analyze. [RULES] - [FORMAT] markdown",
+            color: "blue",
+          },
+        ],
+      },
+    } as never);
+    // Proposers: three successful drafts via generateText.
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "Draft from skeptic" } as never)
+      .mockResolvedValueOnce({ text: "Draft from coder" } as never)
+      .mockResolvedValueOnce({ text: "Draft from analyst" } as never)
+      // Synthesis aggregator (the fallback path).
+      .mockResolvedValueOnce({
+        text: "Synthesized final answer from fallback path",
+      } as never);
+    // Tournament judges: BOTH fail via generateObject.
+    mockedGenerateObject
+      .mockRejectedValueOnce(new Error("judge #1 timeout"))
+      .mockRejectedValueOnce(new Error("judge #2 timeout"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c-tourn",
+      userMessage: "build a function",
+      history: [],
+      settings: tournamentSettings(),
+    });
+
+    // The final text MUST come from the synthesis fallback, NOT from
+    // any single proposer draft.
+    expect(result.text).toBe("Synthesized final answer from fallback path");
+    // Drafts ARE present (tournament ran, just no winner).
+    expect(result.drafts.length).toBe(3);
+  }, 30_000);
+
+  it("one judge succeeds → tournament winner is picked, NOT synthesis fallback", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          {
+            id: "skeptic",
+            role: "QA",
+            systemPrompt: "[GOAL] x [RULES] - [FORMAT] md",
+            color: "rose",
+          },
+          {
+            id: "coder",
+            role: "Coder",
+            systemPrompt: "[GOAL] x [RULES] - [FORMAT] md",
+            color: "violet",
+          },
+          {
+            id: "analyst",
+            role: "Analyst",
+            systemPrompt: "[GOAL] x [RULES] - [FORMAT] md",
+            color: "blue",
+          },
+        ],
+      },
+    } as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "Skeptic's draft" } as never)
+      .mockResolvedValueOnce({ text: "Coder's draft" } as never)
+      .mockResolvedValueOnce({ text: "Analyst's draft" } as never);
+    // Tournament: judge #1 fails, judge #2 picks "coder".
+    mockedGenerateObject
+      .mockRejectedValueOnce(new Error("judge #1 timeout"))
+      .mockResolvedValueOnce({
+        object: { rankedProposerIds: ["coder", "analyst", "skeptic"] },
+      } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c-tourn-2",
+      userMessage: "x",
+      history: [],
+      settings: tournamentSettings(),
+    });
+
+    // Coder's draft wins verbatim — no synthesis call needed.
+    expect(result.text).toBe("Coder's draft");
+    // Synthesis was NOT called (1 router + 3 proposers + 2 judges = 6 LLM
+    // calls, but generateText only ran for the 3 proposers; the 4th
+    // generateText would be the synthesis we deliberately skipped).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(3);
+  }, 30_000);
+});

@@ -38,6 +38,63 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 56. Test Coverage Gaps from PM #48–53 Audit — Closed
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (no live incident; closes the test-side blind spots the audit flagged)
+**Symptoms:** No live incident. PMs #48–53 each shipped with boundary-only unit tests but the audit found four classes of behavior that were untested end-to-end:
+
+  1. **PM #52 tournament fallback to synthesis.** The unit test pinned `bordaCount` returning empty winnerProposerId when zero judges succeeded — but no test confirmed that `runMoAEnsemble` actually runs synthesis as the fallback. We were trusting code reading on a P0 path: "all judges fail → user sees a real answer".
+
+  2. **PM #53 CLI subcommands** (`cmdList`, `cmdShow`, `cmdDelete`, `cmdStats`). Only `computeStats` was unit-tested — the I/O handlers (the actual code paths the operator hits) were on trust.
+
+  3. **PM #53 health-route corrupt-settings path.** When `getSettings()` threw, the three new PM #53 subsystems (aggregator_mode, trace_memory, openrouter_pricing_cache) silently disappeared from the response — operators monitoring "11 subsystems" saw 8 with no signal that the others failed. This was both a behavioral bug AND a test gap.
+
+  4. **PM #49 HMR-class repeated-fetch resilience.** Next.js dev-mode HMR resets module-level state on every file save — including `inMemoryPricing` in the OpenRouter cache. Without a working disk-cache fallback, every save would dump a fresh fetch on OpenRouter. The dev-mode degradation path wasn't tested.
+
+**Root Cause.** Each gap traces to PM-authored test boundaries that pinned the local invariant without composing into an end-to-end scenario.
+
+  - (1) PM #52 unit tests covered `bordaCount` separately and `runTournamentAggregation` separately. The composition through `runMoAEnsemble` was code-reviewed but never executed in a test.
+  - (2) PM #53 CLI authoring prioritized shipping; the subcommand handlers had no exported seams for unit-testing.
+  - (3) PM #53's three probes used `try { ... } catch { /* silently skip */ }`. The catch hid the failure mode from the response; tests verifying the happy path didn't fail on the broken path because the subsystems just weren't there.
+  - (4) PM #49's `refreshOpenRouterPricingCache` orchestration had per-stage unit tests but no test for the cold-memory + warm-disk scenario that HMR makes the normal case in dev.
+
+**Resolution.** Code + test changes across four surfaces.
+
+  1. **Tournament fallback integration test.** [`moa.test.ts`](src/lib/agent/moa.test.ts) — two new cases under "PM #56 — tournament-failure fallback to synthesis":
+     - All K judges fail (`generateObject` rejects) → synthesis `generateText` runs as the fallback → final text comes from the synthesis output, not from any single proposer draft.
+     - One judge succeeds → tournament winner is picked verbatim → synthesis is NOT called (verifies `generateText` count = 3 proposers only).
+     Test-isolation gotcha: the PM #46 reflection tests upstream queue 10 `mockResolvedValueOnce` per case but consume only 6 — leftover queue entries shifted my mock sequence and made the test pass-in-isolation but fail in the full suite. Fixed by adding an explicit `mockedGenerateText.mockReset()` + `mockedGenerateObject.mockReset()` in the PM #56 describe's beforeEach. `vi.clearAllMocks()` (the file-level beforeEach) clears call history but does NOT empty the Once-queue — this is a Vitest semantic worth knowing.
+
+  2. **CLI subcommand handler tests.** [`scripts/trace-memory-admin.ts`](scripts/trace-memory-admin.ts) refactored to expose `cmdList`/`cmdShow`/`cmdDelete`/`cmdStats` as test-only exports (`__cmdListForTests`, etc.). [`scripts/trace-memory-admin.test.ts`](scripts/trace-memory-admin.test.ts) — 11 new cases exercising the handlers with a temp `ORCHESTRA_DATA_DIR` and stdout interception: list-empty-pool, list-sorted-by-score-desc, list-`--all`-walks-everywhere, show-missing-id, show-unknown-id, show-existing-trace, show-finds-under-`--all`, delete-refuses-`--all`, delete-removes-file, stats-empty-pool, stats-prints-score-range. Bonus refactor: `DATA_DIR` const → `dataDir()` function so tests can override `ORCHESTRA_DATA_DIR` per-case without losing the override to module-load caching.
+
+  3. **Health-route warn-on-probe-failure.** [`src/app/api/health/route.ts`](src/app/api/health/route.ts) — the three PM #53 probes now emit `status: "warn"` rows with a `"Could not read/probe ..."` detail when their inner try throws, instead of silently skipping. The subsystem order stays canonical; the operator monitoring "11 subsystems" sees 11 even under settings corruption. [`route.test.ts`](src/app/api/health/route.test.ts) — 3 new cases: getSettings-throws → aggregator_mode + trace_memory still appear as warn; subsystem order preserved under failure; overall status degrades but the warn rows are still surfaced (so dashboards parsing by name continue to work).
+
+  4. **OpenRouter HMR-style repeat-call resilience.** [`openrouter-pricing.test.ts`](src/lib/cost/openrouter-pricing.test.ts) — 2 new cases:
+     - HMR-style reload (`__resetOpenRouterPricingForTests()` between calls) + disk cache fresh → `source: "memory"` AND `fetchSpy.toHaveBeenCalledTimes(0)`. Critical: the disk fallback kicks in to spare OpenRouter from per-save traffic.
+     - HMR-style reload + STALE disk cache → exactly one network call (not many).
+
+**Behavioral correction — not just a test.** The health-route change is functionally observable. Before PM #56, an operator with corrupt settings.json saw "settings: error" plus 7 other rows. After PM #56, they see "settings: error" + 3 explicit "Could not probe X: <reason>" rows for the PM #53 surfaces. Dashboards parsing by subsystem name continue to work without changes.
+
+**Test-side gain.**
+  - Tournament path: previously 0 integration tests, now 2.
+  - CLI: previously 1 stats unit test, now 11 handler tests + 1 stats unit test.
+  - Health: previously 8 cases for the original probes + 13 for PM #53 surfaces, now 32 total (+ 3 corruption-path cases).
+  - OpenRouter: previously 21 unit tests, now 23 (+ 2 HMR-class cases).
+
+**Regression Coverage Summary:** 16 new tests total (366 passing across the agent + cost + health + scripts surfaces).
+
+**Doc Updates:**
+  - [`POST_MORTEMS.md`](POST_MORTEMS.md) — PM #56 entry.
+  - No README change — the operator-facing behavior (CLI works, health probe surfaces state) was already documented in PM #53's recipe section.
+  - No CLAUDE.md change — the doc-as-code rules already require regression tests on architectural fixes. PM #56 is the act of following the rule.
+
+**Rule (extended):** "Feature done means tested + operable + observable + audited against every existing opt-in" (the PM #54 rule). PM #56 adds: **integration-tested**. Unit tests pin local invariants; integration tests pin compositions. When two features compose (PM #52 tournament composes with PM #51 trace memory composes with PM #36 cost banner — and ALL of them with `runMoAEnsemble`), at least one test must exercise the composition end-to-end with mocked external dependencies. Boundary tests catch local regressions; integration tests catch the "wiring drifted" regressions. Both, not either.
+
+**Tech debt — Vitest `mockResolvedValueOnce` queue across tests** is now documented (see PM #56 closing notes). `vi.clearAllMocks()` clears call history but does NOT empty the Once queue. Tests that script mock sequences with `mockResolvedValueOnce` across many cases in the same file should add explicit `mockReset()` in their local describe beforeEach. The PM #56 tournament tests demonstrate the pattern.
+
+---
+
 ## 55. Per-Project Trace Scoping + CLI Cache Invalidation + Aggregator-Mode Metadata
 **Date:** 2026-05
 **Status:** RESOLVED

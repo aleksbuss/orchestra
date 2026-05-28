@@ -38,6 +38,60 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 45. Self-Audit Bug-Fix Bundle — Unified Skeptic Detection + Embeddings Type-Drift + Eval Polish
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (two real bugs introduced/missed across PM #37, #42, #43; no incident yet)
+**Symptoms:** No live incident. Surfaced by the 2026-05-28 deep audit of the PM #36-#44 batch. Three real issues plus minor polish:
+
+### Bug 1: PM #37 ↔ PM #42 regex inconsistency on skeptic detection
+PM #37's `SKEPTIC_PATTERN` regex (`/skeptic|auditor|critic|red.?team|fact.?check|adversari/i`) and PM #42's `detectProposerRole` reviewer regex (`/review|critic|audit|qa|quality|skeptic|adversar|red.?team|fact.?check/`) diverged on:
+  - **PM #42 includes but PM #37 misses:** `review`, `audit` (whole word, not "auditor"), `qa`, `quality`.
+
+**Concrete failure mode:** if DPG returns 5 personas including `qa_engineer`:
+  - PM #42 classifies it as `reviewer` → grants `search_web` + Fact-Check Mandate (correct).
+  - PM #37's SKEPTIC_PATTERN does NOT match `qa` → thinks the swarm is missing a skeptic → force-injects `critic` → 6 personas → cap-at-5 evicts the LAST persona (which might be more valuable than the generic critic). Result: two reviewer-shape personas (`qa_engineer` + `critic`), competing for the same role; one important persona evicted.
+
+**Second under-bug:** `detectProposerRole`'s pre-fix blob was `id + " " + systemPrompt` — it omitted the `role` field. The pre-PM-45 `SKEPTIC_PATTERN` explicitly checked `id || role`. Migrating PM #37 to use `detectProposerRole` without also extending the blob would have regressed personas like `{ id: "beta", role: "Code Reviewer", systemPrompt: "..." }` whose review keyword lives ONLY in the role field.
+
+### Bug 2: PM #43 — sglang/vllm absent from `embeddingsModel.provider` union
+`createEmbeddingModel` in [`llm-provider.ts`](src/lib/providers/llm-provider.ts) had switch cases for `"sglang"` and `"vllm"` (added in PM #43), but the `AppSettings.embeddingsModel.provider` union in [`types.ts`](src/lib/types.ts) was never extended. Operators couldn't set SGLang/vLLM as the embeddings provider through the typed settings surface — schema-vs-runtime drift.
+
+### Polish 1: Eval case 10 smoke assertion too permissive
+`{ "type": "matches", "pattern": "[a-z]", "flags": "i" }` passes on ANY single-letter response. Description promised "non-empty + Orchestra-ish content" but assertion only checked the first part.
+
+### Polish 2: PM #42 `maxSteps` change had no direct test
+PM #42 changed proposer dispatch from `maxSteps: searchEnabled ? 3 : 1` to `maxSteps: proposerTools ? 3 : 1`. Behavioral correctness was verified manually but no assertion pinned the new contract.
+
+**Detection:** 2026-05-28 deep audit using parallel sub-agents on PM #37/#42 and PM #43, followed by manual verification — agent claims independently confirmed against actual code (one runtime regex test: `node -e "..."` showed PM #37 missing "qa", PM #42 catching it).
+
+**Root Cause:** Three parallel cuts in different PRs (PM #37, #42, #43) each made local changes without checking the shared invariants:
+  - PM #37 owned its own regex inline; PM #42 added a similar-but-different regex in a different function; neither PR cross-referenced.
+  - PM #43 extended ModelConfig.provider union but forgot the parallel union in embeddingsModel.provider that wasn't touched.
+  - Eval cases were author-validated visually but no second pass verified they actually pin meaningful behavior.
+
+**Resolution:**
+
+1. **Unified skeptic detection.** Removed the inline `SKEPTIC_PATTERN` in `generateDynamicSwarm`; now calls `detectProposerRole(p) === "reviewer"`. Single source of truth for "what counts as a skeptic-shape persona".
+
+2. **Extended `detectProposerRole` blob to include `role`.** Was `id + " " + systemPrompt`; now `id + " " + role + " " + systemPrompt`. Restores the field coverage PM #37's original `SKEPTIC_PATTERN.test(p.id) || SKEPTIC_PATTERN.test(p.role)` provided.
+
+3. **Added `"sglang" | "vllm"` to `AppSettings.embeddingsModel.provider` union.** Closes the schema-vs-runtime drift.
+
+4. **Replaced eval case 10's single `[a-z]` assertion** with two: (a) sentence shape — `\b\w+\b.*\b\w+\b.*\b\w+\b` requires ≥3 words; (b) confirmation-language — `(understood|confirm|received|got it|acknowledge|yes)` to verify the model actually responded to the prompt, not just emitted text.
+
+5. **Added 4 new assertion tests** in `moa.test.ts`:
+   - PM #45 a: search enabled → researcher + reviewer get `maxSteps:3`, coder gets `maxSteps:1` (NEW behavior; old code would set 3 for everyone).
+   - PM #45 b: search disabled → every proposer gets `maxSteps:1` AND `tools: undefined`.
+   - PM #45 c: `qa_engineer` persona (no explicit "critic" id) → NO double-injection (was the live bug).
+   - PM #45 d: persona with "Code Reviewer" in `role` field → recognized via blob expansion → NO double-injection.
+
+**Regression Coverage:** 4 new cases in [`src/lib/agent/moa.test.ts`](src/lib/agent/moa.test.ts). All previously-existing cases (PM #37, #38, #39, #40, #42) still pass — the unified detection is strict-superset of the old `SKEPTIC_PATTERN`'s catch list.
+**Doc Updates:** None to CLAUDE.md — these are bug fixes, not new architectural rules. The lesson ("when two PRs add similar regexes, unify on import") is encoded in the new code, not in a new rule.
+**Rule:** When extracting an inline regex/predicate into a reusable helper, audit OTHER callsites in the codebase that test the same shape — they should migrate to the helper too in the SAME PR. Two similar-but-different regexes are worse than one inline one because they create silent classification disagreement. Grep audit before merging any new helper that wraps domain-specific logic: `grep -rn "<old-pattern>" src/` and convert every hit.
+
+---
+
 ## 44. Hardware Fingerprint + Per-Host MoA Config Recommendations on Boot
 **Date:** 2026-05
 **Status:** RESOLVED

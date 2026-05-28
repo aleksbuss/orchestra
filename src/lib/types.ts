@@ -34,7 +34,11 @@ export interface AppSettings {
   chatModel: ModelConfig;
   utilityModel: ModelConfig;
   embeddingsModel: {
-    provider: "openai" | "openrouter" | "google" | "ollama" | "custom" | "mock";
+    // PM #45 — sglang + vllm added here too. `createEmbeddingModel` in
+    // `llm-provider.ts` already had switch cases for both (PM #43), but
+    // this union didn't, so operators couldn't set them via the typed
+    // settings surface. Schema-vs-runtime drift, now closed.
+    provider: "openai" | "openrouter" | "google" | "ollama" | "sglang" | "vllm" | "custom" | "mock";
     model: string;
     apiKey?: string;
     baseUrl?: string;

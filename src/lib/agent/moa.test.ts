@@ -579,6 +579,161 @@ describe("PM #40 — aggregator prompt adapted from togethercomputer/MoA", () =>
   }, 30_000);
 });
 
+describe("PM #45 — proposer maxSteps gates on tool availability (not searchEnabled)", () => {
+  // Audit finding: PM #42 switched proposer dispatch from `maxSteps:
+  // searchEnabled ? 3 : 1` to `maxSteps: proposerTools ? 3 : 1`. The
+  // change is correct (a coder persona without tools shouldn't pay for
+  // 2 unused tool-call rounds) but was not directly asserted in tests.
+  // These cases pin the new contract so a future "quick refactor" can't
+  // silently regress to the searchEnabled-only gating.
+  function basePersonas() {
+    return [
+      // analyst → researcher (gets search_web → maxSteps 3)
+      { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] analyze [RULES] data-driven [FORMAT] markdown", color: "blue" as const },
+      // creative → coder (no tools → maxSteps 1)
+      { id: "creative", role: "Creative Brainstormer", systemPrompt: "[GOAL] ideate [RULES] no judgment [FORMAT] bullets", color: "green" as const },
+      // critic → reviewer (gets search_web → maxSteps 3)
+      { id: "critic", role: "Adversarial Critic", systemPrompt: "[GOAL] doubt [RULES] hunt edge cases [FORMAT] structured", color: "rose" as const },
+    ];
+  }
+
+  it("with search enabled: researcher + reviewer proposers get maxSteps:3, coder gets maxSteps:1", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { requiresSwarm: true, personas: basePersonas() },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "draft text long enough to skip reflection short-circuit logic.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    const settings: AppSettings = {
+      ...fakeSettings(),
+      search: { enabled: true, provider: "tavily", apiKey: "test" },
+    };
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "test",
+      history: [],
+      settings,
+    });
+
+    // Collect maxSteps per proposer call (calls 1-3 are proposers; the
+    // last is aggregator which doesn't use maxSteps).
+    const proposerCalls = mockedGenerateText.mock.calls.slice(0, 3) as Array<
+      [{ system: string; maxSteps?: number }]
+    >;
+
+    // analyst (researcher) → 3
+    const analystCall = proposerCalls.find((c) => c[0].system.includes("analyze"));
+    expect(analystCall?.[0].maxSteps).toBe(3);
+
+    // creative (coder) → 1 (NEW behavior; old code would have been 3)
+    const creativeCall = proposerCalls.find((c) => c[0].system.includes("ideate"));
+    expect(creativeCall?.[0].maxSteps).toBe(1);
+
+    // critic (reviewer) → 3
+    const criticCall = proposerCalls.find((c) => c[0].system.includes("doubt"));
+    expect(criticCall?.[0].maxSteps).toBe(3);
+  }, 30_000);
+
+  it("with search disabled: every proposer gets maxSteps:1 (no tools assigned to anyone)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { requiresSwarm: true, personas: basePersonas() },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "draft text long enough to skip reflection short-circuit logic.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "test",
+      history: [],
+      settings: fakeSettings(), // search.enabled === false
+    });
+
+    const proposerCalls = mockedGenerateText.mock.calls.slice(0, 3) as Array<
+      [{ system: string; maxSteps?: number; tools?: object }]
+    >;
+    for (const call of proposerCalls) {
+      expect(call[0].maxSteps).toBe(1);
+      expect(call[0].tools).toBeUndefined();
+    }
+  }, 30_000);
+});
+
+describe("PM #45 — unified skeptic detection (no double-injection on 'qa_engineer'-shape ids)", () => {
+  // Audit finding: PM #37 used its own SKEPTIC_PATTERN regex; PM #42
+  // used detectProposerRole's reviewer regex. They diverged on "qa",
+  // "quality", "review" keywords. A DPG-returned persona "qa_engineer"
+  // would be (a) recognized as a reviewer by PM #42 (gets search_web),
+  // (b) NOT recognized as a skeptic by PM #37 (critic force-injected
+  // anyway) — leaving two reviewer-shape personas in the swarm.
+  //
+  // PM #45 unifies both call sites on detectProposerRole. These tests
+  // pin the behavior across the previously-divergent cases.
+  it("DPG returns 'qa_engineer' (no explicit critic id) → NO double-injection", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "tax_lawyer", role: "Senior Tax Attorney", systemPrompt: "[GOAL] tax [RULES] cite IRC [FORMAT] markdown", color: "blue" },
+          // "qa_engineer" — matches PM #42's reviewer regex but did NOT
+          // match PM #37's pre-fix SKEPTIC_PATTERN.
+          { id: "qa_engineer", role: "QA Engineer", systemPrompt: "[GOAL] verify [RULES] hunt regressions [FORMAT] bullets", color: "amber" },
+          { id: "domain_expert", role: "Domain Expert", systemPrompt: "[GOAL] depth [RULES] cite sources [FORMAT] structured", color: "purple" },
+        ],
+      },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "ok draft text long enough to skip reflection short-circuit.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "tax + compliance question",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Exactly 3 drafts — qa_engineer is recognized as the skeptic, NO
+    // duplicate critic injected. Pre-PM #45 this returned 4 drafts.
+    expect(result.drafts).toHaveLength(3);
+    const ids = result.drafts.map((d) => d.proposerId);
+    expect(ids).toContain("qa_engineer");
+    expect(ids).not.toContain("critic"); // would have been added by PM #37 alone
+  }, 30_000);
+
+  it("DPG returns persona with 'review' in role string → NO double-injection", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "alpha", role: "Senior Alpha", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "blue" },
+          { id: "beta", role: "Code Reviewer", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "amber" },
+          { id: "gamma", role: "Implementer", systemPrompt: "[GOAL] g [RULES] r [FORMAT] f", color: "green" },
+        ],
+      },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "draft text long enough to skip reflection short-circuit.",
+      usage: { inputTokens: 50, outputTokens: 30 },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "build me x",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.drafts).toHaveLength(3);
+    expect(result.drafts.map((d) => d.proposerId)).not.toContain("critic");
+  }, 30_000);
+});
+
 describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
   // Audit finding: reflection.ts was thoroughly tested but never wired in.
   // These tests pin the integration: when settings.reflection.enabled is

@@ -19,6 +19,10 @@
  *      operator sees on boot which local backends are reachable and
  *      gets a hint to launch SGLang with `--enable-prefix-caching` if
  *      missing. Fire-and-forget (the boot doesn't wait on probes).
+ *   4. PM #44 — `buildHardwareReport()` fingerprints CPU/RAM/GPU and
+ *      logs three suggested MoA configs (speed/balanced/quality)
+ *      tailored to the host. First-touch wow-effect for power users
+ *      with a 24GB GPU or 64GB Apple Silicon. Fire-and-forget too.
  *
  * Test coverage lives in `instrumentation.test.ts` against the public
  * `register()` surface; this file has no own test because its body is
@@ -59,5 +63,21 @@ void (async () => {
     }
   } catch (err) {
     console.warn("[LocalBackends] probe failed (non-fatal):", err);
+  }
+})();
+
+// PM #44 — hardware fingerprint + MoA config recommendations. Same
+// fire-and-forget shape; output is informative, not load-bearing. The
+// operator sees a multi-line block describing their hardware and three
+// suggested configs they can paste into Settings.
+void (async () => {
+  try {
+    const { buildHardwareReport } = await import(
+      "@/lib/providers/hardware-detect"
+    );
+    const report = await buildHardwareReport();
+    console.log(report.summary);
+  } catch (err) {
+    console.warn("[Hardware] fingerprint failed (non-fatal):", err);
   }
 })();

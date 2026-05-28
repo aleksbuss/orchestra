@@ -38,6 +38,47 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 44. Hardware Fingerprint + Per-Host MoA Config Recommendations on Boot
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (UX wow-effect, not a defect)
+**Symptoms:** No live incident. The 2026-05-27 roadmap identified "first-touch wow-effect" as critical for power-user onboarding. A user with a 24GB RTX 4090 had no way to know what models they could practically run for Orchestra's 5-proposer MoA fan-out without manually researching Qwen / Llama variants vs VRAM headroom. Without this guidance, Orchestra felt like "another wrapper" — operator had to do their own homework on quantization choices, model sizes, expected latencies.
+**Root Cause:** No automatic hardware introspection. The settings UI had model dropdowns but no contextual hints about what fits on the operator's hardware.
+**Resolution:** New module [`src/lib/providers/hardware-detect.ts`](src/lib/providers/hardware-detect.ts):
+  1. **`detectHardware()`** — async probe returning `{ platform, arch, cpuCount, ramGB, appleSilicon, gpu? }`. GPU detection via `nvidia-smi --query-gpu=memory.total,name --format=csv,noheader,nounits` with 2s timeout. Never throws — hosts without `nvidia-smi` in PATH simply return `gpu: undefined`. Apple Silicon is detected via `platform === "darwin" && arch === "arm64"`; unified memory is reported via `os.totalmem()`.
+  2. **`recommendMoAConfigs(hw)`** — pure function mapping fingerprint → three opinionated configs (speed / balanced / quality). Branch tree:
+     - NVIDIA 22GB+ (3090/4090/5090) → 7B proposers / 7B-32B aggregators · SGLang · 5-60s per turn
+     - NVIDIA 12-16GB (4070/4080) → 7B proposers / 7B-14B aggregators · SGLang · no 32B fit
+     - NVIDIA ≤ 8GB → 3B-7B · SGLang · "drop to 3 proposers if OOM"
+     - Apple Silicon ≥ 48GB (M3/M4 Max class) → 7B-14B-32B mix · Ollama
+     - Apple Silicon 24-32GB → 7B-14B · Ollama · no 32B aggregator
+     - Apple Silicon < 24GB (M1/M2 8-16GB) → 3B-7B · Ollama
+     - x86 without NVIDIA → cloud Claude/GPT recommendations (CPU-only MoA is impractical)
+  3. **`formatHardwareReport()`** — renders the multi-line operator-facing block.
+  4. **Wired into [`src/instrumentation-node.ts`](src/instrumentation-node.ts)** as fire-and-forget on cold boot (PM #35 lifecycle). Operator sees on every restart:
+     ```
+     [Hardware] Apple Silicon · 16GB unified memory · 10 cores · darwin/arm64
+     [Hardware] Suggested MoA configs (open Settings → Models to apply):
+       - speed    qwen2.5:3b proposers / qwen2.5:3b aggregator @ Q4_K_M · ollama · ~10-20s per Swarm turn
+       - balanced qwen2.5:3b proposers / qwen2.5:7b aggregator @ Q4_K_M · ollama · ~20-40s per Swarm turn
+       - quality  qwen2.5:7b proposers / qwen2.5:7b aggregator @ Q4_K_M · ollama · ~40-80s per Swarm turn
+     ```
+
+**Design choices:**
+  - **Conservative defaults.** Recommendations target Q4_K_M quantization — the practical sweet spot for consumer hardware (5× smaller than fp16, minimal quality loss for 7B+ models). Operators can upgrade in Settings.
+  - **Qwen2.5 default model family.** Best-in-class OSS as of 2026-05; validated in Orchestra's MoA workloads during the audit.
+  - **Backend defaults.** SGLang for NVIDIA (RadixAttention is the MoA killer feature — see PM #43); Ollama for Apple Silicon (only stable backend with Metal support); cloud for everyone else (CPU-only MoA is >2min/turn which is unacceptable UX).
+
+**What this is NOT yet:**
+  - Not auto-applying the recommendation. The operator still picks via Settings UI. The boot log is a hint, not a config mutator.
+  - Not AMD/Intel GPU aware. Only NVIDIA via nvidia-smi. AMD ROCm + Intel ARC paths exist but require platform-specific probes; defer until a real user runs Orchestra on those stacks.
+
+**Regression Coverage:** [`src/lib/providers/hardware-detect.test.ts`](src/lib/providers/hardware-detect.test.ts) — 18 cases pinning the recommender across every VRAM/RAM tier branch. Live boot verified on Apple M-series (this commit's host).
+**Doc Updates:** None to CLAUDE.md required — this is a feature, not an architectural rule.
+**Rule:** When recommending hardware-dependent configs, fingerprint EVERY axis the recommendation depends on (VRAM, RAM, platform, arch) and branch on the LEAST capable. If even ONE axis is unknown (e.g., `gpu: undefined`), fall back to a safer recommendation rather than blocking on detection — operator's onboarding shouldn't fail because nvidia-smi isn't in PATH.
+
+---
+
 ## 43. SGLang + vLLM Provider Support + Local-Backend Auto-Detection
 **Date:** 2026-05
 **Status:** RESOLVED

@@ -1,28 +1,36 @@
 /**
- * PM #53 — Operator CLI for inspecting and curating the PM #51 trace
- * pool at `data/traces/`. PM #51 said retention was "operator-controlled"
- * but there was no tool; this script is the tool.
+ * PM #53 (extended by PM #55) — Operator CLI for inspecting and
+ * curating the trace pool at `data/traces/` (global) and
+ * `data/projects/<projectId>/.orchestra_traces/` (per-project).
  *
  * Subcommands:
- *   list           — table of all traces (id, score, captured-at, prompt
- *                    summary). Sorted by score descending.
+ *   list           — table of traces (id, scope, score, captured-at,
+ *                    prompt summary). Sorted by score descending.
  *   show <id>      — full trace JSON, pretty-printed.
- *   stats          — total count, score distribution (min/max/median/mean),
- *                    oldest/newest, average prompt+answer length.
- *   clear          — wipe all traces. Requires the operator to type
- *                    `yes` to confirm — guards against accidental sweep.
+ *   stats          — pool count, score distribution, oldest/newest,
+ *                    avg prompt+answer length.
+ *   clear          — wipe all traces in scope. Typed `yes` confirmation.
  *   delete <id>    — remove a single trace file.
  *
- * Usage:
- *   npm run trace:list
- *   npm run trace:show <id>
- *   npm run trace:stats
- *   npm run trace:clear
- *   npm run trace:delete <id>
+ * Scope flags (apply to all subcommands except `show` which takes <id>):
+ *   --global              (default) operate on the global pool
+ *                         data/traces/<id>.json
+ *   --project <projectId> operate on that project's pool
+ *                         data/projects/<projectId>/.orchestra_traces/
+ *   --all                 walk global AND every project pool found
+ *                         under data/projects/. Only meaningful for
+ *                         `list`/`stats`. Refused by `clear`/`delete`
+ *                         to prevent accidental cross-scope wipe.
+ *
+ * Usage examples:
+ *   npm run trace:list                    # global pool
+ *   npm run trace:list -- --all           # global + every project
+ *   npm run trace:list -- --project p123  # one project
+ *   npm run trace:stats -- --project p123
+ *   npm run trace:clear -- --project p123 # wipe only that project's pool
  *
  * Pure CLI — does not import the runtime trace-memory module to keep
- * boot fast and avoid pulling in the Vercel AI SDK. We re-read the
- * JSON files directly and operate on their on-disk shape.
+ * boot fast and avoid pulling in the Vercel AI SDK.
  */
 import { promises as fs } from "fs";
 import path from "path";
@@ -30,40 +38,97 @@ import readline from "readline/promises";
 import { stdin, stdout } from "process";
 
 const ROOT = process.cwd();
-const TRACES_DIR = process.env.ORCHESTRA_DATA_DIR
-  ? path.join(process.env.ORCHESTRA_DATA_DIR, "traces")
-  : path.join(ROOT, "data", "traces");
+const DATA_DIR = process.env.ORCHESTRA_DATA_DIR ?? path.join(ROOT, "data");
+const GLOBAL_TRACES_DIR = path.join(DATA_DIR, "traces");
+const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 
 interface OnDiskTrace {
   id: string;
   userPrompt: string;
   finalText: string;
-  signals?: Record<string, number | boolean>;
+  signals?: Record<string, number | boolean | string>;
   qualityScore: number;
   modelConfig: { provider: string; model: string };
   capturedAt: string;
   embedding: number[];
+  projectId?: string;
 }
 
-async function loadAllTraces(): Promise<OnDiskTrace[]> {
-  let dirEntries: string[];
+interface TraceWithScope extends OnDiskTrace {
+  scope: string; // "global" or projectId
+}
+
+type Scope =
+  | { kind: "global" }
+  | { kind: "project"; projectId: string }
+  | { kind: "all" };
+
+/** Parse `--global` / `--project <id>` / `--all` from argv. Default = global. */
+function parseScope(argv: string[]): Scope {
+  if (argv.includes("--all")) return { kind: "all" };
+  const projectIdx = argv.indexOf("--project");
+  if (projectIdx >= 0 && argv[projectIdx + 1]) {
+    return { kind: "project", projectId: argv[projectIdx + 1] };
+  }
+  return { kind: "global" };
+}
+
+function projectTracesDir(projectId: string): string {
+  return path.join(PROJECTS_DIR, projectId, ".orchestra_traces");
+}
+
+function dirForScope(scope: Exclude<Scope, { kind: "all" }>): string {
+  if (scope.kind === "global") return GLOBAL_TRACES_DIR;
+  return projectTracesDir(scope.projectId);
+}
+
+async function loadTracesFromDir(
+  dir: string,
+  scopeLabel: string
+): Promise<TraceWithScope[]> {
+  let entries: string[];
   try {
-    dirEntries = await fs.readdir(TRACES_DIR);
+    entries = await fs.readdir(dir);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
   }
-  const traces: OnDiskTrace[] = [];
-  for (const entry of dirEntries) {
+  const out: TraceWithScope[] = [];
+  for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
     try {
-      const raw = await fs.readFile(path.join(TRACES_DIR, entry), "utf-8");
-      traces.push(JSON.parse(raw) as OnDiskTrace);
+      const raw = await fs.readFile(path.join(dir, entry), "utf-8");
+      const parsed = JSON.parse(raw) as OnDiskTrace;
+      out.push({ ...parsed, scope: scopeLabel });
     } catch {
       // Skip corrupt files silently.
     }
   }
-  return traces;
+  return out;
+}
+
+async function listProjectIds(): Promise<string[]> {
+  try {
+    const entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+    return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+async function loadTraces(scope: Scope): Promise<TraceWithScope[]> {
+  if (scope.kind === "all") {
+    const result: TraceWithScope[] = [];
+    result.push(...(await loadTracesFromDir(GLOBAL_TRACES_DIR, "global")));
+    const projectIds = await listProjectIds();
+    for (const pid of projectIds) {
+      result.push(...(await loadTracesFromDir(projectTracesDir(pid), pid)));
+    }
+    return result;
+  }
+  const scopeLabel = scope.kind === "global" ? "global" : scope.projectId;
+  return loadTracesFromDir(dirForScope(scope), scopeLabel);
 }
 
 function truncate(s: string, max: number): string {
@@ -76,60 +141,88 @@ function padEnd(s: string, n: number): string {
   return s + " ".repeat(n - s.length);
 }
 
-async function cmdList(): Promise<number> {
-  const traces = await loadAllTraces();
+function describeScope(scope: Scope): string {
+  if (scope.kind === "global") return "global pool";
+  if (scope.kind === "project") return `project "${scope.projectId}"`;
+  return "all scopes (global + every project)";
+}
+
+async function cmdList(scope: Scope): Promise<number> {
+  const traces = await loadTraces(scope);
   if (traces.length === 0) {
-    console.log("(no traces — pool is empty)");
+    console.log(`(no traces in ${describeScope(scope)})`);
     return 0;
   }
   traces.sort((a, b) => b.qualityScore - a.qualityScore);
+  // Column widths: id 18, scope 18, score 8, captured 22, prompt rest.
   console.log(
-    padEnd("ID", 18) + padEnd("SCORE", 8) + padEnd("CAPTURED", 22) + "PROMPT"
+    padEnd("ID", 18) +
+      padEnd("SCOPE", 18) +
+      padEnd("SCORE", 8) +
+      padEnd("CAPTURED", 22) +
+      "PROMPT"
   );
   console.log("-".repeat(120));
   for (const t of traces) {
     console.log(
       padEnd(t.id, 18) +
+        padEnd(truncate(t.scope, 17), 18) +
         padEnd(t.qualityScore.toFixed(3), 8) +
         padEnd(t.capturedAt.replace("T", " ").slice(0, 19), 22) +
-        truncate(t.userPrompt.replace(/\s+/g, " "), 70)
+        truncate(t.userPrompt.replace(/\s+/g, " "), 60)
     );
   }
-  console.log(`\n${traces.length} trace(s).`);
+  console.log(`\n${traces.length} trace(s) across ${describeScope(scope)}.`);
   return 0;
 }
 
-async function cmdShow(id: string | undefined): Promise<number> {
+async function cmdShow(id: string | undefined, scope: Scope): Promise<number> {
   if (!id) {
-    console.error("Usage: npm run trace:show <id>");
+    console.error("Usage: npm run trace:show -- <id> [--project <projectId>]");
     return 1;
   }
-  const filePath = path.join(TRACES_DIR, `${id}.json`);
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      console.error(`No trace with id "${id}" at ${filePath}`);
+  // Show across whichever scope matches first under --all.
+  const candidates: Array<{ dir: string; label: string }> = [];
+  if (scope.kind === "all") {
+    candidates.push({ dir: GLOBAL_TRACES_DIR, label: "global" });
+    for (const pid of await listProjectIds()) {
+      candidates.push({ dir: projectTracesDir(pid), label: pid });
+    }
+  } else if (scope.kind === "global") {
+    candidates.push({ dir: GLOBAL_TRACES_DIR, label: "global" });
+  } else {
+    candidates.push({
+      dir: projectTracesDir(scope.projectId),
+      label: scope.projectId,
+    });
+  }
+  for (const { dir, label } of candidates) {
+    const filePath = path.join(dir, `${id}.json`);
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    try {
+      const parsed = JSON.parse(raw) as OnDiskTrace;
+      const redacted = {
+        scope: label,
+        ...parsed,
+        embedding: `<${parsed.embedding?.length ?? 0}-dim vector>`,
+      };
+      console.log(JSON.stringify(redacted, null, 2));
+      return 0;
+    } catch (err) {
+      console.error(
+        `Trace file is corrupt: ${err instanceof Error ? err.message : err}`
+      );
       return 1;
     }
-    throw err;
   }
-  try {
-    const parsed = JSON.parse(raw) as OnDiskTrace;
-    const redacted = {
-      ...parsed,
-      // Embedding is 1536+ floats — drown the operator. Show length only.
-      embedding: `<${parsed.embedding?.length ?? 0}-dim vector>`,
-    };
-    console.log(JSON.stringify(redacted, null, 2));
-  } catch (err) {
-    console.error(
-      `Trace file is corrupt: ${err instanceof Error ? err.message : err}`
-    );
-    return 1;
-  }
-  return 0;
+  console.error(`No trace with id "${id}" in ${describeScope(scope)}.`);
+  return 1;
 }
 
 interface StatsResult {
@@ -179,9 +272,10 @@ export function computeStats(traces: OnDiskTrace[]): StatsResult {
   };
 }
 
-async function cmdStats(): Promise<number> {
-  const traces = await loadAllTraces();
+async function cmdStats(scope: Scope): Promise<number> {
+  const traces = await loadTraces(scope);
   const s = computeStats(traces);
+  console.log(`Scope: ${describeScope(scope)}`);
   if (s.total === 0) {
     console.log("(no traces — pool is empty)");
     return 0;
@@ -190,7 +284,9 @@ async function cmdStats(): Promise<number> {
   console.log(
     `Quality score range:    ${s.scoreMin.toFixed(3)} … ${s.scoreMax.toFixed(3)}`
   );
-  console.log(`Quality mean / median:  ${s.scoreMean.toFixed(3)} / ${s.scoreMedian.toFixed(3)}`);
+  console.log(
+    `Quality mean / median:  ${s.scoreMean.toFixed(3)} / ${s.scoreMedian.toFixed(3)}`
+  );
   console.log(`Avg prompt length:      ${s.promptLengthMean.toFixed(0)} chars`);
   console.log(`Avg answer length:      ${s.answerLengthMean.toFixed(0)} chars`);
   console.log(`Oldest captured:        ${s.oldest ?? "—"}`);
@@ -198,18 +294,25 @@ async function cmdStats(): Promise<number> {
   return 0;
 }
 
-async function cmdClear(): Promise<number> {
-  const traces = await loadAllTraces();
+async function cmdClear(scope: Scope): Promise<number> {
+  if (scope.kind === "all") {
+    console.error(
+      "Refusing to `clear --all` — that would wipe every project's pool plus global. " +
+        "Run `clear --global` or `clear --project <id>` per pool you actually want to nuke."
+    );
+    return 1;
+  }
+  const dir = dirForScope(scope);
+  const traces = await loadTraces(scope);
   if (traces.length === 0) {
-    console.log("(no traces — nothing to clear)");
+    console.log(`(no traces in ${describeScope(scope)} — nothing to clear)`);
     return 0;
   }
-  // Skip the confirmation prompt under --yes (CI-friendly).
   const skipPrompt = process.argv.includes("--yes");
   if (!skipPrompt) {
     const rl = readline.createInterface({ input: stdin, output: stdout });
     const answer = await rl.question(
-      `About to delete ${traces.length} trace file(s) from ${TRACES_DIR}. Type "yes" to confirm: `
+      `About to delete ${traces.length} trace file(s) from ${dir} (${describeScope(scope)}). Type "yes" to confirm: `
     );
     rl.close();
     if (answer.trim().toLowerCase() !== "yes") {
@@ -220,7 +323,7 @@ async function cmdClear(): Promise<number> {
   let removed = 0;
   for (const t of traces) {
     try {
-      await fs.unlink(path.join(TRACES_DIR, `${t.id}.json`));
+      await fs.unlink(path.join(dir, `${t.id}.json`));
       removed++;
     } catch (err) {
       console.error(
@@ -228,23 +331,31 @@ async function cmdClear(): Promise<number> {
       );
     }
   }
-  console.log(`Removed ${removed}/${traces.length} trace(s).`);
+  console.log(`Removed ${removed}/${traces.length} trace(s) from ${describeScope(scope)}.`);
   return 0;
 }
 
-async function cmdDelete(id: string | undefined): Promise<number> {
+async function cmdDelete(id: string | undefined, scope: Scope): Promise<number> {
   if (!id) {
-    console.error("Usage: npm run trace:delete <id>");
+    console.error(
+      "Usage: npm run trace:delete -- <id> [--project <projectId>]"
+    );
     return 1;
   }
-  const filePath = path.join(TRACES_DIR, `${id}.json`);
+  if (scope.kind === "all") {
+    console.error(
+      "Refusing to `delete --all` — pass `--global` or `--project <id>` to disambiguate."
+    );
+    return 1;
+  }
+  const filePath = path.join(dirForScope(scope), `${id}.json`);
   try {
     await fs.unlink(filePath);
     console.log(`Removed ${filePath}`);
     return 0;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      console.error(`No trace with id "${id}"`);
+      console.error(`No trace with id "${id}" in ${describeScope(scope)}`);
       return 1;
     }
     console.error(
@@ -256,27 +367,31 @@ async function cmdDelete(id: string | undefined): Promise<number> {
 
 async function main(): Promise<number> {
   const cmd = process.argv[2];
-  const arg = process.argv[3];
+  // The third positional may be `<id>` for show/delete OR a flag start.
+  const arg =
+    process.argv[3] && !process.argv[3].startsWith("--")
+      ? process.argv[3]
+      : undefined;
+  const scope = parseScope(process.argv);
   switch (cmd) {
     case "list":
-      return cmdList();
+      return cmdList(scope);
     case "show":
-      return cmdShow(arg);
+      return cmdShow(arg, scope);
     case "stats":
-      return cmdStats();
+      return cmdStats(scope);
     case "clear":
-      return cmdClear();
+      return cmdClear(scope);
     case "delete":
-      return cmdDelete(arg);
+      return cmdDelete(arg, scope);
     default:
       console.error(
-        "Usage: npx tsx scripts/trace-memory-admin.ts <list|show <id>|stats|clear|delete <id>>"
+        "Usage: npx tsx scripts/trace-memory-admin.ts <list|show <id>|stats|clear|delete <id>> [--global|--project <id>|--all]"
       );
       return 1;
   }
 }
 
-// Only execute when invoked directly (not when imported by tests).
 const invokedDirectly =
   process.argv[1]?.endsWith("trace-memory-admin.ts") ||
   process.argv[1]?.endsWith("trace-memory-admin.js");
@@ -289,3 +404,6 @@ if (invokedDirectly) {
     }
   );
 }
+
+// Test-only exports.
+export { parseScope, dirForScope, projectTracesDir };

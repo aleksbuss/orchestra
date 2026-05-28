@@ -7,7 +7,12 @@
  * function directly.
  */
 import { describe, it, expect } from "vitest";
-import { computeStats } from "./trace-memory-admin";
+import {
+  computeStats,
+  parseScope,
+  projectTracesDir,
+  dirForScope,
+} from "./trace-memory-admin";
 
 interface OnDiskTrace {
   id: string;
@@ -98,5 +103,56 @@ describe("PM #53 — computeStats", () => {
       trace({ qualityScore: 1.0 }),
     ]);
     expect(s.scoreMean).toBeCloseTo(0.8, 5);
+  });
+});
+
+describe("PM #55 — parseScope + scope dir resolution", () => {
+  it("no flags → global", () => {
+    expect(parseScope(["node", "script", "list"])).toEqual({ kind: "global" });
+  });
+
+  it("--global → global", () => {
+    expect(parseScope(["node", "script", "list", "--global"])).toEqual({
+      kind: "global",
+    });
+  });
+
+  it("--all → all", () => {
+    expect(parseScope(["node", "script", "list", "--all"])).toEqual({
+      kind: "all",
+    });
+  });
+
+  it("--project <id> → project scope", () => {
+    expect(
+      parseScope(["node", "script", "list", "--project", "abc123"])
+    ).toEqual({ kind: "project", projectId: "abc123" });
+  });
+
+  it("--project with no id → defaults to global (defensive)", () => {
+    expect(parseScope(["node", "script", "list", "--project"])).toEqual({
+      kind: "global",
+    });
+  });
+
+  it("--all wins over --project (defensive — both means all)", () => {
+    expect(
+      parseScope(["node", "script", "list", "--project", "abc", "--all"])
+    ).toEqual({ kind: "all" });
+  });
+
+  it("projectTracesDir matches the runtime convention", () => {
+    const out = projectTracesDir("proj-x");
+    expect(out).toMatch(/projects\/proj-x\/\.orchestra_traces$/);
+  });
+
+  it("dirForScope global → data/traces", () => {
+    expect(dirForScope({ kind: "global" })).toMatch(/data\/traces$/);
+  });
+
+  it("dirForScope project → per-project nested path", () => {
+    expect(dirForScope({ kind: "project", projectId: "p1" })).toMatch(
+      /projects\/p1\/\.orchestra_traces$/
+    );
   });
 });

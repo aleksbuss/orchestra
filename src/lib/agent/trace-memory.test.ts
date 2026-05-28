@@ -350,6 +350,168 @@ describe("PM #51 — captureSuccessfulTrace", () => {
   });
 });
 
+// PM #55 — per-project scoping. Captures with a projectId go to that
+// project's own pool; retrievals filter by scope. The global pool stays
+// the default fallback when no projectId is provided.
+describe("PM #55 — per-project trace scoping", () => {
+  it("capture without projectId → lands in global pool", async () => {
+    mockedEmbedTexts.mockResolvedValueOnce([new Array(4).fill(0.5)]);
+    const result = await captureSuccessfulTrace({
+      userPrompt: "global prompt",
+      finalText: "answer",
+      signals: goodSignals,
+      brainConfig,
+      settings: baseSettings(),
+      // projectId omitted
+    });
+    expect(result.captured).toBe(true);
+    // Verify the file landed in the global pool path.
+    const expectedPath = path.join(
+      tempDir,
+      "traces",
+      `${result.traceId}.json`
+    );
+    await expect(fs.access(expectedPath)).resolves.toBeUndefined();
+  });
+
+  it("capture with projectId → lands under data/projects/<id>/.orchestra_traces/", async () => {
+    mockedEmbedTexts.mockResolvedValueOnce([new Array(4).fill(0.5)]);
+    const result = await captureSuccessfulTrace({
+      userPrompt: "project prompt",
+      finalText: "answer",
+      signals: goodSignals,
+      brainConfig,
+      settings: baseSettings(),
+      projectId: "proj-abc",
+    });
+    expect(result.captured).toBe(true);
+    const expectedPath = path.join(
+      tempDir,
+      "projects",
+      "proj-abc",
+      ".orchestra_traces",
+      `${result.traceId}.json`
+    );
+    await expect(fs.access(expectedPath)).resolves.toBeUndefined();
+    const raw = await fs.readFile(expectedPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.projectId).toBe("proj-abc");
+  });
+
+  it("project A's retrieval does NOT see project B's traces", async () => {
+    const projectATrace: SuccessfulTrace = {
+      id: "trace-a",
+      userPrompt: "build React component",
+      finalText: "answer A",
+      signals: goodSignals,
+      qualityScore: 0.95,
+      modelConfig: { provider: "openai", model: "gpt-4o" },
+      capturedAt: new Date().toISOString(),
+      embedding: [1, 0, 0, 0],
+      projectId: "proj-a",
+    };
+    const projectBTrace: SuccessfulTrace = {
+      id: "trace-b",
+      userPrompt: "audit legal docs",
+      finalText: "answer B",
+      signals: goodSignals,
+      qualityScore: 0.95,
+      modelConfig: { provider: "openai", model: "gpt-4o" },
+      capturedAt: new Date().toISOString(),
+      embedding: [0, 1, 0, 0],
+      projectId: "proj-b",
+    };
+    __seedTraceMemoryForTests([projectATrace], "proj-a");
+    __seedTraceMemoryForTests([projectBTrace], "proj-b");
+    mockedEmbedTexts.mockResolvedValueOnce([[1, 0, 0, 0]]);
+
+    const retrievedForA = await retrieveRelevantTraces("X", baseSettings(), {
+      k: 5,
+      projectId: "proj-a",
+    });
+    expect(retrievedForA.length).toBe(1);
+    expect(retrievedForA[0].trace.id).toBe("trace-a");
+    // proj-b's trace must NOT leak in.
+    expect(retrievedForA.map((r) => r.trace.id)).not.toContain("trace-b");
+  });
+
+  it("empty projectId string → treated as global (defensive)", async () => {
+    mockedEmbedTexts.mockResolvedValueOnce([new Array(4).fill(0.5)]);
+    const result = await captureSuccessfulTrace({
+      userPrompt: "x",
+      finalText: "y",
+      signals: goodSignals,
+      brainConfig,
+      settings: baseSettings(),
+      projectId: "",
+    });
+    expect(result.captured).toBe(true);
+    // Empty string normalizes to global pool — verify by looking up
+    // global path directly.
+    const expectedPath = path.join(
+      tempDir,
+      "traces",
+      `${result.traceId}.json`
+    );
+    await expect(fs.access(expectedPath)).resolves.toBeUndefined();
+  });
+
+  it("mtime invalidation: out-of-band file removal → next read reflects it", async () => {
+    // Manually drop two traces on disk in a project pool.
+    const dir = path.join(
+      tempDir,
+      "projects",
+      "proj-x",
+      ".orchestra_traces"
+    );
+    await fs.mkdir(dir, { recursive: true });
+    const traceA: SuccessfulTrace = {
+      id: "aaa",
+      userPrompt: "A",
+      finalText: "A!",
+      signals: goodSignals,
+      qualityScore: 0.95,
+      modelConfig: { provider: "openai", model: "gpt-4o" },
+      capturedAt: new Date().toISOString(),
+      embedding: [1, 0, 0, 0],
+      projectId: "proj-x",
+    };
+    const traceB: SuccessfulTrace = {
+      ...traceA,
+      id: "bbb",
+      userPrompt: "B",
+      embedding: [0, 1, 0, 0],
+    };
+    await fs.writeFile(path.join(dir, "aaa.json"), JSON.stringify(traceA));
+    await fs.writeFile(path.join(dir, "bbb.json"), JSON.stringify(traceB));
+
+    // First read picks up both.
+    mockedEmbedTexts.mockResolvedValueOnce([[1, 0, 0, 0]]);
+    const before = await retrieveRelevantTraces("Q", baseSettings(), {
+      k: 5,
+      projectId: "proj-x",
+    });
+    expect(before.length).toBe(2);
+
+    // Simulate operator running `npm run trace:delete bbb --project proj-x`:
+    // remove the file out-of-band.
+    await fs.unlink(path.join(dir, "bbb.json"));
+
+    // Touch dir mtime in case fs resolution is coarse — bump explicitly.
+    const now = Date.now();
+    await fs.utimes(dir, new Date(now), new Date(now + 1000));
+
+    // Next read MUST see only the remaining trace.
+    mockedEmbedTexts.mockResolvedValueOnce([[1, 0, 0, 0]]);
+    const after = await retrieveRelevantTraces("Q", baseSettings(), {
+      k: 5,
+      projectId: "proj-x",
+    });
+    expect(after.length).toBe(1);
+    expect(after[0].trace.id).toBe("aaa");
+  });
+});
+
 describe("PM #51 — retrieveRelevantTraces", () => {
   it("disabled feature flag → returns []", async () => {
     const settings = baseSettings({ traceMemory: { enabled: false } });

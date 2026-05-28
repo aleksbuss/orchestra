@@ -304,6 +304,68 @@ describe("PM #49 — refreshOpenRouterPricingCache orchestration", () => {
     expect(result.source).toBe("disk");
     expect(getCachedOpenRouterPricing("x/y")?.inputUsdPerMillion).toBe(1);
   });
+
+  // PM #56 — simulates Next.js dev-mode HMR. Every save resets module
+  // state (the in-memory map). Without the disk-cache fallback the
+  // boot path would dump traffic on OpenRouter on every save. With the
+  // disk cache, we promote from disk (no network call) when fresh.
+  it("HMR-style reload: in-memory reset but disk cache fresh → NO network call", async () => {
+    // First "boot": fetch and persist.
+    mockFetchOk({
+      data: [
+        {
+          id: "anthropic/claude-haiku-4-5",
+          pricing: { prompt: "0.0000008", completion: "0.000004" },
+        },
+      ],
+    });
+    const first = await refreshOpenRouterPricingCache();
+    expect(first.source).toBe("fetched");
+
+    // Simulate HMR / module reload: reset in-memory state only.
+    // Disk cache is intentionally untouched (same files on disk).
+    __resetOpenRouterPricingForTests();
+
+    // Replace fetch with a spy that records calls but never resolves
+    // the way the code wants — if it's invoked we'll know.
+    const fetchSpy = vi.fn(async () => {
+      throw new Error("network was reached on reload — should not happen");
+    });
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    const second = await refreshOpenRouterPricingCache();
+    // Disk warmed memory; fresh → "memory" reported.
+    expect(second.source).toBe("memory");
+    expect(second.entryCount).toBe(1);
+    // Critical: no network call was made.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Lookup still works.
+    expect(
+      getCachedOpenRouterPricing("anthropic/claude-haiku-4-5")?.inputUsdPerMillion
+    ).toBeCloseTo(0.8, 5);
+  });
+
+  it("HMR-style reload + stale disk cache → ONE network call, not many", async () => {
+    // Pre-seed a stale disk cache (>24h old).
+    await saveCachedOpenRouterPricing(
+      new Map([["x/y", { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }]]),
+      new Date(Date.now() - 48 * 60 * 60 * 1000)
+    );
+    __resetOpenRouterPricingForTests();
+
+    mockFetchOk({
+      data: [
+        {
+          id: "x/y",
+          pricing: { prompt: "0.000005", completion: "0.00001" },
+        },
+      ],
+    });
+    const result = await refreshOpenRouterPricingCache();
+    expect(result.source).toBe("fetched");
+    // One fetch — not one per reload.
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("PM #49 — getCachedOpenRouterPricing sync lookup", () => {

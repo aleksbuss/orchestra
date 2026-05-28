@@ -308,6 +308,57 @@ describe("GET /api/health — overall status precedence", () => {
   });
 });
 
+// PM #56 — closing the audit gap: when getSettings throws (corrupt
+// settings.json) the three PM #53 probes used to silently disappear
+// from the response. Now they MUST appear with status: "warn" so the
+// operator sees the probe failure instead of missing rows.
+describe("PM #56 — PM #53 probes never silently disappear on settings failure", () => {
+  it("getSettings throws → aggregator_mode + trace_memory still appear as warn", async () => {
+    mockedSettings.mockRejectedValue(new Error("settings JSON corrupt"));
+    const body = await callHealth();
+
+    const agg = body.subsystems.find((s) => s.name === "aggregator_mode");
+    expect(agg).toBeDefined();
+    expect(agg?.status).toBe("warn");
+    expect(agg?.detail).toMatch(/Could not read settings/i);
+
+    const tm = body.subsystems.find((s) => s.name === "trace_memory");
+    expect(tm).toBeDefined();
+    expect(tm?.status).toBe("warn");
+    expect(tm?.detail).toMatch(/Could not probe/i);
+  });
+
+  it("subsystem order remains stable under settings failure", async () => {
+    mockedSettings.mockRejectedValue(new Error("boom"));
+    const body = await callHealth();
+    const names = body.subsystems.map((s) => s.name);
+    // The 11 named subsystems still appear in their canonical order.
+    expect(names).toContain("aggregator_mode");
+    expect(names).toContain("trace_memory");
+    expect(names).toContain("openrouter_pricing_cache");
+    // Indexes preserve order — aggregator_mode before trace_memory
+    // before openrouter_pricing_cache.
+    expect(names.indexOf("aggregator_mode")).toBeLessThan(
+      names.indexOf("trace_memory")
+    );
+    expect(names.indexOf("trace_memory")).toBeLessThan(
+      names.indexOf("openrouter_pricing_cache")
+    );
+  });
+
+  it("overall status degrades to unhealthy (settings error wins) but probes still surfaced", async () => {
+    mockedSettings.mockRejectedValue(new Error("boom"));
+    const body = await callHealth();
+    expect(body.status).toBe("unhealthy"); // settings error
+    // But the warn-rows must still be present so a dashboard can show
+    // them.
+    const warns = body.subsystems.filter((s) => s.status === "warn");
+    const warnNames = warns.map((s) => s.name);
+    expect(warnNames).toContain("aggregator_mode");
+    expect(warnNames).toContain("trace_memory");
+  });
+});
+
 // PM #53 — operator visibility checks for v3/v4 features.
 describe("GET /api/health — aggregator_mode subsystem (PM #53/52)", () => {
   it("default settings → 'synthesis mode' detail", async () => {

@@ -184,9 +184,17 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
     // personas without a critic, leaving the swarm without the
     // zero-latency fact-checking mandate. We post-validate the LLM's
     // output and inject the canonical Adversarial Critic if missing.
-    const SKEPTIC_PATTERN = /skeptic|auditor|critic|red.?team|fact.?check|adversari/i;
-    const hasSkeptic = object.personas.some(
-      (p) => SKEPTIC_PATTERN.test(p.id) || SKEPTIC_PATTERN.test(p.role)
+    //
+    // PM #45 — skeptic detection now goes through `detectProposerRole`
+    // (the same helper PM #42's tool routing uses). Previously this site
+    // had its own narrower SKEPTIC_PATTERN that missed "qa", "quality",
+    // "review" — so a DPG-returned persona like "qa_engineer" would be
+    // classified as a reviewer by PM #42 (gets search_web) but NOT seen
+    // as a skeptic by PM #37 → critic was force-injected anyway, leaving
+    // the swarm with two reviewer-shape personas competing for the same
+    // role. Single source of truth fixes the inconsistency.
+    const hasSkeptic = (object.personas as MoAProposer[]).some(
+      (p) => detectProposerRole(p) === "reviewer"
     );
     let personas = object.personas as MoAProposer[];
     if (object.requiresSwarm && !hasSkeptic) {
@@ -246,7 +254,13 @@ ${searchEnabled ? `6. VERY IMPORTANT: You have access to the 'search_web' tool. 
 export type ProposerRole = "coder" | "researcher" | "reviewer" | "tool" | "orchestrator";
 
 export function detectProposerRole(proposer: MoAProposer): ProposerRole {
-  const blob = (proposer.id + " " + proposer.systemPrompt).toLowerCase();
+  // PM #45 — include `role` in the blob. Previously this helper looked
+  // only at id + systemPrompt, but personas like `{ id: "beta", role:
+  // "Code Reviewer", systemPrompt: "..." }` would slip through if the
+  // role keyword appeared only in `role`. The pre-PM-45 SKEPTIC_PATTERN
+  // (which this helper replaces in `generateDynamicSwarm`) explicitly
+  // checked id || role, so the migration must too.
+  const blob = (proposer.id + " " + proposer.role + " " + proposer.systemPrompt).toLowerCase();
   if (/review|critic|audit|qa|quality|skeptic|adversar|red.?team|fact.?check/.test(blob)) {
     return "reviewer";
   }

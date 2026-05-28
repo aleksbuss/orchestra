@@ -38,6 +38,50 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 50. Coder Proposer Gets `code_execution` — Self-Verification Mandate
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, closes the deferred half of PM #42 — completes v2.1 roadmap)
+**Symptoms:** No live incident. PM #42 wired `search_web` to reviewer + researcher proposers (the fact-checking path) but explicitly deferred `code_execution` for coder proposers:
+  > *"Each proposer spawning child processes is a new failure surface (session lifecycle, concurrent execution, resource contention). We want eval data on what the simpler v1 change does before adding it."*
+
+  Six months of eval data later (PM #41's harness running across ~10 prompt types per release), the simpler v1 has held — no coder-proposer hallucination-of-output incidents, no API-signature mistakes that a quick `python -c "..."` couldn't have caught. Time to ship the other half: let coder personas self-verify code before drafting. The risk envelope is well-known (PM #28 env-scrub, the existing 2-permit agent semaphore as the natural concurrency cap, the orchestrator's code_execution tool battle-tested in prod).
+**Root Cause:** N/A — feature, not bug.
+**Resolution:** Three coordinated additions:
+  1. **`AppSettings.codeExecution.proposerAccess?: boolean`** in [`src/lib/types.ts`](src/lib/types.ts) — opt-in flag. **Default false** because the failure surface is heavier than `search_web` and the operator should consent explicitly. Operators editing `data/settings/settings.json` flip `{ codeExecution: { enabled: true, proposerAccess: true } }` to enable.
+  2. **`buildProposerCodeExecutionTool(settings, cwd)`** factory in [`src/lib/tools/code-execution.ts`](src/lib/tools/code-execution.ts) — produces a Vercel-AI-SDK `tool()` definition wrapping `executeCode` with proposer-appropriate defaults: forced `sessionId: 0` (no shared state across proposer turns), no background sessions (would leak child processes nobody owns), no `install_packages` companion (the proposer can self-install via `pip install … && python -c …` from within a single call). Same preflight validation as the orchestrator tool (`CODE_EXEC_MAX_CHARS = 20000`, `CODE_EXEC_MAX_LINES = 800`). Same env-scrub via PM #28's `scrubProcessEnv` — comes free from `executeCode`.
+  3. **`selectProposerTools` extension** in [`src/lib/agent/moa.ts`](src/lib/agent/moa.ts) — new optional 4th parameter `coderContext?: { settings, cwd }`. When `role === "coder"` AND `settings.codeExecution.enabled` AND `settings.codeExecution.proposerAccess === true` AND a coderContext was passed, the coder persona gets `code_execution` in its `ToolSet`. Otherwise undefined for that role (unchanged from PM #42 behavior).
+  4. **`CODE_EXECUTION_MANDATE`** prompt augmentation, the parallel of PM #42's `FACT_CHECK_MANDATE`. When a coder proposer's toolset contains `code_execution`, `augmentProposerPromptForTools` appends the mandate. It names the canonical verification triggers (uncertain API signature, output shape, regex/boundary validation, "will this work?" prompts) AND the canonical NEVERs (no GUI apps, no long-running servers, no infrastructure mutations, no non-exiting commands).
+
+**Concurrency safety.** Each coder proposer runs inside `agentSemaphore.run(...)` which is capped at 2 permits on this hardware tier (see [`semaphore.ts`](src/lib/agent/semaphore.ts)). Even with 5 proposers and all of them coder-tagged (would require 5 explicit coder personas from DPG — typically 1-2), no more than 2 concurrent child processes can be in flight. The `timeout` + `maxOutputLength` from `settings.codeExecution` bound each individual call. **No new concurrency primitive was needed.**
+
+**AbortSignal threading.** The proposer-side tool inherits `proposerSignal` (the per-proposer 2-minute timeout combined with the request-level abort) through Vercel AI SDK's `tool.execute({ args }, { abortSignal })` parameter — same path as `search_web` in PM #42. The existing `executeCode` doesn't yet consume the signal mid-execution (carried as known tech debt in PM #23 follow-up), but the LLM loop's outer timeout still bounds the call.
+
+**Tier compatibility (PM #48).** Coder personas tier-resolve to `frontier` by default. With `proposerAccess: true`, the frontier-tier model gets `code_execution` access — exactly the "expensive tier where it matters" shape PM #48 enabled. Reviewer personas stay on the cheap fast tier with `search_web` only. Heterogeneous tiers + role-specific tools compose cleanly.
+
+**Privacy Mode interaction (PM #47).** `code_execution` runs entirely on the local machine — no network egress by default. **Privacy Mode does NOT need to gate `code_execution`** the way it gates LLM provider selection. Operators in air-gap mode get the same code_execution behavior; the network guard in `assertPrivacyModeAllowsSettings` is orthogonal.
+
+**Threat model.** Same as the orchestrator's `code_execution`: trust the operator's settings, run inside the project root, scrub env vars (PM #28), validate sandbox rules pre-spawn (`validateSandboxRules`). The added proposer surface multiplies child-process count by N proposers but doesn't introduce a NEW attack vector — every byte of "code to execute" still originates from the operator's chosen LLM, same as the orchestrator path.
+
+**What this is NOT:**
+  - Not enabled by default. Operators must opt in via `data/settings/settings.json`. UI toggle pending v3.1 settings UI.
+  - Not a full IDE inside the proposer. No background sessions, no install_packages, no manage_processes — just a single sync-to-completion runtime per call.
+  - Not an unlimited budget. The same `timeout` + `maxOutputLength` from `settings.codeExecution` apply per call.
+
+**Regression Coverage:** [`src/lib/agent/moa-tools.test.ts`](src/lib/agent/moa-tools.test.ts) — 10 new cases (28 → 38 total):
+  - **selectProposerTools** (7 cases): coder + all flags ON → `code_execution` included AND `search_web` not (when search disabled); proposerAccess OFF → undefined; proposerAccess UNDEFINED → undefined (pre-PM-50 settings shape backward compat); global `codeExecution.enabled` OFF → undefined (global flag wins); non-coder roles never get the tool; no coderContext passed → undefined; reviewer with full coderCtx still doesn't get `code_execution` (role gating works).
+  - **augmentProposerPromptForTools** (3 cases): tools include `code_execution` → CODE_EXECUTION_MANDATE appended; hybrid toolset (both tools) → BOTH mandates appended; CODE_EXECUTION_MANDATE pins canonical verification triggers AND the NEVER list (regression guard against future "quick prompt tweaks" dropping the GUI-apps / long-running-servers / 2-minute-cap clauses).
+
+  All 102 MoA + privacy tests still pass (37 moa.test + 38 moa-tools.test + 12 moa-tiers.test + 15 agent-privacy.test).
+
+**Doc Updates:**
+  - [`README.md`](README.md) v2.1 roadmap — "Tools inside proposers" moved from `[~] partial` to `[x] shipped`. **v2.1 milestone is now complete.**
+  - No CLAUDE.md change needed — PM #42's "Rule" about role-aware tool assignment + mandate-with-tool already covers this case. The pattern propagated cleanly.
+
+**Rule:** When extending a multi-agent system with a new per-role capability, the question is never "should we add it?" but "what's the explicit opt-in shape?". `code_execution` for proposers is exactly the kind of feature where the silent default is wrong (heavier failure surface than the orchestrator path → operator must opt in) and the silent enable is worse (operator gets surprise child processes burning CPU). Off-by-default + explicit settings flag + paired prompt mandate. Same shape as PM #42 (search_web mandate), PM #47 (privacy mode opt-in), PM #48 (proposerTiers opt-in). The pattern is now established — any v3+ proposer-side capability follows it.
+
+---
+
 ## 49. Live OpenRouter Pricing Cache — End of the Hardcoded-Table Drift
 **Date:** 2026-05
 **Status:** RESOLVED

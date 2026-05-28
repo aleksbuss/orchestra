@@ -3,6 +3,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { LanguageModel } from "ai";
 import path from "path";
+import { isLoopbackUrl } from "@/lib/security/url-guard";
 import type {
   LanguageModelV3,
   LanguageModelV3CallOptions,
@@ -1564,6 +1565,39 @@ function createOpenAICompatibleEmbeddingModel(config: {
     name: settings.providerName,
   });
   return provider.embedding(config.model);
+}
+
+/**
+ * PM #47 — Privacy Mode predicate. Returns true if this ModelConfig
+ * targets a backend that lives on this machine (no outbound network).
+ *
+ * Local-by-definition providers: ollama, sglang, vllm. Always local
+ * regardless of baseUrl override (the baseUrl is a port choice, not a
+ * remote-host opt-out — if an operator sets ollama with a public-IP
+ * baseUrl in privacy mode, they're routing around the guarantee, and
+ * we explicitly check loopback below for clarity).
+ *
+ * `custom`: only local if `baseUrl` resolves to a loopback host. The
+ * operator can run any OpenAI-compatible local server through `custom`;
+ * we just need the baseUrl to be loopback.
+ *
+ * Everything else (openai, anthropic, google, openrouter, codex-cli,
+ * gemini-cli): NOT local — these speak to vendor APIs.
+ */
+export function isLocalProvider(config: ModelConfig): boolean {
+  const provider = config.provider;
+  if (provider === "ollama" || provider === "sglang" || provider === "vllm") {
+    // For the local-by-default providers, also enforce loopback if
+    // baseUrl was explicitly set — otherwise an operator could point
+    // "ollama" at a public IP and silently leak data. The default
+    // (no baseUrl) inherits the per-provider loopback fallback.
+    if (!config.baseUrl) return true;
+    return isLoopbackUrl(config.baseUrl);
+  }
+  if (provider === "custom") {
+    return !!config.baseUrl && isLoopbackUrl(config.baseUrl);
+  }
+  return false;
 }
 
 /**

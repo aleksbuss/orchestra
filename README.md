@@ -214,10 +214,10 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [x] Embedding-based disagreement detection
 - [x] Validated togethercomputer/MoA aggregator prompt
 
-**v2.1 — Measurement & quality** (next)
-- [ ] Eval harness — assertion-based regression suite for prompt + architecture changes
-- [ ] Tools inside proposers (researcher → search_web, coder → code_execution)
-- [ ] Live-pricing fetch from OpenRouter `/api/v1/models`
+**v2.1 — Measurement & quality**
+- [x] Eval harness — assertion-based regression suite (PM #41, 10 cases + 31 test pinning)
+- [~] Tools inside proposers — **partial**: PM #42 wired `search_web` to reviewer + researcher with Fact-Check Mandate; coder→`code_execution` still deferred (child-process lifecycle)
+- [x] **Live-pricing fetch from OpenRouter** `/api/v1/models` (PM #49 — 24h cache, disk-warm, Privacy-Mode-aware)
 
 **v3.0 — Local-first power mode**
 - [x] SGLang / vLLM backend (PM #43, v0.2.0 — prefix-cache reuse for free 3-6× throughput on consumer GPUs)

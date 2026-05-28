@@ -14,11 +14,20 @@
  *   - Substring matching on model id so a model that hasn't been seen yet
  *     (`gpt-4o-2026-01-15`) still gets the right family's pricing.
  *
- * If you upgrade to live pricing later, swap getModelPricing for an async
- * version backed by OpenRouter's /api/v1/models (it already exposes
- * pricing.prompt / pricing.completion per model — same shape used by
- * model-fallback.ts).
+ * PM #49 — `getModelPricing` now consults an in-memory live cache for
+ * the OpenRouter path BEFORE falling back to the substring table. The
+ * cache is populated at boot from `data/cache/openrouter-pricing.json`
+ * and refreshed from `https://openrouter.ai/api/v1/models` once per
+ * 24h. See [`openrouter-pricing.ts`](./openrouter-pricing.ts) for the
+ * refresh orchestration. Lookup stays sync so the accumulator contract
+ * doesn't change.
  */
+
+// PM #49 — live cache lookup. Imported lazily to avoid circular-import
+// concerns (the openrouter-pricing module depends on ModelPricing from
+// here, and we want the type re-export to win). The function itself is
+// a pure synchronous Map.get, so the indirection is cheap.
+import { getCachedOpenRouterPricing } from "./openrouter-pricing";
 
 export interface ModelPricing {
   /** USD charged per 1,000,000 prompt tokens. */
@@ -101,6 +110,13 @@ export function getModelPricing(
 
   // OpenRouter passthrough: peel off the prefix and route by upstream.
   if (normalizedProvider === "openrouter") {
+    // PM #49 — live cache first. OpenRouter's `/api/v1/models` returns
+    // authoritative pricing for every variant including `:nitro`,
+    // `:beta`, etc. which the hardcoded table can't cover. A hit here
+    // sidesteps the substring rules entirely.
+    const live = getCachedOpenRouterPricing(normalizedModel);
+    if (live) return live;
+
     const slashIdx = normalizedModel.indexOf("/");
     if (slashIdx > 0) {
       const upstreamProvider = normalizedModel.slice(0, slashIdx);

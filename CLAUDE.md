@@ -334,6 +334,7 @@ Orchestra has no traditional database — `data/` IS the database. Every directo
 | `data/external-sessions/` | `api/external` | OAuth / external integration session blobs. | **Not swept yet** (PM #32 — deferred; TTL is integration-specific). |
 | `data/tmp/` | various | Ephemeral scratch space. | Boot-time + 6h `sweepTempDir` removes files older than 7 days. |
 | `data/logs/` | `observability/logger` | Daily JSONL log files. | Not swept yet — daily file size is bounded; revisit if dailies exceed ~50 MB. |
+| `data/cache/openrouter-pricing.json` | `cost/openrouter-pricing.ts` | PM #49 — live OpenRouter `/api/v1/models` pricing snapshot. Overwritten on each boot refresh (single file, bounded ~200 KB). | Single overwritten file — bounded by construction, not swept. |
 
 When you add a new persistent surface, add a row here in the same commit (Critical Rule §7) AND state the retention strategy — one of (a) sweeper in `cron/sweepers.ts`, (b) "never auto-swept — user data" with reasoning, or (c) atomic cleanup tied to a higher-level deletion. Don't ship an unbounded directory.
 

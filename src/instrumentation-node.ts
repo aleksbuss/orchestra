@@ -101,3 +101,30 @@ void (async () => {
     console.warn("[Privacy] boot-state read failed (non-fatal):", err);
   }
 })();
+
+// PM #49 — refresh the OpenRouter pricing cache. Loads `data/cache/
+// openrouter-pricing.json` into the in-memory map (fast path) and, if
+// stale or missing, kicks off a network fetch from
+// `https://openrouter.ai/api/v1/models`. Skipped entirely in Privacy
+// Mode — the live fetch would itself violate the air-gap guarantee.
+void (async () => {
+  try {
+    const { getSettings } = await import("@/lib/storage/settings-store");
+    const settings = await getSettings();
+    if (settings.privacyMode?.enabled) {
+      console.log(
+        "[OpenRouterPricing] Privacy Mode is ENABLED — skipping live pricing fetch (would break air-gap). Cost banner falls back to hardcoded table."
+      );
+      return;
+    }
+    const { refreshOpenRouterPricingCache } = await import(
+      "@/lib/cost/openrouter-pricing"
+    );
+    const result = await refreshOpenRouterPricingCache();
+    console.log(
+      `[OpenRouterPricing] ${result.source} — ${result.entryCount} models priced.`
+    );
+  } catch (err) {
+    console.warn("[OpenRouterPricing] boot refresh failed (non-fatal):", err);
+  }
+})();

@@ -90,6 +90,37 @@ export interface AppSettings {
     convergenceThreshold?: number;
   };
   /**
+   * Per-role tier model routing (PM #48). Each MoA proposer can be
+   * routed to a different model based on its role: reviewer/critic
+   * personas land on the cheap "fast" tier, coder/architect personas
+   * land on the expensive "frontier" tier, analyst personas on
+   * "balanced". Anthropic's published multi-agent research uses this
+   * pattern (Opus for the lead, Sonnet for subagents) to hit 90.2%
+   * perf at lower cost than uniform-Opus.
+   *
+   * If `proposerTiers` is omitted entirely, every proposer runs on
+   * `utilityModel` (current pre-PM-48 behavior — exact backward compat).
+   * If a tier slot is configured but a persona doesn't have an explicit
+   * `modelTier`, Orchestra derives one from the persona's role keywords:
+   * reviewer → fast, researcher/tool → balanced, coder → frontier.
+   *
+   * Each tier is a full `ModelConfig` with its own provider + model +
+   * apiKey + baseUrl + temperature + maxTokens — Orchestra supports
+   * heterogeneous providers across tiers (e.g., Haiku for fast,
+   * Sonnet for balanced, local Qwen-32B for frontier).
+   *
+   * Privacy Mode (`privacyMode.enabled`) checks every configured tier
+   * for local-only compliance — a single cloud tier blocks the run.
+   */
+  proposerTiers?: {
+    /** Default for reviewer / critic / QA personas. Should be the cheapest reliable model. */
+    fast?: ModelConfig;
+    /** Default for researcher / analyst / tool personas. Mid-tier quality. */
+    balanced?: ModelConfig;
+    /** Default for coder / architect / synthesizer personas. Highest quality. */
+    frontier?: ModelConfig;
+  };
+  /**
    * Air-gapped MoA mode (PM #47). When enabled, Orchestra refuses to run
    * any LLM call against a non-loopback provider. `chatModel`, `utilityModel`,
    * and `embeddingsModel` must ALL resolve to a local backend (ollama,

@@ -205,6 +205,152 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 
 ---
 
+## 🧰 Configuration recipes
+
+The v3 and v4 features in this README are all opt-in via `data/settings/settings.json`. The UI for them lives in v3.1; until then, the recipes below are the canonical way to turn them on.
+
+### Cost-optimized MoA (heterogeneous tiers — PM #48)
+
+Skeptic personas run on a cheap fast tier, coder personas on a frontier tier. On reference workloads this is ~60% cheaper than uniform-frontier with no measured quality loss.
+
+```json
+{
+  "proposerTiers": {
+    "fast": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001",
+      "apiKey": ""
+    },
+    "balanced": {
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "apiKey": ""
+    },
+    "frontier": {
+      "provider": "anthropic",
+      "model": "claude-opus-4-7",
+      "apiKey": ""
+    }
+  }
+}
+```
+
+Empty `apiKey` inherits the key from `chatModel` (same provider). Mix providers freely — fast on Anthropic, frontier on a local Qwen — Orchestra honors heterogeneous tiers.
+
+### Air-gapped mode (PM #47)
+
+```json
+{
+  "privacyMode": { "enabled": true },
+  "chatModel": {
+    "provider": "ollama",
+    "model": "qwen2.5:7b",
+    "baseUrl": "http://localhost:11434"
+  },
+  "utilityModel": {
+    "provider": "ollama",
+    "model": "qwen2.5:3b",
+    "baseUrl": "http://localhost:11434"
+  },
+  "embeddingsModel": {
+    "provider": "ollama",
+    "model": "nomic-embed-text"
+  }
+}
+```
+
+`runAgent` refuses the run if ANY of chatModel / utilityModel / embeddingsModel / proposerTiers resolves to a non-local backend. The chat UI surfaces a 🔒 badge whenever Privacy Mode is active.
+
+### Tournament aggregator for code/math/factual chats (PM #52)
+
+The synthesis aggregator (default) is great for open-ended writing. For chats focused on getting **one correct answer** (bug-fixing, API design, factual lookup), tournament mode picks the best proposer draft verbatim via Borda count over K judges.
+
+```json
+{
+  "aggregator": {
+    "mode": "tournament",
+    "tournamentJudgeCount": 3,
+    "tournamentJudgeModel": {
+      "provider": "anthropic",
+      "model": "claude-haiku-4-5-20251001"
+    }
+  }
+}
+```
+
+K=1 is the cheapest (single judge picks best draft, no consensus). K=3 gives true Borda consensus and smooths individual-judge bias. Set `tournamentJudgeModel` to a fast-tier model to keep K=3 affordable.
+
+### Self-verifying coder proposers (PM #50)
+
+Lets coder-tagged proposers run Python/Node snippets to validate library APIs, output shape, and regex behavior before drafting. Default off because each proposer × child process is a heavier failure surface than `search_web`.
+
+```json
+{
+  "codeExecution": {
+    "enabled": true,
+    "timeout": 600,
+    "maxOutputLength": 120000,
+    "proposerAccess": true
+  }
+}
+```
+
+The orchestrator already had `code_execution`; this extends it to MoA proposers. Concurrency naturally capped by the agent semaphore (2 permits).
+
+### Trace memory — DSPy-style fewshots from your own runs (PM #51)
+
+Captures successful MoA runs and injects the top-K most similar past traces as Router few-shots. Quality-gated by signals from the run itself (proposer consensus, clean critic, no reflection cap).
+
+```json
+{
+  "traceMemory": {
+    "enabled": true,
+    "qualityThreshold": 0.7,
+    "retrievalK": 3
+  }
+}
+```
+
+Inspect / curate the pool from the command line:
+
+```bash
+npm run trace:list         # table of all captured traces by score
+npm run trace:show <id>    # full trace (signals + prompt + answer)
+npm run trace:stats        # pool size, score distribution, age
+npm run trace:delete <id>  # remove a single trace
+npm run trace:clear        # wipe everything (typed confirmation required)
+```
+
+The trace pool is local-only (`data/traces/`) and never auto-swept — operator-controlled retention so you can curate biased or off-topic captures.
+
+### Multi-round reflection (PM #46)
+
+Loop the critic-reviser until the answer converges or hits a hard cap. Default cap is 1 (single pass — PM #38). Set higher when running local models where the per-iteration cost is electricity.
+
+```json
+{
+  "reflection": {
+    "enabled": true,
+    "maxRounds": 5,
+    "convergenceThreshold": 0.97
+  }
+}
+```
+
+The code-level hard cap (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 50`) overrides any operator value — protects against config typos.
+
+### Diagnostics
+
+```bash
+curl http://localhost:3000/api/health | jq    # subsystem report incl. tier/trace/aggregator state
+npm run trace:stats                            # trace pool health
+npm run evals -- --case "<name>"               # behavioral regression sanity
+```
+
+The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size, and OpenRouter pricing-cache age (PM #53) — useful for operator-driven checks without grepping `data/`.
+
+---
+
 ## 🛣 Roadmap
 
 **v2.0 — Wire what's built** (shipped — PM #36–#40)

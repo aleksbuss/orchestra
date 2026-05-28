@@ -116,7 +116,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 8 subsystems by name in a stable order", async () => {
+  it("reports all 11 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -131,6 +131,12 @@ describe("GET /api/health — happy path", () => {
       // operator sees "N chats failed to parse on rebuild" instead of silent
       // disappearance from the sidebar.
       "chat_index_integrity",
+      // PM #53 — operator visibility for v3/v4 features. Surface aggregator
+      // mode (PM #52), trace-memory pool state (PM #51), and OpenRouter
+      // pricing-cache freshness (PM #49) without grepping data/.
+      "aggregator_mode",
+      "trace_memory",
+      "openrouter_pricing_cache",
     ]);
   });
 });
@@ -299,5 +305,123 @@ describe("GET /api/health — overall status precedence", () => {
     fetchSpy.mockResolvedValue(new Response("", { status: 503 }));
     const body = await callHealth();
     expect(body.status).toBe("degraded");
+  });
+});
+
+// PM #53 — operator visibility checks for v3/v4 features.
+describe("GET /api/health — aggregator_mode subsystem (PM #53/52)", () => {
+  it("default settings → 'synthesis mode' detail", async () => {
+    const body = await callHealth();
+    const agg = body.subsystems.find((s) => s.name === "aggregator_mode");
+    expect(agg?.status).toBe("ok");
+    expect(agg?.detail).toMatch(/synthesis mode/i);
+  });
+
+  it("tournament mode → judge count in detail", async () => {
+    mockedSettings.mockResolvedValue({
+      ...fakeSettings(),
+      aggregator: { mode: "tournament", tournamentJudgeCount: 3 },
+    } as any);
+    const body = await callHealth();
+    const agg = body.subsystems.find((s) => s.name === "aggregator_mode");
+    expect(agg?.status).toBe("ok");
+    expect(agg?.detail).toMatch(/Tournament mode active.*K=3 judges/i);
+  });
+
+  it("tournament mode K=1 → singular 'judge'", async () => {
+    mockedSettings.mockResolvedValue({
+      ...fakeSettings(),
+      aggregator: { mode: "tournament", tournamentJudgeCount: 1 },
+    } as any);
+    const body = await callHealth();
+    const agg = body.subsystems.find((s) => s.name === "aggregator_mode");
+    expect(agg?.detail).toMatch(/K=1 judge\b/);
+  });
+});
+
+describe("GET /api/health — trace_memory subsystem (PM #53/51)", () => {
+  it("disabled → ok with enable hint", async () => {
+    const body = await callHealth();
+    const tm = body.subsystems.find((s) => s.name === "trace_memory");
+    expect(tm?.status).toBe("ok");
+    expect(tm?.detail).toMatch(/Trace memory is off/i);
+  });
+
+  it("enabled + no traces yet → empty-pool detail", async () => {
+    mockedSettings.mockResolvedValue({
+      ...fakeSettings(),
+      traceMemory: { enabled: true },
+    } as any);
+    const body = await callHealth();
+    const tm = body.subsystems.find((s) => s.name === "trace_memory");
+    expect(tm?.status).toBe("ok");
+    expect(tm?.detail).toMatch(/pool empty/i);
+  });
+
+  it("enabled + traces on disk → reports count", async () => {
+    await fs.mkdir(path.join(tmpRoot, "data", "traces"), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "traces", "abc.json"),
+      "{}"
+    );
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "traces", "def.json"),
+      "{}"
+    );
+    mockedSettings.mockResolvedValue({
+      ...fakeSettings(),
+      traceMemory: { enabled: true },
+    } as any);
+    const body = await callHealth();
+    const tm = body.subsystems.find((s) => s.name === "trace_memory");
+    expect(tm?.detail).toMatch(/Pool size: 2 trace\(s\)/);
+  });
+});
+
+describe("GET /api/health — openrouter_pricing_cache subsystem (PM #53/49)", () => {
+  it("no cache file → ok with boot-refresh hint", async () => {
+    const body = await callHealth();
+    const cache = body.subsystems.find(
+      (s) => s.name === "openrouter_pricing_cache"
+    );
+    expect(cache?.status).toBe("ok");
+    expect(cache?.detail).toMatch(/No cache yet/i);
+  });
+
+  it("fresh cache → ok with age + entry count", async () => {
+    await fs.mkdir(path.join(tmpRoot, "data", "cache"), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "cache", "openrouter-pricing.json"),
+      JSON.stringify({
+        fetchedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // 1h old
+        entries: [
+          { id: "a/b", inputUsdPerMillion: 1, outputUsdPerMillion: 2 },
+          { id: "c/d", inputUsdPerMillion: 3, outputUsdPerMillion: 4 },
+        ],
+      })
+    );
+    const body = await callHealth();
+    const cache = body.subsystems.find(
+      (s) => s.name === "openrouter_pricing_cache"
+    );
+    expect(cache?.status).toBe("ok");
+    expect(cache?.detail).toMatch(/Cache fresh.*2 models/);
+  });
+
+  it("stale cache (>48h) → warn", async () => {
+    await fs.mkdir(path.join(tmpRoot, "data", "cache"), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "cache", "openrouter-pricing.json"),
+      JSON.stringify({
+        fetchedAt: new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(), // 72h
+        entries: [],
+      })
+    );
+    const body = await callHealth();
+    const cache = body.subsystems.find(
+      (s) => s.name === "openrouter_pricing_cache"
+    );
+    expect(cache?.status).toBe("warn");
+    expect(cache?.detail).toMatch(/stale/i);
   });
 });

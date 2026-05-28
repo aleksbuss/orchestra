@@ -493,6 +493,24 @@ export function augmentProposerPromptForTools(
   return augmented;
 }
 
+/**
+ * PM #54 — true success predicate for a proposer's draft text.
+ * Excludes both the explicit `[Error: ...]` failure marker (proposer
+ * threw) AND the `(empty draft)` placeholder (proposer returned empty).
+ * Previously only `[Error:` was filtered, so an empty placeholder could
+ * (a) land in the synthesis aggregator's prompt as if it were a real
+ * draft and (b) win a tournament — the operator would see literal
+ * "(empty draft)" as the assistant's final answer.
+ *
+ * Exported so the contract has its own focused test independent of the
+ * runMoAEnsemble end-to-end mock setup.
+ */
+export function isSuccessfulDraft(text: string): boolean {
+  if (text.startsWith("[Error:")) return false;
+  if (text === "(empty draft)") return false;
+  return true;
+}
+
 // ── Aggregator Prompt ───────────────────────────────────────────────────
 // PM #40 — synthesis prompt adapted from Together AI's MoA paper template
 // (togethercomputer/MoA `prompts.py`), which was validated at 65.1% on
@@ -1005,7 +1023,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     latencyMs,
   }));
 
-  const successfulDrafts = drafts.filter((d) => !d.text.startsWith("[Error:"));
+  const successfulDrafts = drafts.filter((d) => isSuccessfulDraft(d.text));
   console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded.`);
 
   // If zero drafts succeeded, return a fallback

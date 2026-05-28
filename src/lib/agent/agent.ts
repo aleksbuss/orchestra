@@ -1145,6 +1145,19 @@ export function assertPrivacyModeAllowsSettings(
       }
     }
   }
+  // PM #54 — `settings.aggregator.tournamentJudgeModel` (PM #52) was the
+  // last LLM call path that bypassed the Privacy Mode guard. When the
+  // operator picks tournament mode + a cloud judge model, every MoA call
+  // shipped the user prompt + every draft to that judge provider — the
+  // exact air-gap violation PM #47 was supposed to prevent. Closing the
+  // hole here makes the threat model honest: ALL LLM call paths reachable
+  // from runAgent are now gated by this single guard.
+  const judgeCfg = settings.aggregator?.tournamentJudgeModel;
+  if (judgeCfg?.model && !isLocalProvider(judgeCfg)) {
+    violations.push(
+      `aggregator.tournamentJudgeModel = ${judgeCfg.provider}/${judgeCfg.model}`
+    );
+  }
   if (violations.length > 0) {
     throw new Error(
       `Privacy Mode is enabled, but these models target a non-local backend:\n  ` +

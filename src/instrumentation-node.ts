@@ -102,6 +102,32 @@ void (async () => {
   }
 })();
 
+// PM #54 — warn on boot when tournament mode is combined with coder
+// code_execution. Losing proposers' file/process side effects persist
+// into the project cwd; only the winning draft is shown but ALL
+// proposers' side effects remain. Per-proposer sandbox is tracked as
+// future work; for now we surface the trap so the operator sees it.
+void (async () => {
+  try {
+    const { getSettings } = await import("@/lib/storage/settings-store");
+    const settings = await getSettings();
+    const tournamentOn = settings.aggregator?.mode === "tournament";
+    const proposerCodeExec =
+      settings.codeExecution?.enabled === true &&
+      settings.codeExecution.proposerAccess === true;
+    if (tournamentOn && proposerCodeExec) {
+      console.warn(
+        "[MoA] Risky combo detected: aggregator.mode=tournament + codeExecution.proposerAccess=true. " +
+          "ALL coder proposers will run code in the same project cwd; only the winning draft is shown, " +
+          "but losing proposers' side effects (files written, packages installed) PERSIST. " +
+          "No per-proposer sandbox yet — see PM #54 closing notes. Consider disabling proposerAccess for tournament chats."
+      );
+    }
+  } catch {
+    // Silently skip — settings probe failures are non-fatal here.
+  }
+})();
+
 // PM #49 — refresh the OpenRouter pricing cache. Loads `data/cache/
 // openrouter-pricing.json` into the in-memory map (fast path) and, if
 // stale or missing, kicks off a network fetch from

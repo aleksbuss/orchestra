@@ -316,4 +316,84 @@ describe("PM #47 — assertPrivacyModeAllowsSettings", () => {
       }
     });
   });
+
+  // PM #54 — closing the hole audit found between PM #52 and PM #47.
+  // Tournament judge model is now subject to the same air-gap check.
+  describe("PM #54 — aggregator.tournamentJudgeModel enforcement", () => {
+    it("rejects cloud tournamentJudgeModel when privacy mode enabled", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            aggregator: {
+              mode: "tournament",
+              tournamentJudgeModel: {
+                provider: "anthropic",
+                model: "claude-haiku-4-5-20251001",
+                apiKey: "k",
+              },
+            },
+          })
+        )
+      ).toThrow(/tournamentJudgeModel.*anthropic/);
+    });
+
+    it("rejects cloud judge even when mode is synthesis (defensive — config may flip later)", () => {
+      // The judge model is configured but mode is synthesis. We still
+      // reject because the operator may flip the mode without re-reading
+      // settings.json; air-gap is about the configured surface, not the
+      // currently-active path.
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            aggregator: {
+              mode: "synthesis",
+              tournamentJudgeModel: {
+                provider: "openai",
+                model: "gpt-4o",
+                apiKey: "k",
+              },
+            },
+          })
+        )
+      ).toThrow(/tournamentJudgeModel.*openai/);
+    });
+
+    it("accepts local tournamentJudgeModel (ollama)", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            aggregator: {
+              mode: "tournament",
+              tournamentJudgeModel: {
+                provider: "ollama",
+                model: "qwen2.5:7b",
+                baseUrl: "http://localhost:11434",
+              },
+            },
+          })
+        )
+      ).not.toThrow();
+    });
+
+    it("skips empty model field on judge slot (operator wired UI but never picked)", () => {
+      expect(() =>
+        assertPrivacyModeAllowsSettings(
+          baseSettings({
+            privacyMode: { enabled: true },
+            aggregator: {
+              mode: "tournament",
+              tournamentJudgeModel: {
+                provider: "anthropic",
+                model: "",
+                apiKey: "",
+              },
+            },
+          })
+        )
+      ).not.toThrow();
+    });
+  });
 });

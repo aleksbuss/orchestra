@@ -184,6 +184,104 @@ export async function GET() {
     });
   }
 
+  // 7. Aggregator mode (PM #53 — surface PM #52 state)
+  try {
+    const settings = await getSettings();
+    const mode = settings.aggregator?.mode ?? "synthesis";
+    const judgeCount = settings.aggregator?.tournamentJudgeCount ?? 1;
+    checks.push({
+      name: "aggregator_mode",
+      status: "ok",
+      detail:
+        mode === "tournament"
+          ? `Tournament mode active (K=${judgeCount} judge${judgeCount === 1 ? "" : "s"}). See PM #52.`
+          : `Synthesis mode (default). Set settings.aggregator.mode = "tournament" for code/math/factual prompts. See PM #52.`,
+    });
+  } catch {
+    // Silently skip — settings already produced its own check above.
+  }
+
+  // 8. Trace memory pool (PM #53 — surface PM #51 state)
+  try {
+    const settings = await getSettings();
+    const enabled = settings.traceMemory?.enabled === true;
+    if (!enabled) {
+      checks.push({
+        name: "trace_memory",
+        status: "ok",
+        detail:
+          "Trace memory is off. Enable via settings.traceMemory.enabled = true to capture successful MoA runs as Router few-shots. See PM #51.",
+      });
+    } else {
+      const fs = await import("fs/promises");
+      const path = await import("path");
+      const tracesDir = path.join(process.cwd(), "data", "traces");
+      let entries: string[] = [];
+      try {
+        entries = await fs.readdir(tracesDir);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      }
+      const traceCount = entries.filter((e) => e.endsWith(".json")).length;
+      checks.push({
+        name: "trace_memory",
+        status: "ok",
+        detail:
+          traceCount === 0
+            ? `Trace memory enabled but pool empty — captures begin after the first MoA run that meets the quality threshold (default 0.7). See PM #51.`
+            : `Trace memory enabled. Pool size: ${traceCount} trace(s). Inspect with \`npm run trace:list\`.`,
+      });
+    }
+  } catch {
+    // Silently skip.
+  }
+
+  // 9. OpenRouter pricing cache (PM #53 — surface PM #49 state)
+  try {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const cachePath = path.join(
+      process.cwd(),
+      "data",
+      "cache",
+      "openrouter-pricing.json"
+    );
+    let raw: string | null = null;
+    try {
+      raw = await fs.readFile(cachePath, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (!raw) {
+      checks.push({
+        name: "openrouter_pricing_cache",
+        status: "ok",
+        detail:
+          "No cache yet — refresh happens at boot. If OpenRouter is unreachable, hardcoded prices in pricing.ts are used as fallback. See PM #49.",
+      });
+    } else {
+      const parsed = JSON.parse(raw) as {
+        fetchedAt?: string;
+        entries?: Array<unknown>;
+      };
+      const fetchedAt = parsed.fetchedAt ? new Date(parsed.fetchedAt) : null;
+      const ageHours = fetchedAt
+        ? (Date.now() - fetchedAt.getTime()) / 3_600_000
+        : null;
+      const entryCount = Array.isArray(parsed.entries) ? parsed.entries.length : 0;
+      const stale = ageHours !== null && ageHours > 48;
+      checks.push({
+        name: "openrouter_pricing_cache",
+        status: stale ? "warn" : "ok",
+        detail: stale
+          ? `Cache is ${ageHours.toFixed(1)}h old (>48h stale). Boot refresh may be failing; check network or OpenRouter availability. ${entryCount} entries cached. See PM #49.`
+          : `Cache fresh. ${entryCount} models priced; age ${ageHours?.toFixed(1) ?? "?"}h.`,
+      });
+    }
+  } catch {
+    // Silently skip — the hardcoded fallback always works.
+  }
+
   const totalMs = Date.now() - startTotal;
   const overallStatus = checks.some((c) => c.status === "error")
     ? "unhealthy"

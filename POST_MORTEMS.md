@@ -38,6 +38,77 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 53. Operator Tooling & Observability Pass — PM #48–52 Hardening
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (hardening pass; closing the operator-UX gap left by the v3/v4 feature push)
+**Symptoms:** No incident. PMs #48–#52 shipped five substantial features (per-role tiers, live OpenRouter pricing, coder code_execution, trace memory, tournament aggregator) but every one of them landed with the same "UI toggle pending v3.1 settings UI" note. Operators using these features had to:
+  1. Edit `data/settings/settings.json` by hand (which fields? where?),
+  2. Inspect `data/traces/` files manually with `cat` / `jq`,
+  3. Have no signal whether OpenRouter pricing was actually live or stale,
+  4. Have no signal whether they were in tournament mode vs synthesis,
+  5. Hand-roll their own `rm` commands to curate the trace pool.
+
+Functional features without operator affordances = features that exist in tests but not in practice. PM #53 closes the operator-UX gap.
+**Root Cause:** N/A — gap, not bug. Each of PM #48–#52 deferred UX to "v3.1 settings UI" but no PR before this one had built the lighter-weight tools (CLI + health checks + recipes) that don't need a full settings UI.
+**Resolution:** Three coordinated additions.
+
+  1. **`scripts/trace-memory-admin.ts`** + five new npm scripts (`trace:list`, `trace:show <id>`, `trace:stats`, `trace:clear`, `trace:delete <id>`) — CLI for the PM #51 trace pool. Operators can now inspect / curate / wipe the pool without manual `fs` work. `trace:clear` requires a typed `yes` confirmation (operator could lose months of captured fewshots otherwise); `--yes` flag bypasses the prompt for CI. Pure CLI — doesn't import the runtime trace-memory module (no AI SDK boot cost), reads JSON directly.
+  2. **`/api/health` route extensions** — three new subsystem checks that surface PM #49/#51/#52 state in the existing structured-probe endpoint:
+     - **`aggregator_mode`** — reports `synthesis` (default) or `tournament` with K judge count. Operator sees at a glance "am I in tournament mode?" without grepping settings.json.
+     - **`trace_memory`** — reports disabled / enabled-empty / enabled-N-traces. References `npm run trace:list` for inspection.
+     - **`openrouter_pricing_cache`** — reports cache freshness in hours, entry count, source. **Warns when cache is >48h stale** (signals the boot refresh is failing — operator should check network or OpenRouter availability).
+  3. **README "Configuration recipes" section** — operator-facing how-to with concrete JSON snippets for: cost-optimized MoA tiers, air-gapped Privacy Mode, tournament aggregator, self-verifying coder, trace memory, multi-round reflection, and a "Diagnostics" panel pointing at `/api/health` + `npm run trace:stats`. Every recipe is paste-and-go (operator copies the JSON, fills in their model id, restarts).
+
+**What was deliberately NOT included:**
+  - Full settings UI — still tracked as v3.1. Each new feature opt-in is a settings.json field; building one config page would be too much scope for this PR.
+  - Per-tier cost breakdown in the cost banner — PM #36's banner shows aggregate; per-tier requires a UI redesign. Tracked as follow-up.
+  - Eval cases for PM #48-52 behavioral surfaces — the existing eval harness (PM #41) supports them, but writing N high-quality cases is its own PR. Captured as future work; not blocking.
+
+**Health-check semantics — invariants now pinned:**
+  - All three new probes are **soft** (`ok` even when the feature is off — the recommendation is shown in the detail string, not the status).
+  - `openrouter_pricing_cache` is the only one that can `warn`, and only when the file is >48h old. Cache-missing is `ok` because the hardcoded fallback table always works (PM #49 design invariant).
+  - Subsystem order is stable: the existing 8 checks + 3 new ones in fixed insertion order. Dashboards / MCP `orchestra_health` tool consumers parse by name, but the order matters for stable test snapshots.
+
+**Operator experience — concrete improvement:**
+
+Before PM #53:
+```
+$ ls data/traces/ | wc -l        # is anything captured?
+$ cat data/traces/<random>.json  # what's in here? hex id, no human label
+$ rm data/traces/abc.json        # delete one — hope it's the right one
+$ cat data/cache/openrouter-pricing.json | jq '.fetchedAt'  # cache age?
+```
+
+After PM #53:
+```
+$ npm run trace:stats            # one-shot pool health
+$ npm run trace:list             # table sorted by score, with prompt summary
+$ npm run trace:delete abc1234   # explicit, with not-found check
+$ curl /api/health | jq '.subsystems[] | select(.name == "trace_memory")'
+```
+
+The pattern shipped here is the v3/v4 "feature done means: tested + operable + observable" bar — features ship with their CLI + health-check + recipe in the same PR going forward. PM #48-52 shipped the feature halves; this PR is the bundled operator-UX half.
+
+**Regression Coverage:**
+  - [`src/app/api/health/route.test.ts`](src/app/api/health/route.test.ts) — 13 new cases (29 total):
+    - subsystem-order test now expects 11 entries (was 8).
+    - `aggregator_mode`: default → synthesis; tournament K=3 → "K=3 judges" detail; K=1 → singular "K=1 judge".
+    - `trace_memory`: disabled → enable hint; enabled-empty → empty-pool hint; enabled+disk → reports count.
+    - `openrouter_pricing_cache`: no cache → boot-refresh hint; fresh cache → age + entry count; >48h stale → warn.
+  - [`scripts/trace-memory-admin.test.ts`](scripts/trace-memory-admin.test.ts) — 7 new cases pinning `computeStats`: empty pool → zero totals; median odd → middle value; median even → avg of two middles; min/max boundaries; oldest/newest ISO order; prompt/answer length means; scoreMean arithmetic.
+
+  All 145 MoA + privacy + tier + trace + tournament tests still pass — health route + CLI additions didn't perturb the agent runtime.
+
+**Doc Updates:**
+  - [`README.md`](README.md) — new "🧰 Configuration recipes" section between "📚 Documentation" and "🛣 Roadmap". Operator-facing concrete recipes for every v3/v4 feature.
+  - [`package.json`](package.json) — five new npm scripts: `trace:list`, `trace:show`, `trace:stats`, `trace:clear`, `trace:delete`.
+  - No CLAUDE.md change — the "Rule" already captures the doc-as-code contract. Future feature PRs MUST follow the new operator-tooling shape: CLI + health check + recipe in the same PR.
+
+**Rule:** A feature without operator tooling is a feature that ships in tests but not in practice. From PM #53 onward: every new opt-in setting ships with (a) at least one `/api/health` probe surfacing its state, (b) a CLI script for inspection / curation when the feature persists data, and (c) a README recipe with paste-able config. The "v3.1 settings UI will fix it" excuse is rejected — settings-UI work is its own PR. The lightweight surfaces (CLI, health check, README) cover 80% of the operator's need at 20% of the cost.
+
+---
+
 ## 52. Tournament Aggregator — Borda Count for Code/Math/Factual Tasks
 **Date:** 2026-05
 **Status:** RESOLVED

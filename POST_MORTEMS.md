@@ -38,6 +38,55 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 57. Decomposition of `moa.ts` — Bringing the Orchestration File Back Under the Hard Cap
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (tech debt fix — no runtime change)
+**Symptoms:** No live incident. `moa.ts` had grown from ~1200 lines at the start of the PM #48–53 push to 1514 lines after PM #56, hitting the CLAUDE.md § File-Size Discipline hard cap ("Crossing 1500 means the file MUST be decomposed in the next PR that touches it substantively"). Every recent feature added some inline code: PM #48 +~75 lines (tier resolution), PM #51 +~50 lines (trace capture/retrieve wiring), PM #52 +~120 lines (tournament branch), PM #54/#55 +~50 lines total. The file was past the hard cap; this is the decomposition PR.
+**Root Cause:** N/A — accrual.
+**Resolution.** Three focused modules extracted; `moa.ts` retains the orchestration code (`runMoAEnsemble`) and the inline reflection-loop block. Symbols re-exported from `./moa` so every caller and test that imports from there continues to work without changes.
+
+  1. **`src/lib/agent/moa-personas.ts`** (215 lines) — persona types + static fallback proposer set + role detection + tier derivation + API-key inheritance + per-proposer model resolution. All pure / synchronous; no I/O. Extracted:
+     - `ProposerTier`, `MoAProposer`, `MOA_PROPOSERS`, `ProposerRole`
+     - `deriveTierFromRole`, `detectProposerRole`
+     - `resolveWorkerKey`, `resolveProposerModelConfig`
+
+  2. **`src/lib/agent/moa-proposer-tools.ts`** (171 lines) — role-aware tool assignment + prompt mandates + success-predicate. Extracted:
+     - `selectProposerTools` (PM #42 + PM #50 role gating)
+     - `FACT_CHECK_MANDATE`, `CODE_EXECUTION_MANDATE`
+     - `augmentProposerPromptForTools`
+     - `isSuccessfulDraft` (PM #54 success predicate)
+
+  3. **`src/lib/agent/moa-router.ts`** (158 lines) — Dynamic Persona Generation. Extracted:
+     - `DPGResult`
+     - `generateDynamicSwarm` (the Router's `generateObject` call + PM #37 force-injection of Skeptic + fallback to `MOA_PROPOSERS` on error)
+
+  Together: 544 lines moved out of `moa.ts`. The remaining file is 1096 lines — under the 1500 hard cap, still above the 800 soft cap. The next substantive PR to `moa.ts` will likely extract `moa-aggregator.ts` (synthesis + tournament dispatch) and/or `moa-reflection.ts` (the multi-round loop). Those blocks weave heavily with `runMoAEnsemble`-local state (moaUsage accumulation, disagreement marker, scope variables); extracting them safely requires a state-passing refactor that's its own PR.
+
+**What deliberately did NOT move:**
+  - **`runMoAEnsemble` orchestration body** — the entire fan-out + Promise.all + aggregator dispatch loop stays in `moa.ts`. This is the orchestration unit, not a candidate for extraction.
+  - **Inline `cosineSimilarity`** — used only by the reflection convergence check inside `runMoAEnsemble`. Extracting it independently would have produced a tiny single-symbol module. Tracked in the comment: "if a fourth caller materialises, extract to `src/lib/memory/embeddings.ts`".
+  - **`AGGREGATOR_SYSTEM_PROMPT` + `buildAggregatorPrompt`** — stays for now. The synthesis dispatch closure references many `runMoAEnsemble`-local variables. Future PR.
+  - **The multi-round reflection block** — same reason as aggregator dispatch.
+
+**Import surface preservation.** Every symbol previously exported from `./moa` is still importable from `./moa` via re-export. Test files (`moa.test.ts`, `moa-tools.test.ts`, `moa-tiers.test.ts`) continue to import their target symbols without source changes. The exception: `moa-tools.test.ts` was already named for the test file's *content* (PM #42 tool routing), not for the file under test. There's a `moa-proposer-tools.ts` now alongside `moa-tools.test.ts` — the names differ to avoid confusion. If you're hunting for the test-implementation relationship: tests use `import { ... } from "./moa"`, the symbols originate in the per-concern files, `moa.ts` re-exports them.
+
+**File-size discipline now restored:**
+  - `moa.ts` was 1514, is 1096. The 800-line soft cap is still crossed but the 1500-line hard cap is well clear.
+  - All three new files are under 250 lines — comfortably under the soft cap.
+  - The next two extractions (aggregator dispatch + reflection loop) are documented as follow-up tech debt.
+
+**Regression Coverage:** None added — this is a pure refactor with no semantic change. All 366 pre-existing tests pass without modification, which is the regression test FOR the refactor. The TS strict mode + the existing test suite catch import-resolution bugs, symbol-rename mistakes, and any accidental behavior changes.
+
+**Doc Updates:**
+  - [`POST_MORTEMS.md`](POST_MORTEMS.md) — PM #57 entry.
+  - No CLAUDE.md change — the file-size rules already prescribe this exact behavior. PM #57 is the act of following the rule.
+  - No README/recipe changes — operator-facing surface unchanged.
+
+**Rule:** "Don't add a new function to a 1500+ line file unless you also extract something equivalent" (CLAUDE.md § File-Size Discipline). PM #57 is the regression remediation: the file crossed the hard cap during the PM #48-56 push (~330 lines added across the five PMs). Going forward: file-size watchdog is part of every feature PR's review checklist. When a PM PR adds substantive code to a file that's already 1200+ lines, the same PR must extract the new code OR a same-sized old block. Otherwise the file's hard cap is the next merge's problem.
+
+---
+
 ## 56. Test Coverage Gaps from PM #48–53 Audit — Closed
 **Date:** 2026-05
 **Status:** RESOLVED

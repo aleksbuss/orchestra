@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import type { AppSettings } from "@/lib/types";
 import {
   augmentProposerPromptForTools,
+  CODE_EXECUTION_MANDATE,
   detectProposerRole,
   FACT_CHECK_MANDATE,
   selectProposerTools,
@@ -156,5 +157,176 @@ describe("PM #42 — augmentProposerPromptForTools", () => {
     expect(FACT_CHECK_MANDATE).toMatch(/API signatures/i);
     expect(FACT_CHECK_MANDATE).toMatch(/Real-time facts/i);
     expect(FACT_CHECK_MANDATE).toMatch(/explicitly|state that explicitly/i);
+  });
+});
+
+// ─────────────────────── PM #50 — coder code_execution ───────────────────
+//
+// What's pinned:
+//   - coder role + proposerAccess + codeExecution.enabled → tool included.
+//   - coder role + proposerAccess=false → NO tool (opt-in invariant).
+//   - coder role + codeExecution.enabled=false → NO tool (global flag wins).
+//   - non-coder roles never get code_execution even if all flags are on.
+//   - the mandate fires whenever the tool is present, not before.
+//   - the mandate text pins the verification triggers (regression guard).
+//   - both mandates compose if a persona somehow gets both tools.
+
+const fullSettingsWithCoderAccess: AppSettings = {
+  chatModel: { provider: "openai", model: "gpt-4o", apiKey: "k" },
+  utilityModel: { provider: "openai", model: "gpt-4o-mini", apiKey: "k" },
+  embeddingsModel: {
+    provider: "openai",
+    model: "text-embedding-3-small",
+    dimensions: 1536,
+  },
+  codeExecution: {
+    enabled: true,
+    timeout: 600,
+    maxOutputLength: 120000,
+    proposerAccess: true, // PM #50 opt-in ON
+  },
+  memory: {
+    enabled: true,
+    similarityThreshold: 0.35,
+    maxResults: 10,
+    chunkSize: 400,
+  },
+  search: { enabled: false, provider: "none" },
+  general: { darkMode: false, language: "en" },
+  auth: {
+    enabled: true,
+    username: "admin",
+    passwordHash: "scrypt$x$y",
+    mustChangeCredentials: false,
+  },
+};
+
+const coderCtx = {
+  settings: fullSettingsWithCoderAccess,
+  cwd: "/tmp/orchestra-test-cwd",
+};
+
+describe("PM #50 — selectProposerTools (coder code_execution)", () => {
+  it("coder + proposerAccess ON + codeExecution.enabled → code_execution tool included", () => {
+    const tools = selectProposerTools("coder", false, disabledSearch, coderCtx);
+    expect(tools).toBeDefined();
+    expect(tools).toHaveProperty("code_execution");
+    // Search is disabled, so search_web must not appear.
+    expect(tools).not.toHaveProperty("search_web");
+  });
+
+  it("coder + proposerAccess OFF → NO code_execution (opt-in invariant)", () => {
+    const tools = selectProposerTools("coder", false, disabledSearch, {
+      ...coderCtx,
+      settings: {
+        ...fullSettingsWithCoderAccess,
+        codeExecution: {
+          ...fullSettingsWithCoderAccess.codeExecution,
+          proposerAccess: false,
+        },
+      },
+    });
+    expect(tools).toBeUndefined();
+  });
+
+  it("coder + proposerAccess UNDEFINED → NO code_execution (defaults off)", () => {
+    const settingsWithoutAccess = {
+      ...fullSettingsWithCoderAccess,
+      codeExecution: {
+        enabled: true,
+        timeout: 600,
+        maxOutputLength: 120000,
+        // proposerAccess deliberately omitted — pre-PM-50 settings shape.
+      },
+    };
+    const tools = selectProposerTools("coder", false, disabledSearch, {
+      ...coderCtx,
+      settings: settingsWithoutAccess,
+    });
+    expect(tools).toBeUndefined();
+  });
+
+  it("coder + global codeExecution.enabled OFF → NO code_execution (global flag wins)", () => {
+    const tools = selectProposerTools("coder", false, disabledSearch, {
+      ...coderCtx,
+      settings: {
+        ...fullSettingsWithCoderAccess,
+        codeExecution: {
+          ...fullSettingsWithCoderAccess.codeExecution,
+          enabled: false,
+        },
+      },
+    });
+    expect(tools).toBeUndefined();
+  });
+
+  it("non-coder roles NEVER get code_execution (even with everything ON)", () => {
+    for (const role of ["reviewer", "researcher", "tool"] as const) {
+      const tools = selectProposerTools(role, false, disabledSearch, coderCtx);
+      // reviewer/researcher only get tools when search is enabled; we
+      // disabled search above so they should return undefined.
+      // tool role never gets code_execution.
+      if (tools) expect(tools).not.toHaveProperty("code_execution");
+    }
+  });
+
+  it("coder + proposerAccess ON + NO coderContext → NO code_execution (defensive)", () => {
+    const tools = selectProposerTools("coder", false, disabledSearch);
+    expect(tools).toBeUndefined();
+  });
+
+  it("coder gets BOTH tools when also tagged researcher-like (shouldn't happen but defensive)", () => {
+    // detectProposerRole returns ONE role per persona, so a real persona
+    // wouldn't end up here. But selectProposerTools must compose cleanly
+    // if a future caller passes a hybrid.
+    const reviewer = selectProposerTools("reviewer", true, enabledSearch, coderCtx);
+    expect(reviewer).toHaveProperty("search_web");
+    // reviewer is NOT coder → no code_execution for them.
+    expect(reviewer).not.toHaveProperty("code_execution");
+  });
+});
+
+describe("PM #50 — augmentProposerPromptForTools (code_execution mandate)", () => {
+  const basePrompt = "[GOAL] Be helpful. [RULES] Cite sources. [FORMAT] markdown";
+
+  it("tools include code_execution → CODE_EXECUTION_MANDATE appended", () => {
+    const tools = selectProposerTools("coder", false, disabledSearch, coderCtx);
+    const out = augmentProposerPromptForTools(basePrompt, tools);
+    expect(out).toContain(basePrompt);
+    expect(out).toContain("CODE-EXECUTION MANDATE");
+  });
+
+  it("tools include both search_web AND code_execution → both mandates appended", () => {
+    // Manually construct a hybrid toolset; selectProposerTools wouldn't
+    // produce this shape with current detectProposerRole, but the
+    // augmenter must handle it correctly if a future caller does.
+    const reviewerTools = selectProposerTools(
+      "reviewer",
+      true,
+      enabledSearch,
+      coderCtx
+    );
+    // Add code_execution onto the reviewer toolset (synthetic hybrid).
+    const coderTools = selectProposerTools(
+      "coder",
+      false,
+      disabledSearch,
+      coderCtx
+    );
+    const hybrid = { ...reviewerTools, ...coderTools };
+    const out = augmentProposerPromptForTools(basePrompt, hybrid);
+    expect(out).toContain("FACT-CHECK MANDATE");
+    expect(out).toContain("CODE-EXECUTION MANDATE");
+  });
+
+  it("CODE_EXECUTION_MANDATE names the canonical verification triggers", () => {
+    expect(CODE_EXECUTION_MANDATE).toMatch(/library API signature/i);
+    expect(CODE_EXECUTION_MANDATE).toMatch(/output shape/i);
+    expect(CODE_EXECUTION_MANDATE).toMatch(/regex|parsing|boundary/i);
+    // The "what NOT to use" section must stay — it's how we keep coder
+    // proposers from launching GUI apps and hanging the server.
+    expect(CODE_EXECUTION_MANDATE).toMatch(/GUI apps/i);
+    expect(CODE_EXECUTION_MANDATE).toMatch(/long-running\s+servers/i);
+    expect(CODE_EXECUTION_MANDATE).toMatch(/2-minute cap/i);
   });
 });

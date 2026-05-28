@@ -1144,3 +1144,64 @@ function validateSandboxRules(code: string, runtime: ExecutionRuntime): void {
     );
   }
 }
+
+/* ──────────────── PM #50 — Proposer-scoped code_execution tool ────────────────
+ *
+ * The orchestrator's `code_execution` tool in tool.ts is the full surface
+ * (background sessions, install_packages, manage_processes, yield_ms).
+ * Proposers don't need most of that — a coder persona runs a quick
+ * snippet during its 2-minute turn to self-verify code, then drafts.
+ *
+ * What this factory deliberately differs from the orchestrator tool:
+ *   - No background sessions (would persist past the proposer turn —
+ *     leaks child processes nobody owns).
+ *   - No `install_packages` companion — proposers should self-install
+ *     via `pip install … && python -c …` from within a single call.
+ *   - Same line/char limits as the orchestrator (CODE_EXEC_MAX_*).
+ *   - Same env-scrub posture (PM #28) — comes for free via `executeCode`.
+ *
+ * Returns an `ai`-SDK `Tool` shape that drops into a proposer's `tools`
+ * map. Pre-flight validation matches the orchestrator side so the
+ * proposer sees the same `[Preflight error]` messages.
+ */
+import { tool } from "ai";
+import { z } from "zod";
+
+const PROPOSER_CODE_EXEC_MAX_CHARS = 20000;
+const PROPOSER_CODE_EXEC_MAX_LINES = 800;
+
+export function buildProposerCodeExecutionTool(
+  settings: AppSettings,
+  cwd: string
+) {
+  return tool({
+    description:
+      "Execute Python, Node.js, or shell code to self-verify your draft before responding. Use this to test snippets, validate library APIs, or run small computations. CRITICAL: do NOT run GUI apps, long-running servers, or anything that won't exit on its own — your proposer turn has a 2-minute cap. Use this to verify, not to deploy.",
+    inputSchema: z.object({
+      runtime: z
+        .enum(["python", "nodejs", "terminal"])
+        .describe(
+          "Runtime: 'python' for Python, 'nodejs' for JavaScript, 'terminal' for shell."
+        ),
+      code: z.string().describe("Code or command to execute."),
+    }),
+    execute: async ({ runtime, code }) => {
+      const normalizedCode = code.replace(/\r\n/g, "\n");
+      const sanitizedCode = normalizedCode.replace(/\s+$/, "");
+      const lineCount =
+        sanitizedCode.length === 0 ? 0 : sanitizedCode.split("\n").length;
+      if (sanitizedCode.length === 0) {
+        return "[Preflight error] Empty code payload.";
+      }
+      if (sanitizedCode.length > PROPOSER_CODE_EXEC_MAX_CHARS) {
+        return `[Preflight error] Code payload too large (${sanitizedCode.length} chars). Limit is ${PROPOSER_CODE_EXEC_MAX_CHARS}.`;
+      }
+      if (lineCount > PROPOSER_CODE_EXEC_MAX_LINES) {
+        return `[Preflight error] Code payload has too many lines (${lineCount}). Limit is ${PROPOSER_CODE_EXEC_MAX_LINES}.`;
+      }
+      // sessionId 0 — proposers don't share state across turns. No
+      // background, no yield — proposers run sync to completion.
+      return executeCode(runtime, sanitizedCode, 0, settings.codeExecution, cwd);
+    },
+  });
+}

@@ -7,9 +7,10 @@ import {
   type ToolExecutionOptions,
   type ToolSet,
 } from "ai";
-import { createModel } from "@/lib/providers/llm-provider";
+import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
+import type { ModelConfig } from "@/lib/types";
 import {
   classifyModelError,
   pickFallbackModel,
@@ -1084,8 +1085,68 @@ export interface RunAgentOptions {
   preset?: PresetTier;
 }
 
+/**
+ * PM #47 — Privacy Mode runtime guard. Throws when the operator has
+ * enabled `settings.privacyMode.enabled` but any of `chatModel`,
+ * `utilityModel`, or `embeddingsModel` resolves to a non-local backend.
+ * Exported so the runtime check has its own focused test suite
+ * (`agent-privacy.test.ts`) without booting the full runAgent path.
+ */
+export function assertPrivacyModeAllowsSettings(
+  settings: AppSettings
+): void {
+  if (!settings.privacyMode?.enabled) return;
+  const violations: string[] = [];
+  if (!isLocalProvider(settings.chatModel)) {
+    violations.push(
+      `chatModel = ${settings.chatModel.provider}/${settings.chatModel.model}`
+    );
+  }
+  // utilityModel is used by the Router + reflection critic. If it's
+  // not local, the swarm leaks the user prompt to a vendor regardless
+  // of whether the chatModel is local.
+  if (
+    settings.utilityModel?.model &&
+    !isLocalProvider(settings.utilityModel)
+  ) {
+    violations.push(
+      `utilityModel = ${settings.utilityModel.provider}/${settings.utilityModel.model}`
+    );
+  }
+  // embeddingsModel is used by Blackboard + PM #39 disagreement
+  // detection + PM #46 convergence. Same threat — text leaves the box.
+  // Note: the embeddingsModel union includes "mock", which is non-network.
+  if (
+    settings.embeddingsModel?.provider &&
+    settings.embeddingsModel.provider !== "mock" &&
+    !isLocalProvider({
+      provider: settings.embeddingsModel.provider as ModelConfig["provider"],
+      model: settings.embeddingsModel.model,
+      baseUrl: settings.embeddingsModel.baseUrl,
+    })
+  ) {
+    violations.push(
+      `embeddingsModel = ${settings.embeddingsModel.provider}/${settings.embeddingsModel.model}`
+    );
+  }
+  if (violations.length > 0) {
+    throw new Error(
+      `Privacy Mode is enabled, but these models target a non-local backend:\n  ` +
+        violations.map((v) => `• ${v}`).join("\n  ") +
+        `\n\nTo proceed, either: (a) disable Privacy Mode in Settings, or ` +
+        `(b) switch the violating models to a local backend (ollama, ` +
+        `sglang, vllm, or custom with a loopback baseUrl).`
+    );
+  }
+}
+
 export async function runAgent(options: RunAgentOptions) {
   const settings = await getSettings();
+
+  // PM #47 — Privacy Mode enforcement. Fail fast before any LLM call so
+  // the operator/sharing-friends see the error in the chat UI rather
+  // than a partial run with cloud telemetry already in flight.
+  assertPrivacyModeAllowsSettings(settings);
 
   // Resolve model config: if a preset is active, use its brain config;
   // otherwise fall back to the user's manual settings.

@@ -38,6 +38,42 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 47. Privacy Mode — Algorithmic Air-Gap for Local-Only MoA
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P3 (feature, not defect — unique-to-local angle promised by README v0.2.0 roadmap)
+**Symptoms:** No live incident. The README v0.2.0 promised "Privacy mode badge — hard-disable outbound network during MoA" as a v3.0 deliverable; it was the last item left in v3. Use cases: legal-discovery review, medical record analysis, gov-service compliance, "trade-secret" workflows where the operator needs algorithmic certainty that nothing leaves the machine. The prior posture relied on "trust the vendor's privacy policy" + operator discipline (only choose Ollama). Algorithmic enforcement was missing — an operator could ACCIDENTALLY pick OpenAI for utilityModel while running Ollama for chatModel and silently leak the Router prompt + persona generation to OpenAI.
+**Root Cause:** N/A — feature, not bug.
+**Resolution:** Four coordinated additions:
+  1. **`AppSettings.privacyMode?: { enabled: boolean }`** in [`src/lib/types.ts`](src/lib/types.ts). Default-off opt-in flag.
+  2. **`isLoopbackHost(host)` + `isLoopbackUrl(rawUrl)`** in [`src/lib/security/url-guard.ts`](src/lib/security/url-guard.ts). Covers `localhost`, `127.0.0.0/8`, `::1`, and IPv4-in-IPv6 loopback (`::ffff:7f00:*`). Returns false for RFC 1918 / link-local / public — those are LAN, not "this machine".
+  3. **`isLocalProvider(config: ModelConfig)`** in [`src/lib/providers/llm-provider.ts`](src/lib/providers/llm-provider.ts). Predicate: `ollama` / `sglang` / `vllm` with no baseUrl OR loopback baseUrl → true. `custom` with loopback baseUrl → true. Everything else (`openai`, `anthropic`, `google`, `openrouter`, `codex-cli`, `gemini-cli`) → false unconditionally. Even with a loopback baseUrl override on a vendor provider, returns false — vendor AI SDK adapters point at the vendor's domain regardless of baseUrl in practice.
+  4. **`assertPrivacyModeAllowsSettings(settings)`** exported from [`src/lib/agent/agent.ts`](src/lib/agent/agent.ts), called at the top of every `runAgent` invocation. Throws with a clear multi-line error naming every violating model: chatModel, utilityModel, embeddingsModel each checked independently. Error message includes the remediation hint (disable Privacy Mode OR switch to a local backend).
+  5. **`<PrivacyBadge>`** in [`src/components/chat/privacy-badge.tsx`](src/components/chat/privacy-badge.tsx) — renders an inline pill above the chat ("🔒 Privacy mode — air-gapped (local backends only)") whenever `settings.privacyMode.enabled === true`. Chat-panel fetches `/api/settings` on mount + every syncTick so the badge stays current across multi-tab edits.
+  6. **Boot log** in [`src/instrumentation-node.ts`](src/instrumentation-node.ts) — every cold boot prints either `[Privacy] Privacy Mode is ENABLED.` (with operator-facing reminder about constraints) or `[Privacy] Privacy Mode is off.` (with hint to enable for air-gap).
+
+**Threat model addressed:**
+  - Operator-level: prevents accidental cloud-provider selection. Even if the operator forgets the swap, runAgent fails fast with the violator named.
+  - Friends-sharing-instance: visible badge means anyone with chat access can see at-a-glance whether the chat will leave the machine.
+  - Legal/compliance: meets the "code refuses" bar (not just "policy says won't"). The algorithmic predicate is auditable.
+
+**What this is NOT:**
+  - Not a DNS / outbound-network firewall. If the operator goes around Orchestra (raw curl from a tool call etc.), this guard doesn't catch it. The MCP / web-task / search-engine paths still have their own SSRF guards from PM #8, #11, #27 — those continue to allow loopback regardless of Privacy Mode (the local-first use case).
+  - Not a settings-UI toggle yet. v1 requires editing `data/settings/settings.json` (`privacyMode: { enabled: true }`). UI toggle is a one-line addition once a settings-edit page exists.
+  - Not a runtime "off-switch". Toggling Privacy Mode while an in-flight chat is running doesn't abort that chat — the enforcement is at runAgent entry only. Subsequent turns honor the new setting.
+
+**Regression Coverage:**
+  - [`src/lib/security/url-guard.test.ts`](src/lib/security/url-guard.test.ts) — 28 new cases for `isLoopbackHost` (7 positive: localhost/127.x/::1 variants; 13 negative: vendor APIs, RFC 1918, link-local, IPv6 ULA; IPv4-in-IPv6 loopback mapped form; defensive empty input) and `isLoopbackUrl` (loopback ports, public URLs, file://, malformed).
+  - [`src/lib/providers/local-provider.test.ts`](src/lib/providers/local-provider.test.ts) — 18 cases for `isLocalProvider`: ollama/sglang/vllm with no baseUrl, explicit loopback, public override (rejected as the operator's redirect); custom with loopback/public/no-baseUrl; all 6 cloud providers always rejected.
+  - [`src/lib/agent/agent-privacy.test.ts`](src/lib/agent/agent-privacy.test.ts) — 10 cases pinning the enforcement contract: privacy-off is no-op; all-local passes; cloud chatModel/utilityModel/embeddingsModel each throw with model-id in message; multi-violation message lists ALL; custom-loopback allowed, custom-public rejected; embeddingsModel "mock" allowed (test fixture); error message contains remediation hint.
+
+**Doc Updates:**
+  - [`README.md`](README.md) roadmap — Privacy mode moved from v3.0 pending to v3.0 shipped. v3.0 is now complete except for per-role tier routing.
+  - No CLAUDE.md change — this is a feature, not architectural rule. Operators reading the README see the toggle.
+**Rule:** Privacy guarantees that depend on operator discipline ("just pick Ollama") are not guarantees, they're suggestions. When the threat model demands "code refuses to make the call", the predicate must run in code at the entry point, with EVERY contributing model checked (not just the obvious one), and the failure mode must be a fast throw — not a partial run with cloud telemetry already submitted. The UI badge is the social-layer reinforcement: visible state is recoverable when accidentally left in the wrong mode.
+
+---
+
 ## 46. Multi-Round Reflection with Cosine-Convergence + Hard Cap
 **Date:** 2026-05
 **Status:** RESOLVED

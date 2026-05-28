@@ -14,6 +14,7 @@ import { generateClientId } from "@/lib/utils";
 import { GoalTree } from "@/components/chat/goal-tree";
 import { ChatErrorBanner } from "@/components/chat/chat-error-banner";
 import { BudgetBanner } from "@/components/chat/budget-banner";
+import { PrivacyBadge } from "@/components/chat/privacy-badge";
 
 /** Convert stored ChatMessage to UIMessage (parts format for useChat) */
 function chatMessagesToUIMessages(chatMessages: ChatMessage[]): UIMessage[] {
@@ -255,11 +256,36 @@ export function ChatPanel() {
   const [cumulativeUsage, setCumulativeUsage] = useState<
     import("@/lib/types").ChatUsage | undefined
   >(undefined);
+  // PM #47 — Privacy Mode state. Fetched from /api/settings on mount and
+  // refreshed on sync ticks. When true, the PrivacyBadge renders above
+  // the chat so the operator (and friends sharing the instance) always
+  // see that they're air-gapped.
+  const [privacyModeEnabled, setPrivacyModeEnabled] = useState<boolean>(false);
   const syncTick = useBackgroundSync({
     topics: ["chat", "global"],
     projectId: activeProjectId ?? null,
     chatId: activeChatId ?? undefined,
   });
+
+  // PM #47 — fetch privacy mode from /api/settings on mount + on every
+  // syncTick (so toggling in another tab propagates within ~SSE pulse).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s) => {
+        if (cancelled) return;
+        const enabled = !!s?.privacyMode?.enabled;
+        setPrivacyModeEnabled(enabled);
+      })
+      .catch(() => {
+        // Failure is non-critical — badge just stays hidden. Falsey is
+        // the safer default (no false sense of security).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [syncTick]);
   const internalChatIdRef = useRef(internalChatId);
   internalChatIdRef.current = internalChatId;
 
@@ -685,6 +711,11 @@ export function ChatPanel() {
       {chatError && (
         <ChatErrorBanner error={chatError} onDismiss={dismissChatError} />
       )}
+
+      {/* PM #47 — air-gapped mode indicator. Renders only when privacy
+          mode is enabled in settings.json. Operator + sharing friends
+          see at-a-glance "yes, still air-gapped — no cloud calls". */}
+      <PrivacyBadge enabled={privacyModeEnabled} />
 
       {/* PM #36 — running tokens + cost estimate for this chat. Unobtrusive;
           hidden when no LLM call has landed yet. Hover for breakdown. */}

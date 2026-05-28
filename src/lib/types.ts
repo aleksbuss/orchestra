@@ -178,6 +178,37 @@ export interface AppSettings {
     /** Number of past traces to inject as few-shots per Router call. Default 3. */
     retrievalK?: number;
   };
+  /**
+   * MoA aggregator mode (PM #52). Default mode is "synthesis" — a brain
+   * model merges N drafts into a new answer (the togethercomputer/MoA
+   * shape from PM #40). Tournament mode skips synthesis: K judge calls
+   * each rank the drafts, Borda count picks the winner, and the WINNING
+   * DRAFT (verbatim) is the final answer. Better for code/math/factual
+   * prompts where one proposer is right and synthesis only smooths the
+   * correct answer into a worse one.
+   *
+   * Cost shape:
+   *   - Synthesis: 1 brain LLM call producing a long output.
+   *   - Tournament (K=1): 1 judge call producing a short ranking.
+   *   - Tournament (K=3): 3 judge calls in parallel. More robust but
+   *     ~3× judge tokens. Cheaper than synthesis when N drafts are
+   *     short and the synthesizer would write long text.
+   *
+   * K=1 with Borda count degenerates to "judge picks the best draft" —
+   * still useful, just no consensus signal. K=3 is the canonical Borda.
+   */
+  aggregator?: {
+    mode: "synthesis" | "tournament";
+    /** Number of independent judges (1 = single-judge, K-1 ≥ 1 = Borda). Default 1. */
+    tournamentJudgeCount?: number;
+    /**
+     * Override the judge model. When omitted, the brain (aggregator) model
+     * is used for the judges too — same model that would have synthesized.
+     * Set this to a cheaper model (e.g. fast-tier) when running K=3 to
+     * keep the cost story sane.
+     */
+    tournamentJudgeModel?: ModelConfig;
+  };
   general: {
     darkMode: boolean;
     language: string;

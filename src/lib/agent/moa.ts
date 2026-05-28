@@ -12,7 +12,7 @@
  */
 
 import { generateText, generateObject, tool, type ModelMessage, type ToolSet } from "ai";
-import { addUsageToCumulative } from "@/lib/cost/accumulator";
+import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
 import { embedTexts } from "@/lib/memory/embeddings";
@@ -37,6 +37,7 @@ import {
   retrieveRelevantTraces,
   type TraceSignals,
 } from "@/lib/agent/trace-memory";
+import { runTournamentAggregation } from "@/lib/agent/tournament-aggregator";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 
@@ -1083,8 +1084,119 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     settings
   );
 
-  console.log(`[MoA] Starting aggregation with model: ${brainConfig.provider}/${brainConfig.model} (${aggregatorPrompt.length} chars)`);
+  // PM #52 — tournament mode branch. When the operator picks
+  // `settings.aggregator.mode === "tournament"`, K judges rank the
+  // drafts and Borda count picks the winner. The winning draft IS the
+  // final answer (no synthesis). Falls back to synthesis if every
+  // judge fails — better degraded output than no output.
+  const aggregatorMode = settings.aggregator?.mode ?? "synthesis";
   const brainModel = createModel(brainConfig, { projectId, currentPath });
+
+  if (aggregatorMode === "tournament") {
+    console.log(
+      `[MoA] Starting TOURNAMENT aggregation: ${settings.aggregator?.tournamentJudgeCount ?? 1} judge(s), ${successfulDrafts.length} drafts.`
+    );
+    try {
+      const judgeConfig = settings.aggregator?.tournamentJudgeModel
+        ? resolveWorkerKey(settings.aggregator.tournamentJudgeModel, settings)
+        : brainConfig;
+      const tournament = await runTournamentAggregation({
+        drafts: successfulDrafts.map((d) => ({
+          proposerId: d.proposerId,
+          role: d.role,
+          text: d.text,
+        })),
+        userMessage,
+        judgeConfig,
+        judgeCount: settings.aggregator?.tournamentJudgeCount ?? 1,
+        abortSignal,
+      });
+      // PM #36 — fold the tournament judges' usage into the running
+      // total. The tournament module already pre-aggregates across K
+      // judges via addUsageToCumulative, so we merge the final.
+      if (tournament.cumulativeUsage) {
+        moaUsage = mergeUsage(moaUsage, tournament.cumulativeUsage);
+      }
+
+      if (tournament.winnerProposerId && tournament.winningText) {
+        const aggregationLatencyMs = tournament.latencyMs;
+        const finalText = tournament.winningText;
+        console.log(
+          `[MoA] Tournament winner: ${tournament.winnerProposerId} (Borda points: ${tournament.borda.scores[0]?.points ?? 0}, ${tournament.successfulJudgeCount}/${settings.aggregator?.tournamentJudgeCount ?? 1} judges succeeded).`
+        );
+
+        publishUiSyncEvent({
+          topic: "chat",
+          chatId,
+          nodeType: "system_node",
+          swarmNode: {
+            nodeId: aggregatorNodeId,
+            parentNodeId: routerNodeId,
+            role: "orchestrator",
+            taskSummary: `Tournament Winner: ${tournament.winnerProposerId}`,
+            status: "completed",
+            completedAt: new Date().toISOString(),
+          },
+        });
+
+        // PM #52 — tournament mode skips reflection. The winning draft
+        // is one of the proposer drafts verbatim; running reflection
+        // against it would re-judge what was just judged. Trace memory
+        // still captures the run (reflectionRounds=0 in signals).
+        const totalLatencyMs = Date.now() - totalStart;
+        try {
+          const traceSignals: TraceSignals = {
+            proposerSuccessRatio:
+              drafts.length === 0
+                ? 0
+                : successfulDrafts.length / drafts.length,
+            disagreementDetected: disagreement.detected,
+            disagreementMaxDistance: disagreement.maxDistance,
+            reflectionRounds: 0,
+            reflectionHitCap: false,
+            totalLatencyMs,
+          };
+          const captureResult = await captureSuccessfulTrace({
+            userPrompt: userMessage,
+            finalText,
+            signals: traceSignals,
+            brainConfig,
+            settings,
+          });
+          if (captureResult.captured) {
+            console.log(
+              `[MoA] Trace memory: captured tournament trace ${captureResult.traceId} (score ${captureResult.qualityScore.toFixed(3)}).`
+            );
+          }
+        } catch (captureErr) {
+          console.warn(
+            "[MoA] Trace-memory capture (tournament) failed (non-fatal):",
+            captureErr instanceof Error ? captureErr.message : captureErr
+          );
+        }
+
+        return {
+          text: finalText,
+          drafts,
+          aggregationLatencyMs,
+          totalLatencyMs,
+          cumulativeUsage: moaUsage,
+        };
+      }
+
+      // All judges failed → fall through to synthesis as last resort.
+      console.warn(
+        `[MoA] Tournament produced no winner (all ${settings.aggregator?.tournamentJudgeCount ?? 1} judges failed). Falling back to synthesis aggregator.`
+      );
+    } catch (tournErr) {
+      console.warn(
+        "[MoA] Tournament aggregation failed (non-fatal). Falling back to synthesis:",
+        tournErr instanceof Error ? tournErr.message : tournErr
+      );
+    }
+  }
+
+  console.log(`[MoA] Starting aggregation with model: ${brainConfig.provider}/${brainConfig.model} (${aggregatorPrompt.length} chars)`);
 
   try {
     const aggResult = await generateText({

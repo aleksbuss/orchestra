@@ -230,7 +230,7 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 - [ ] LoRA-swap personas (one base model + persona adapters)
 - [x] **Persistent successful-trace memory** (PM #51 — DSPy-style bootstrap fewshot; quality-gated capture + cosine retrieval; Privacy-Mode-safe)
 - [ ] Staircase streaming (NeurIPS 2025 — aggregator starts before proposers finish)
-- [ ] Tournament aggregator (Borda count for code/math/factual tasks)
+- [x] **Tournament aggregator** (PM #52 — Borda count over K judges; K=1 cheap "judge picks best", K=3 consensus; falls back to synthesis on failure; trace-memory & Privacy-Mode compatible)
 
 ---
 

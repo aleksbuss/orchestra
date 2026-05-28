@@ -1648,6 +1648,28 @@ export function createModel(
       });
     }
 
+    // PM #43 — SGLang OpenAI-compatible endpoint, default port 30000.
+    case "sglang": {
+      return createOpenAICompatibleChatModel(config, {
+        providerName: "sglang",
+        // SGLang doesn't require auth on its OpenAI endpoint by default;
+        // pass a sentinel so the OpenAI SDK doesn't reject the request.
+        apiKey: config.apiKey || "sglang",
+        fallbackBaseUrl: "http://localhost:30000",
+        defaultPath: "/v1",
+      });
+    }
+
+    // PM #43 — vLLM OpenAI-compatible endpoint, default port 8000.
+    case "vllm": {
+      return createOpenAICompatibleChatModel(config, {
+        providerName: "vllm",
+        apiKey: config.apiKey || "vllm",
+        fallbackBaseUrl: "http://localhost:8000",
+        defaultPath: "/v1",
+      });
+    }
+
     case "custom": {
       return createOpenAICompatibleChatModel(config, {
         providerName: "custom",
@@ -1729,6 +1751,24 @@ export function createEmbeddingModel(config: {
         providerName: "ollama",
         apiKey: "ollama",
         fallbackBaseUrl: "http://localhost:11434",
+        defaultPath: "/v1",
+      });
+
+    // PM #43 — operator may run an embedding model on SGLang/vLLM too
+    // (some serving stacks support both chat + embedding endpoints).
+    case "sglang":
+      return createOpenAICompatibleEmbeddingModel(config, {
+        providerName: "sglang",
+        apiKey: config.apiKey || "sglang",
+        fallbackBaseUrl: "http://localhost:30000",
+        defaultPath: "/v1",
+      });
+
+    case "vllm":
+      return createOpenAICompatibleEmbeddingModel(config, {
+        providerName: "vllm",
+        apiKey: config.apiKey || "vllm",
+        fallbackBaseUrl: "http://localhost:8000",
         defaultPath: "/v1",
       });
 

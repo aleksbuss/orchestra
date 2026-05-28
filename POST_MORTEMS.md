@@ -38,6 +38,37 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 43. SGLang + vLLM Provider Support + Local-Backend Auto-Detection
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (strategic feature, no incident)
+**Symptoms:** No live incident. The 2026-05-27 audit identified local-first MoA as the main strategic differentiator vs cloud-MoA frameworks (AutoGen, CrewAI, LangGraph). Orchestra supported Ollama as the only local inference backend; SGLang and vLLM — the SOTA stacks for high-throughput parallel inference on consumer GPUs — required `custom` provider with manual baseUrl config.
+**Root Cause:** Provider system was added in pre-2026 era when Ollama was the only mainstream OpenAI-compatible local server. The SGLang + vLLM ecosystem matured in 2025 (RadixAttention prefix caching, PagedAttention, EAGLE3 speculative decoding) and is now the right pick for power-users running 5-proposer MoA fan-out on a single GPU. Without first-class provider support, the operator had to know about it AND configure it manually — a discovery + onboarding gap.
+**Resolution:** Three coordinated changes:
+  1. **Added `"sglang"` and `"vllm"` to the `ModelConfig.provider` union** in [`src/lib/types.ts`](src/lib/types.ts).
+  2. **Registered both in `MODEL_PROVIDERS`** ([`src/lib/providers/model-config.ts`](src/lib/providers/model-config.ts)) with default base URLs (sglang :30000, vllm :8000), `requiresApiKey: false`, and launch-hint comments documenting the `--enable-prefix-caching` flag operators should pass.
+  3. **Added cases in `createModel` + `createEmbeddingModel`** ([`src/lib/providers/llm-provider.ts`](src/lib/providers/llm-provider.ts)) — both treat the upstream as OpenAI-compatible via `createOpenAICompatibleChatModel` with a sentinel apiKey ("sglang" / "vllm") so the AI SDK doesn't reject the unauthenticated request, and fallback baseURLs matching the launch hints.
+  4. **New local-backend detection module** ([`src/lib/providers/local-backend-detect.ts`](src/lib/providers/local-backend-detect.ts)): `KNOWN_LOCAL_BACKENDS` lists SGLang, vLLM, Ollama, LM Studio, LocalAI with their default ports + prefix-cache support flags. `probeLocalBackend(candidate)` does `GET /v1/models` with 500ms timeout, classifies results into `{ timeout | refused | non_200 | non_openai_shape | url_blocked }`, never throws. `detectLocalBackends()` runs all probes in parallel. `formatDetectionSummary(results)` returns a single human-readable line for the startup log.
+  5. **Wired into [`src/instrumentation-node.ts`](src/instrumentation-node.ts)** — fire-and-forget on cold boot (PM #35 lifecycle hook), so the operator sees on every restart:
+     ```
+     [LocalBackends] Detected: Ollama (5 models @ :11434). Not detected: SGLang, vLLM, LM Studio, LocalAI.
+     [LocalBackends] Hint: for best MoA throughput on local hardware, run SGLang or vLLM with `--enable-prefix-caching`. See docs/ARCHITECTURE.md § local-first.
+     ```
+
+**Why SGLang specifically:** SGLang's RadixAttention shares the COMMON PREFIX of the KV cache across concurrent requests. Orchestra's MoA fan-out sends 5 proposer requests with different system prompts but the SAME user message + history prefix. With `--enable-prefix-caching`, SGLang reuses the user-message KV across all 5 calls → published 3–6× throughput improvement on identical hardware vs naive serving. This is the closest thing to "free performance" Orchestra can offer power-users with a 24GB GPU.
+
+**Why this is NOT yet "n=N fan-out via one request":** the original N3 plan included consolidating 5 separate proposer calls into ONE `chat/completions` request with `n: 5`. That works for self-consistency sampling (same system prompt × N completions) but NOT for Orchestra's heterogeneous-persona MoA where each proposer has a DIFFERENT system prompt. RadixAttention's prefix-sharing at the SERVER level achieves most of the same throughput win transparently, so we keep Orchestra's existing parallel-Promise.all dispatch and rely on the SGLang/vLLM server to amortize the shared prefix.
+
+**Regression Coverage:** [`src/lib/providers/local-backend-detect.test.ts`](src/lib/providers/local-backend-detect.test.ts) — 10 cases:
+  - probeLocalBackend never throws, returns DetectionResult for all 5 reason classes (timeout, refused, non_200, non_openai_shape, url_blocked + happy path with modelCount).
+  - SSRF-disallowed URL (private IP) → `url_blocked` WITHOUT fetch (PM #8 contract).
+  - detectLocalBackends probes every entry in `KNOWN_LOCAL_BACKENDS` exactly once.
+  - formatDetectionSummary renders detected + not-detected; prefix-cache note appears only on SGLang/vLLM; "Detected: none." line when nothing is up.
+**Doc Updates:** No CLAUDE.md change required — provider list is config, not architectural rule. README + ARCHITECTURE already mention local-first stance in §"Local-first design". Future v3.0 work (hardware auto-detect + per-config recommendations, LoRA-swap personas) will land its own PMs.
+**Rule:** New OpenAI-compatible local inference backends (anything that exposes `/v1/chat/completions`) ship as first-class providers when they have meaningful adoption — not as `custom`. The 30 LOC of provider plumbing + 30 LOC of detection wiring is trivial compared to the discovery improvement for the operator. Test every new candidate in the same shape as PM #43's existing entries: launch hint, default port, prefix-cache flag.
+
+---
+
 ## 42. Role-Based Proposer Tooling + Fact-Check Mandate
 **Date:** 2026-05
 **Status:** RESOLVED

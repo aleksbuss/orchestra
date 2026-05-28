@@ -14,6 +14,11 @@ export interface ModelConfig {
     | "google"
     | "openrouter"
     | "ollama"
+    /** PM #43 — local-first power-user backends. Both are OpenAI-compatible
+     *  inference servers; SGLang's RadixAttention and vLLM's PagedAttention
+     *  give Orchestra's MoA fan-out real throughput wins on consumer GPUs. */
+    | "sglang"
+    | "vllm"
     | "custom"
     | "codex-cli"
     | "gemini-cli";

@@ -14,6 +14,11 @@
  *      recovery, ghost-task sweep, and `data/`-cleanup sweepers
  *      (PM #32). It is itself idempotent via
  *      `globalThis.__orchestraCronScheduler__`.
+ *   3. PM #43 — `detectLocalBackends()` probes localhost ports for
+ *      SGLang/vLLM/Ollama/LM Studio/LocalAI. Result is logged so the
+ *      operator sees on boot which local backends are reachable and
+ *      gets a hint to launch SGLang with `--enable-prefix-caching` if
+ *      missing. Fire-and-forget (the boot doesn't wait on probes).
  *
  * Test coverage lives in `instrumentation.test.ts` against the public
  * `register()` surface; this file has no own test because its body is
@@ -29,3 +34,30 @@ import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
 import "@/lib/storage/chat-store";
 
 await ensureCronSchedulerStarted();
+
+// PM #43 — fire-and-forget local-backend probe. The result is informative,
+// not load-bearing: even if every probe times out, Orchestra still works
+// (the operator can run on cloud providers). `void` so a misbehaving
+// network stack can't stall the boot.
+void (async () => {
+  try {
+    const [{ detectLocalBackends, formatDetectionSummary }] = await Promise.all([
+      import("@/lib/providers/local-backend-detect"),
+    ]);
+    const results = await detectLocalBackends();
+    console.log(formatDetectionSummary(results));
+    const sglangAvailable = results.some(
+      (r) => r.available && r.candidate.provider === "sglang"
+    );
+    const vllmAvailable = results.some(
+      (r) => r.available && r.candidate.provider === "vllm"
+    );
+    if (!sglangAvailable && !vllmAvailable) {
+      console.log(
+        "[LocalBackends] Hint: for best MoA throughput on local hardware, run SGLang or vLLM with `--enable-prefix-caching`. See docs/ARCHITECTURE.md § local-first."
+      );
+    }
+  } catch (err) {
+    console.warn("[LocalBackends] probe failed (non-fatal):", err);
+  }
+})();

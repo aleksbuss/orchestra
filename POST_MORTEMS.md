@@ -38,6 +38,67 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 49. Live OpenRouter Pricing Cache — End of the Hardcoded-Table Drift
+**Date:** 2026-05
+**Status:** RESOLVED
+**Severity:** P2 (cost-banner accuracy; no incident — silent drift)
+**Symptoms:** No live incident. Surfaced by reading PM #36's own header comment:
+  > *"If you upgrade to live pricing later, swap getModelPricing for an async version backed by OpenRouter's /api/v1/models."*
+
+  The hardcoded `PRICING_TABLE` in [`pricing.ts`](src/lib/cost/pricing.ts) covers maybe 25 of OpenRouter's 200+ models. The rest fall through to "unknown" — the cost banner shows tokens but no $, the operator loses situational awareness for exactly the cheap-models-via-OpenRouter path that PM #48 just made the natural choice. Worse, when OpenAI / Anthropic / Google cut prices upstream (a regular ~quarterly event), the hardcoded numbers stay stale until someone hand-edits the file. The banner over-reports cost silently — never a P0 incident, but a slow drift away from accuracy.
+**Root Cause:** The hardcoded snapshot was the v1 design (PM #36 — "soft budget banner"). It was the right tradeoff at the time (one file, no network at boot, no cache invalidation logic). PM #48 changed the cost shape: heterogeneous tiers actively encourage routing proposers through OpenRouter to pick the right model per role. The table can't keep up.
+**Resolution:** Add a live cache backed by OpenRouter's public `/api/v1/models` endpoint. The cache is the source of truth for OpenRouter pricing; the hardcoded table stays as the fallback for direct provider calls + the OpenRouter passthrough rules (`:free` suffix).
+
+  1. **`src/lib/cost/openrouter-pricing.ts`** — new module. Three public surfaces:
+     - `fetchOpenRouterPricing({ signal })` — `await fetch(OPENROUTER_PRICING_URL)`, parses the response into `Map<modelId, ModelPricing>`. Per-token strings → per-million numbers (multiply by 1,000,000). Throws on network failure so the orchestrator can decide fallback strategy.
+     - `loadCachedOpenRouterPricing()` / `saveCachedOpenRouterPricing(map)` — disk persistence at `data/cache/openrouter-pricing.json` via `safeWriteFile` (PM #11/#12 atomic-write contract). Corrupt cache → null (no throws — graceful degradation).
+     - `refreshOpenRouterPricingCache({ signal, forceFetch? })` — orchestration entry point. Disk-warm → freshness check (24h TTL) → network refresh → write back. Returns `{ source: "fetched" | "disk" | "memory" | "unavailable", entryCount }`.
+     - `getCachedOpenRouterPricing(modelId)` — **synchronous** Map.get. This is the surface that `pricing.ts` depends on, and synchronous matters because the accumulator path is sync end-to-end and async would ripple through `runAgent`.
+
+  2. **`src/lib/cost/pricing.ts` — `getModelPricing` OpenRouter branch** now consults `getCachedOpenRouterPricing(normalizedModel)` BEFORE the substring-passthrough rules. Hit → use it; miss → continue with the existing rules (`:free`, upstream-provider lookup). Live cache silently upgrades pricing accuracy without changing the function signature — `accumulator.ts` and downstream callers are untouched.
+
+  3. **`src/instrumentation-node.ts` — boot refresh** fires `refreshOpenRouterPricingCache()` once at startup. Fire-and-forget, follows the established PM #43/#44/#47 pattern. **Skipped when Privacy Mode is enabled** — the live fetch would itself violate the air-gap guarantee. The boot log prints which path was taken (`fetched`/`disk`/`memory`/`unavailable`) so the operator sees pricing source at-a-glance.
+
+**Cache file shape (`data/cache/openrouter-pricing.json`):**
+```json
+{ "fetchedAt": "2026-05-28T16:53:00.000Z",
+  "entries": [{ "id": "anthropic/claude-haiku-4-5", "inputUsdPerMillion": 0.8, "outputUsdPerMillion": 4 }, ...] }
+```
+Single overwritten file, ~200 KB. No sweeper needed — bounded by construction. Added to the data-layout table in CLAUDE.md.
+
+**TTL design:** 24h. The hardcoded fallback means stale cache is fine for the typical case (provider raises prices → next refresh catches it within a day; no cost-banner accuracy regression because the hardcoded table covers the major models). The disk cache survives restarts so a cold boot with no network isn't a regression vs. the pre-PM-49 hardcoded path.
+
+**SSRF / network safety:** The endpoint URL is a fixed constant string (`https://openrouter.ai/api/v1/models`) — no user input. No SSRF guard needed by design. `AbortSignal.timeout(8000)` enforced anyway per the CLAUDE.md outbound-fetch convention.
+
+**Privacy Mode interaction (PM #47 compliance):** instrumentation-node.ts checks `settings.privacyMode.enabled` BEFORE calling the refresh. If air-gapped, the boot skips the fetch entirely and prints an informational log. The cost banner falls back to the hardcoded table (which itself never hits the network). The `assertPrivacyModeAllowsSettings` guard doesn't need to know about this — the pricing module is informational, not a runtime LLM call.
+
+**What this is NOT:**
+  - Not authenticated. The public listing is sufficient; no per-account pricing personalization is needed for the cost banner.
+  - Not real-time. 24h TTL is fine; the banner is "situational awareness", not billing.
+  - Not a tier-quality benchmark. We surface the OpenRouter-published price; we don't rank models by cost-per-quality.
+
+**Regression Coverage:**
+  - [`src/lib/cost/openrouter-pricing.test.ts`](src/lib/cost/openrouter-pricing.test.ts) — 21 cases:
+    - `fetchOpenRouterPricing`: per-token → per-million conversion (haiku 0.8/4, gpt-4o 2.5/10); skips missing/partial/non-numeric pricing; lowercases ids; throws on 503 + network error; empty response → empty map; malformed response → empty map.
+    - Disk cache: null on missing file; round-trip preserves entries + fetchedAt; corrupt JSON → null (no throw); malformed-entry skip within otherwise-valid file.
+    - `refreshOpenRouterPricingCache`: no cache + fetch success → `source: fetched`; fresh memory cache → `source: memory`, no network call; stale cache + fetch success → `source: fetched` (refresh wins); `forceFetch: true` bypasses freshness; no cache + network failure → `source: unavailable`; disk cache + network failure → `source: disk` (graceful fallback); empty network response keeps existing map.
+    - `getCachedOpenRouterPricing`: null on empty cache; case-insensitive lookup; null on empty-string input.
+  - [`src/lib/cost/pricing.test.ts`](src/lib/cost/pricing.test.ts) — 6 new cases (24 total) pinning the live-cache integration:
+    - Live cache hit overrides hardcoded substring table (1/3 wins over 2.5/10).
+    - Live cache miss falls through to hardcoded rules unchanged.
+    - Live cache hit on a `:nitro` variant unknown to hardcoded table.
+    - Hardcoded `:free` suffix still wins when no live entry.
+    - Case-insensitive on model id.
+    - Non-openrouter providers ignore the live cache (only the openrouter path consults it).
+
+**Doc Updates:**
+  - [`CLAUDE.md`](CLAUDE.md) — added `data/cache/openrouter-pricing.json` row to the Data Layout table with retention notes ("single overwritten file — bounded by construction").
+  - [`README.md`](README.md) roadmap — Live-pricing OpenRouter fetch moved from v2.1 pending to v2.1 shipped. Eval harness was already shipped via PM #41; updated to match. Tools-inside-proposers stays partial — PM #42 covered the research path; coder→code_execution still deferred.
+
+**Rule:** Self-maintained pricing snapshots drift silently — the banner stops being accurate the moment any upstream changes prices. When a canonical live endpoint exists (OpenRouter's `/api/v1/models` is the reference here), reach for it before adding more hardcoded rows. Keep the hardcoded table as a graceful fallback for: (a) network down at boot, (b) Privacy Mode, (c) providers OpenRouter doesn't proxy. Booted-once-and-cached is the right freshness shape; don't refresh per-request (one bad upstream blip would cascade to every chat).
+
+---
+
 ## 48. Per-Role Tier Model Routing — Heterogeneous Proposers
 **Date:** 2026-05
 **Status:** RESOLVED

@@ -12,12 +12,13 @@
  *   - estimateCost: unknown pricing → knownPricing: false, zero usd.
  *   - Numeric correctness on a known pair (gpt-4o: 2.5/M input + 10/M output).
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import {
   estimateCost,
   estimateCostFor,
   getModelPricing,
 } from "./pricing";
+import * as liveCache from "./openrouter-pricing";
 
 describe("getModelPricing — substring family matching", () => {
   it("gpt-4o-mini beats gpt-4o (order matters in the table)", () => {
@@ -135,5 +136,74 @@ describe("estimateCost — numerical correctness", () => {
     });
     expect(cost.knownPricing).toBe(true);
     expect(cost.totalUsd).toBe(0);
+  });
+});
+
+// PM #49 — live OpenRouter cache integration tests. Imported inline so
+// the rest of the file stays focused on the hardcoded table behavior.
+describe("PM #49 — getModelPricing consults OpenRouter live cache first", () => {
+  beforeEach(() => {
+    liveCache.__resetOpenRouterPricingForTests();
+  });
+
+  afterEach(() => {
+    liveCache.__resetOpenRouterPricingForTests();
+  });
+
+  it("live cache hit overrides the hardcoded substring table", () => {
+    // Hardcoded table would price openrouter/openai/gpt-4o at 2.5/10.
+    // Seed a live override at 1.0/3.0 and assert it wins.
+    liveCache.__seedOpenRouterPricingForTests([
+      ["openai/gpt-4o", { inputUsdPerMillion: 1, outputUsdPerMillion: 3 }],
+    ]);
+    const p = getModelPricing("openrouter", "openai/gpt-4o");
+    expect(p?.inputUsdPerMillion).toBe(1);
+    expect(p?.outputUsdPerMillion).toBe(3);
+  });
+
+  it("live cache miss falls through to hardcoded passthrough rules", () => {
+    // No live entry → falls to substring rules → openai/gpt-4o family.
+    const p = getModelPricing("openrouter", "openai/gpt-4o");
+    expect(p?.inputUsdPerMillion).toBe(2.5);
+  });
+
+  it("live cache hit on a model unknown to the hardcoded table (e.g. :nitro variant)", () => {
+    liveCache.__seedOpenRouterPricingForTests([
+      [
+        "qwen/qwen-3-32b-instruct:nitro",
+        { inputUsdPerMillion: 0.5, outputUsdPerMillion: 1.5 },
+      ],
+    ]);
+    const p = getModelPricing("openrouter", "qwen/qwen-3-32b-instruct:nitro");
+    expect(p?.inputUsdPerMillion).toBe(0.5);
+    expect(p?.outputUsdPerMillion).toBe(1.5);
+  });
+
+  it("hardcoded `:free` suffix still wins when live cache has no entry", () => {
+    const p = getModelPricing(
+      "openrouter",
+      "anthropic/some-experimental-model:free"
+    );
+    expect(p?.inputUsdPerMillion).toBe(0);
+    expect(p?.outputUsdPerMillion).toBe(0);
+  });
+
+  it("live lookup is case-insensitive on the model id", () => {
+    liveCache.__seedOpenRouterPricingForTests([
+      ["openai/gpt-4o", { inputUsdPerMillion: 1, outputUsdPerMillion: 3 }],
+    ]);
+    const p = getModelPricing("OpenRouter", "OpenAI/GPT-4o");
+    expect(p?.inputUsdPerMillion).toBe(1);
+  });
+
+  it("non-openrouter providers ignore the live cache", () => {
+    liveCache.__seedOpenRouterPricingForTests([
+      // Even with a same-name entry in the live cache, a direct openai
+      // call should hit the hardcoded table — the live cache is only
+      // consulted on the openrouter path.
+      ["gpt-4o", { inputUsdPerMillion: 999, outputUsdPerMillion: 999 }],
+    ]);
+    const p = getModelPricing("openai", "gpt-4o");
+    expect(p?.inputUsdPerMillion).toBe(2.5);
   });
 });

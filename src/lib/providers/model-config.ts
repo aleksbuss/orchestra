@@ -132,6 +132,41 @@ export const MODEL_PROVIDERS: Record<string, ProviderConfig> = {
     authMethods: ["api_key"],
     defaultAuthMethod: "api_key",
   },
+  // PM #43 — SGLang local inference server. Best-in-class for MoA workloads
+  // when launched with `--enable-prefix-caching`: RadixAttention shares the
+  // common message prefix across Orchestra's 5 parallel proposer calls,
+  // delivering documented 3-6× throughput vs naive serving on the same
+  // hardware. OpenAI-compatible API at port 30000 by default.
+  // Launch hint for operators (24GB VRAM, RTX 4090):
+  //   python -m sglang.launch_server \
+  //     --model Qwen/Qwen2.5-7B-Instruct \
+  //     --port 30000 \
+  //     --enable-prefix-caching \
+  //     --mem-fraction-static 0.85
+  sglang: {
+    name: "SGLang (local)",
+    models: [],
+    baseUrl: "http://localhost:30000",
+    requiresApiKey: false,
+    authMethods: ["api_key"],
+    defaultAuthMethod: "api_key",
+  },
+  // PM #43 — vLLM local inference server. OpenAI-compatible API at port 8000
+  // by default. PagedAttention gives strong VRAM efficiency for proposer
+  // fan-out. Enable prefix caching with `--enable-prefix-caching`.
+  // Launch hint:
+  //   python -m vllm.entrypoints.openai.api_server \
+  //     --model Qwen/Qwen2.5-7B-Instruct \
+  //     --port 8000 \
+  //     --enable-prefix-caching
+  vllm: {
+    name: "vLLM (local)",
+    models: [],
+    baseUrl: "http://localhost:8000",
+    requiresApiKey: false,
+    authMethods: ["api_key"],
+    defaultAuthMethod: "api_key",
+  },
   "codex-cli": {
     name: "Codex CLI",
     models: [

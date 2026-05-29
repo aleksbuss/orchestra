@@ -193,6 +193,92 @@ export async function GET() {
     });
   }
 
+  // 5b. Disk space (Sprint 5).
+  // `data/` IS the database; running out of space corrupts every JSON
+  // write. `fs.statfs` returns block-level stats portable across macOS
+  // and Linux. We warn at >=90% used; <90% is "ok". Errors during the
+  // probe (e.g. statfs not supported on this filesystem) are themselves
+  // warns — not knowing the disk state is worse than knowing it's full.
+  try {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const dataDir = path.join(process.cwd(), "data");
+    const stats = await fs.statfs(dataDir);
+    const totalBytes = stats.blocks * stats.bsize;
+    const freeBytes = stats.bavail * stats.bsize;
+    const usedBytes = totalBytes - freeBytes;
+    const percentUsed = totalBytes > 0 ? (usedBytes / totalBytes) * 100 : 0;
+    const freeGb = (freeBytes / 1_073_741_824).toFixed(2);
+    if (percentUsed >= 90) {
+      checks.push({
+        name: "disk_space",
+        status: "warn",
+        detail: `Filesystem holding data/ is ${percentUsed.toFixed(1)}% full (${freeGb} GB free). At this level a single large write can corrupt JSON. Free space or move data/.`,
+      });
+    } else {
+      checks.push({
+        name: "disk_space",
+        status: "ok",
+        detail: `${percentUsed.toFixed(1)}% used, ${freeGb} GB free on the filesystem holding data/.`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: "disk_space",
+      status: "warn",
+      detail: `Could not probe disk space via fs.statfs: ${err instanceof Error ? err.message : String(err)}. The disk may still be fine — just no visibility.`,
+    });
+  }
+
+  // 5c. Embeddings DB readability (Sprint 5).
+  // `data/memory/<subdir>/vectors.json` holds the long-term vector store.
+  // The agent loads it lazily, so a corrupt file or unreachable directory
+  // only surfaces during a search query — meaning the operator's first
+  // notice is "search returned nothing" hours into a session. Probing
+  // readdir on `data/memory/` at health time catches the obvious failure
+  // mode (permissions / missing dir on a fresh deployment) up front.
+  try {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const memoryRoot = path.join(process.cwd(), "data", "memory");
+    let subdirs: string[] = [];
+    try {
+      subdirs = await fs.readdir(memoryRoot);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        checks.push({
+          name: "embeddings_db",
+          status: "ok",
+          detail:
+            "data/memory/ does not exist yet — first insertMemory creates it lazily. Fresh-install signature.",
+        });
+      } else {
+        throw err;
+      }
+    }
+    if (subdirs.length > 0 || subdirs.length === 0 && (await fs.access(memoryRoot).then(() => true).catch(() => false))) {
+      // Spot-check: the FIRST subdir (alphabetical) must be readable as
+      // a directory. We don't read every vectors.json — that scales
+      // O(N) with knowledge base size; the lazy load handles per-file
+      // corruption per PM #18 and the test on xlsx-loader covers it.
+      if (subdirs.length > 0) {
+        const first = subdirs[0];
+        await fs.access(path.join(memoryRoot, first));
+      }
+      checks.push({
+        name: "embeddings_db",
+        status: "ok",
+        detail: `data/memory/ readable. ${subdirs.length} subdir(s).`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: "embeddings_db",
+      status: "warn",
+      detail: `data/memory/ probe failed: ${err instanceof Error ? err.message : String(err)}. Search queries may return empty until resolved.`,
+    });
+  }
+
   // 6. Broken chat files (PM #30)
   // Files in data/chats/ that failed to parse during the last index rebuild.
   // Two-strike condition (chat-index.json corrupt + a chat-file corrupt) used
@@ -315,12 +401,17 @@ export async function GET() {
         ? (Date.now() - fetchedAt.getTime()) / 3_600_000
         : null;
       const entryCount = Array.isArray(parsed.entries) ? parsed.entries.length : 0;
-      const stale = ageHours !== null && ageHours > 48;
+      // Sprint 5 — harmonised with `CACHE_TTL_MS = 24h` in
+      // openrouter-pricing.ts. Pre-Sprint-5 this threshold was 48h, so a
+      // cache that pricing.ts treated as stale (and was actively refusing
+      // to read at 25h+) would still show "ok" in health, hiding boot-
+      // refresh failures from the operator.
+      const stale = ageHours !== null && ageHours > 24;
       checks.push({
         name: "openrouter_pricing_cache",
         status: stale ? "warn" : "ok",
         detail: stale
-          ? `Cache is ${ageHours.toFixed(1)}h old (>48h stale). Boot refresh may be failing; check network or OpenRouter availability. ${entryCount} entries cached. See PM #49.`
+          ? `Cache is ${ageHours.toFixed(1)}h old (>24h stale, matches CACHE_TTL_MS in openrouter-pricing.ts). Boot refresh may be failing; check network or OpenRouter availability. ${entryCount} entries cached. See PM #49.`
           : `Cache fresh. ${entryCount} models priced; age ${ageHours?.toFixed(1) ?? "?"}h.`,
       });
     }

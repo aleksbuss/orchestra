@@ -166,6 +166,45 @@ describe("redaction — sensitive field names never reach the wire", () => {
     expect(entry.APIKey).toBe("[REDACTED]");
     expect(entry.Password_Hash).toBe("[REDACTED]");
   });
+
+  it("Sprint 5 — extended set: bearer / x-api-key / x-token / passwd", () => {
+    log.info("evt", {
+      bearer: "Bearer sk-xxx",
+      "x-api-key": "sk-header",
+      "x-token": "ghp_header",
+      "x-auth-token": "auth-header",
+      "x-access-token": "access-header",
+      passwd: "old-unix-style",
+    });
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.bearer).toBe("[REDACTED]");
+    expect(entry["x-api-key"]).toBe("[REDACTED]");
+    expect(entry["x-token"]).toBe("[REDACTED]");
+    expect(entry["x-auth-token"]).toBe("[REDACTED]");
+    expect(entry["x-access-token"]).toBe("[REDACTED]");
+    expect(entry.passwd).toBe("[REDACTED]");
+  });
+
+  it("Sprint 5 — credential / credentials / private / private_key all redact", () => {
+    log.info("evt", {
+      credential: "single",
+      credentials: { aws_access_key_id: "AKIA..." },
+      private: "secret",
+      private_key: "-----BEGIN RSA PRIVATE KEY-----",
+      privateKey: "another shape",
+    });
+    const entry = lastJsonOn(stdoutSpy);
+    expect(entry.credential).toBe("[REDACTED]");
+    expect(entry.credentials).toBe("[REDACTED]");
+    expect(entry.private).toBe("[REDACTED]");
+    expect(entry.private_key).toBe("[REDACTED]");
+    expect(entry.privateKey).toBe("[REDACTED]");
+    // Raw bytes check: even the nested AKIA shouldn't leak via JSON
+    // serialization because the wrapping field is redacted.
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).not.toContain("AKIA");
+    expect(raw).not.toContain("BEGIN RSA PRIVATE KEY");
+  });
 });
 
 describe("Error capture — message + stack lifted automatically", () => {

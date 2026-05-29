@@ -1,5 +1,4 @@
 import { CronScheduler, recoverStaleCronRunMarkers } from "@/lib/cron/service";
-import { sweepGhostTasks } from "@/lib/agent/ghost-sweeper";
 import { getPendingJobs } from "@/lib/storage/queue-store";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
 import { ensureSweepersScheduled, runAllSweepers } from "@/lib/cron/sweepers";
@@ -77,16 +76,16 @@ export async function ensureCronSchedulerStarted(): Promise<void> {
         dispatchAgentJob(job).catch(console.error);
       }
     }).finally(() => {
-      // 2. Execute ghost task cleanup precisely once per background boot
-      // This will only sweep tasks that are NOT actively running (isJobActive=false)
-      if (recoverySignal.aborted) return;
-      sweepGhostTasks().catch(console.error);
-
-      // 3. Data-directory sweepers (PM #32): tmp/ + orphan queue entries.
-      //    Boot-time run gives the operator immediate cleanup on every
-      //    restart; the recurring interval handles long-running deployments.
-      //    Both gated on the same recovery signal — if shutdown started
-      //    mid-boot, skip the sweep entirely.
+      // 2. Data-directory sweepers (PM #32): tmp/ + orphan queue entries +
+      //    ghost-task cleanup. Boot-time run gives the operator immediate
+      //    cleanup on every restart; the recurring 6h interval (registered
+      //    by `ensureSweepersScheduled`) handles long-running deployments.
+      //    Sprint 2 follow-up: ghost-task sweep used to be its own explicit
+      //    call here (boot-only), which meant a mid-uptime crash-leaked
+      //    in_progress task stayed orphan until the next restart. It's
+      //    now folded into `runAllSweepers()`, so both the boot run AND
+      //    the recurring 6h tick catch ghosts. Both gated on the same
+      //    recovery signal — if shutdown started mid-boot, skip the sweep.
       if (recoverySignal.aborted) return;
       void runAllSweepers().catch((err) => {
         console.warn("[TaskQueue] Boot-time sweepers failed:", err);

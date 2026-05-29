@@ -13,6 +13,9 @@
 import { describe, expect, it } from "vitest";
 import {
   addUsageToCumulative,
+  assertChatBudget,
+  ChatBudgetExceededError,
+  checkChatBudget,
   mergeUsage,
   normalizeUsage,
 } from "./accumulator";
@@ -154,5 +157,112 @@ describe("mergeUsage", () => {
       costUsd: 0.15000000000000002, // floating point — close enough
       fullyPriced: false,
     });
+  });
+});
+
+describe("Sprint 2 — checkChatBudget (per-chat hard USD cap)", () => {
+  const usage = (costUsd: number, fullyPriced = true) => ({
+    promptTokens: 1000,
+    completionTokens: 500,
+    costUsd,
+    fullyPriced,
+  });
+
+  it("returns over=false when no cap is configured (undefined)", () => {
+    expect(checkChatBudget(usage(99), undefined)).toEqual({
+      over: false,
+      costUsd: 99,
+      maxUsdPerChat: null,
+    });
+  });
+
+  it("returns over=false when cap is null", () => {
+    expect(checkChatBudget(usage(99), null)).toEqual({
+      over: false,
+      costUsd: 99,
+      maxUsdPerChat: null,
+    });
+  });
+
+  it("returns over=false when cap is 0 (treated as disabled — zero/negative is operator nonsense)", () => {
+    // Choosing not to interpret 0 as "block everything"; if an operator
+    // truly wants no spend, they delete the chat or disable the model.
+    expect(checkChatBudget(usage(0.01), 0).over).toBe(false);
+    expect(checkChatBudget(usage(0.01), -1).over).toBe(false);
+  });
+
+  it("returns over=false on non-finite cap (Infinity / NaN — treated as disabled)", () => {
+    expect(checkChatBudget(usage(1), Infinity).over).toBe(false);
+    expect(checkChatBudget(usage(1), NaN).over).toBe(false);
+  });
+
+  it("returns over=true once cost >= cap", () => {
+    const r = checkChatBudget(usage(5.0), 5.0);
+    expect(r.over).toBe(true);
+    expect(r.costUsd).toBe(5.0);
+    expect(r.maxUsdPerChat).toBe(5.0);
+  });
+
+  it("returns over=false when cost is strictly below cap", () => {
+    expect(checkChatBudget(usage(4.999), 5.0).over).toBe(false);
+  });
+
+  it("treats undefined current as cost=0 (fresh chat passes any positive cap)", () => {
+    expect(checkChatBudget(undefined, 5.0)).toEqual({
+      over: false,
+      costUsd: 0,
+      maxUsdPerChat: 5.0,
+    });
+  });
+
+  it("enforces the cap even when fullyPriced=false (lower-bound spend already over)", () => {
+    // PM rationale recorded in accumulator.ts — once a lower-bound exceeds
+    // the cap, the real spend definitely does too.
+    expect(checkChatBudget(usage(10, false), 5.0).over).toBe(true);
+  });
+});
+
+describe("Sprint 2 — assertChatBudget (throwing wrapper)", () => {
+  const usage = (costUsd: number) => ({
+    promptTokens: 0,
+    completionTokens: 0,
+    costUsd,
+    fullyPriced: true,
+  });
+
+  it("does NOT throw when under cap", () => {
+    expect(() => assertChatBudget(usage(4.99), 5.0)).not.toThrow();
+  });
+
+  it("does NOT throw when no cap configured", () => {
+    expect(() => assertChatBudget(usage(99), undefined)).not.toThrow();
+    expect(() => assertChatBudget(usage(99), null)).not.toThrow();
+  });
+
+  it("throws ChatBudgetExceededError when over cap", () => {
+    expect(() => assertChatBudget(usage(5.01), 5.0)).toThrow(
+      ChatBudgetExceededError
+    );
+  });
+
+  it("error carries costUsd + maxUsdPerChat on the instance", () => {
+    try {
+      assertChatBudget(usage(7.42), 5.0);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ChatBudgetExceededError);
+      expect((err as ChatBudgetExceededError).costUsd).toBe(7.42);
+      expect((err as ChatBudgetExceededError).maxUsdPerChat).toBe(5.0);
+    }
+  });
+
+  it("error message includes both numbers formatted", () => {
+    try {
+      assertChatBudget(usage(7.42), 5.0);
+      expect.fail("expected throw");
+    } catch (err) {
+      expect((err as Error).message).toMatch(/\$7\.4200/);
+      expect((err as Error).message).toMatch(/\$5\.00/);
+    }
   });
 });

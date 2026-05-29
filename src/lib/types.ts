@@ -219,6 +219,30 @@ export interface AppSettings {
     passwordHash: string;
     mustChangeCredentials: boolean;
   };
+  /**
+   * Sprint 2 — per-chat hard USD cap.
+   *
+   * The soft budget banner from PM #36 makes accumulated cost visible but
+   * never refuses a turn — the operator can ignore the banner and keep
+   * spending indefinitely. `costGuard.maxUsdPerChat` is the hard companion:
+   * before each new turn, the chat's `cumulativeUsage.costUsd` is checked
+   * against this cap; if it's already over, the turn is rejected with a
+   * clear 402 Payment Required from `/api/chat`.
+   *
+   * Default `undefined` = disabled (pre-Sprint-2 behavior preserved
+   * exactly). Set to a number > 0 to enable. The cap operates ONLY on
+   * priced models — when `cumulativeUsage.fullyPriced` is false the cap
+   * is treated as a lower-bound check (still enforces, but the banner
+   * already labels the figure with a "~" prefix).
+   *
+   * Recommended values: $1 for cheap experiments, $5–10 for typical
+   * sessions, $50 for long research chats. Reset by deleting the chat
+   * or by lifting the cap and starting a new turn.
+   */
+  costGuard?: {
+    /** Hard cap; chat refuses new turns once cumulativeUsage.costUsd >= this. */
+    maxUsdPerChat?: number;
+  };
   /** Per-provider API key vault. Presets resolve keys from here. */
   providerApiKeys?: Partial<Record<ModelConfig["provider"], string>>;
   /**

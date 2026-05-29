@@ -1024,16 +1024,44 @@ async function computeNextGlobalWakeAtMs(projectIds: string[]): Promise<number |
   return min;
 }
 
+export interface CronSchedulerHealth {
+  /** False until `start()` runs at least once. */
+  started: boolean;
+  /** Wall-clock time of the most recent `start()` call, or null if never started. */
+  startedAtMs: number | null;
+  /**
+   * Wall-clock time of the most recent finished tick. Null until the first
+   * tick completes. The scheduler self-arms every <=60s, so if `started`
+   * is true and `lastTickAtMs` is more than a few minutes stale the
+   * scheduler has stalled silently (PM #29 / Sprint 2 follow-up — without
+   * this, sweepers + cron jobs go quiet and there's no signal).
+   */
+  lastTickAtMs: number | null;
+  /** Convenience flag — see `isCronSchedulerHealthy` for the rule. */
+  isHealthy: boolean;
+}
+
+/**
+ * Default freshness window for `isCronSchedulerHealthy`. The scheduler
+ * self-arms with `MAX_TIMER_DELAY_MS = 60s`, so a 5-minute window is
+ * comfortably larger than any expected gap (allows for one long-running
+ * tick + slack), but small enough to surface a real stall within ~5 min.
+ */
+export const CRON_SCHEDULER_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
 export class CronScheduler {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private started = false;
+  private startedAtMs: number | null = null;
+  private lastTickAtMs: number | null = null;
 
   start() {
     if (this.started) {
       return;
     }
     this.started = true;
+    this.startedAtMs = Date.now();
     this.arm(200);
   }
 
@@ -1043,6 +1071,32 @@ export class CronScheduler {
       clearTimeout(this.timer);
       this.timer = null;
     }
+  }
+
+  /**
+   * Snapshot for the /api/health probe. Reads internal state without
+   * triggering a tick. Public so the health-route handler doesn't need
+   * to break the encapsulation.
+   */
+  getHealthStatus(now: number = Date.now()): CronSchedulerHealth {
+    return {
+      started: this.started,
+      startedAtMs: this.startedAtMs,
+      lastTickAtMs: this.lastTickAtMs,
+      isHealthy: this.computeIsHealthy(now),
+    };
+  }
+
+  private computeIsHealthy(now: number): boolean {
+    if (!this.started) return false;
+    // First tick takes up to ~200ms after start(). Give the scheduler
+    // a freshness window of CRON_SCHEDULER_STALL_THRESHOLD_MS after
+    // `startedAtMs` before requiring an observed `lastTickAtMs`.
+    if (this.lastTickAtMs === null) {
+      const startedAtMs = this.startedAtMs ?? 0;
+      return now - startedAtMs <= CRON_SCHEDULER_STALL_THRESHOLD_MS;
+    }
+    return now - this.lastTickAtMs <= CRON_SCHEDULER_STALL_THRESHOLD_MS;
   }
 
   private arm(delayMs: number) {
@@ -1084,6 +1138,13 @@ export class CronScheduler {
     } catch {
       this.arm(MAX_TIMER_DELAY_MS);
     } finally {
+      // Record the tick BEFORE clearing `running` so the health probe sees
+      // a fresh timestamp even if the next tick fires right away. A tick
+      // that catches an exception still counts as alive — the scheduler
+      // recovered and rearmed. A tick that never returns (hangs forever)
+      // would never update this and the health probe would correctly
+      // report stale.
+      this.lastTickAtMs = Date.now();
       this.running = false;
     }
   }

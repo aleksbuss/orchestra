@@ -39,6 +39,16 @@ vi.mock("@/lib/agent/daemon", () => ({
   dispatchAgentJob: vi.fn(),
 }));
 
+// Sprint 2 follow-up: ghost-sweeper is now invoked indirectly via
+// `runAllSweepers()` (not from runtime.ts directly). Mock the sweepers
+// module so we can assert the boot-time call lands on the unified entry
+// point. The ghost-sweeper module itself stays mocked too, in case any
+// indirect import path still resolves it.
+vi.mock("@/lib/cron/sweepers", () => ({
+  runAllSweepers: vi.fn(),
+  ensureSweepersScheduled: vi.fn(),
+}));
+
 vi.mock("@/lib/agent/ghost-sweeper", () => ({
   sweepGhostTasks: vi.fn(),
 }));
@@ -46,12 +56,13 @@ vi.mock("@/lib/agent/ghost-sweeper", () => ({
 import { CronScheduler, recoverStaleCronRunMarkers } from "@/lib/cron/service";
 import { getPendingJobs } from "@/lib/storage/queue-store";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
-import { sweepGhostTasks } from "@/lib/agent/ghost-sweeper";
+import { runAllSweepers, ensureSweepersScheduled } from "@/lib/cron/sweepers";
 
 const mockedScheduler = vi.mocked(CronScheduler);
 const mockedPending = vi.mocked(getPendingJobs);
 const mockedDispatch = vi.mocked(dispatchAgentJob);
-const mockedSweep = vi.mocked(sweepGhostTasks);
+const mockedRunAll = vi.mocked(runAllSweepers);
+const mockedEnsureScheduled = vi.mocked(ensureSweepersScheduled);
 const mockedRecover = vi.mocked(recoverStaleCronRunMarkers);
 
 let processOnceSpy: any;
@@ -67,7 +78,12 @@ beforeEach(() => {
   processOnceSpy = vi.spyOn(process, "once").mockReturnValue(process);
   mockedPending.mockResolvedValue([]);
   mockedDispatch.mockResolvedValue(undefined as any);
-  mockedSweep.mockResolvedValue(undefined as any);
+  mockedRunAll.mockResolvedValue({
+    tmp: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
+    queue: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
+    ghost: { ok: true },
+  });
+  mockedEnsureScheduled.mockReturnValue(undefined as any);
   mockedRecover.mockResolvedValue({ scannedProjects: 0, clearedJobs: 0 });
 });
 
@@ -126,12 +142,18 @@ describe("ensureCronSchedulerStarted — first boot", () => {
     );
   });
 
-  it("runs ghost-sweeper exactly once after queue replay", async () => {
+  it("runs the unified sweepers entry exactly once after queue replay", async () => {
+    // Sprint 2 follow-up: `sweepGhostTasks` was previously called from
+    // runtime.ts directly; it's now folded into `runAllSweepers()` (along
+    // with tmp + queue sweeps). The boot path calls the unified entry
+    // once and also registers the 6h recurring tick — so any mid-uptime
+    // ghost task is now caught without waiting for a server restart.
     mockedPending.mockResolvedValue([{ chatId: "c-1" } as any]);
     const { ensureCronSchedulerStarted } = await freshImport();
     await ensureCronSchedulerStarted();
     await new Promise((r) => setImmediate(r));
-    expect(mockedSweep).toHaveBeenCalledOnce();
+    expect(mockedRunAll).toHaveBeenCalledOnce();
+    expect(mockedEnsureScheduled).toHaveBeenCalledOnce();
   });
 
   it("clears stale cron runningAtMs markers via recoverStaleCronRunMarkers", async () => {
@@ -159,7 +181,10 @@ describe("ensureCronSchedulerStarted — first boot", () => {
     expect(instance.start).toHaveBeenCalledOnce();
   });
 
-  it("skips ghost-sweeper when recovery was aborted before .finally()", async () => {
+  it("skips the unified sweepers entry when recovery was aborted before .finally()", async () => {
+    // Sprint 2 follow-up: same gating applies — if SIGTERM/SIGINT fires
+    // mid-boot the entire sweepers entry (incl. ghost cleanup) is skipped,
+    // not just the legacy direct ghost call.
     mockedPending.mockResolvedValue([{ chatId: "c-1" } as any]);
     const { ensureCronSchedulerStarted } = await freshImport();
     await ensureCronSchedulerStarted();
@@ -168,7 +193,8 @@ describe("ensureCronSchedulerStarted — first boot", () => {
     globalThis.__orchestraBootRecoveryController__!.abort();
     await new Promise((r) => setImmediate(r));
 
-    expect(mockedSweep).not.toHaveBeenCalled();
+    expect(mockedRunAll).not.toHaveBeenCalled();
+    expect(mockedEnsureScheduled).not.toHaveBeenCalled();
   });
 });
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, PackagePlus, Puzzle, BookText } from "lucide-react";
@@ -28,6 +28,51 @@ interface InstalledSkillItem {
   license?: string;
   compatibility?: string;
 }
+
+/**
+ * PM #33 — memoised row. Installed-skills lists per-project can grow
+ * past 50 once an operator pulls in a full bundled-skills catalog; the
+ * row is interactive (onClick opens a Sheet), so we keep the onClick
+ * stable via useCallback in the parent and let React.memo skip rows
+ * whose `skill` reference hasn't changed.
+ */
+const InstalledSkillRow = memo(function InstalledSkillRow({
+  skill,
+  onOpen,
+}: {
+  skill: InstalledSkillItem;
+  onOpen: (skill: InstalledSkillItem) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="w-full p-3 flex items-start gap-3 hover:bg-muted/40 transition-colors text-left"
+      onClick={() => onOpen(skill)}
+    >
+      <div className="bg-primary/10 p-2 rounded shrink-0 mt-0.5">
+        <BookText className="size-4 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="font-medium text-sm truncate">{skill.name}</p>
+        <p className="text-xs text-muted-foreground line-clamp-2 mt-1">
+          {skill.description || "No description"}
+        </p>
+        <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+          {skill.license ? (
+            <span className="rounded border px-2 py-0.5">
+              License: {skill.license}
+            </span>
+          ) : null}
+          {skill.compatibility ? (
+            <span className="rounded border px-2 py-0.5">
+              Compatibility: {skill.compatibility}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    </button>
+  );
+});
 
 export default function SkillsPage() {
   const { projects, setProjects, activeProjectId } = useAppStore();
@@ -221,10 +266,12 @@ export default function SkillsPage() {
     });
   }, [installedSkills, search]);
 
-  function handleOpenSkill(skill: InstalledSkillItem) {
+  // PM #33 — useCallback so InstalledSkillRow's React.memo isn't busted
+  // by an unstable onOpen prop on every parent render.
+  const handleOpenSkill = useCallback((skill: InstalledSkillItem) => {
     setSelectedSkill(skill);
     setIsSkillSheetOpen(true);
-  }
+  }, []);
 
   return (
     <>
@@ -302,34 +349,11 @@ export default function SkillsPage() {
                 ) : (
                   <div className="divide-y">
                     {filteredInstalledSkills.map((skill) => (
-                      <button
+                      <InstalledSkillRow
                         key={skill.name}
-                        type="button"
-                        className="w-full p-3 flex items-start gap-3 hover:bg-muted/40 transition-colors text-left"
-                        onClick={() => handleOpenSkill(skill)}
-                      >
-                        <div className="bg-primary/10 p-2 rounded shrink-0 mt-0.5">
-                          <BookText className="size-4 text-primary" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium text-sm truncate">{skill.name}</p>
-                          <p className="text-xs text-muted-foreground line-clamp-2 mt-1">
-                            {skill.description || "No description"}
-                          </p>
-                          <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                            {skill.license ? (
-                              <span className="rounded border px-2 py-0.5">
-                                License: {skill.license}
-                              </span>
-                            ) : null}
-                            {skill.compatibility ? (
-                              <span className="rounded border px-2 py-0.5">
-                                Compatibility: {skill.compatibility}
-                              </span>
-                            ) : null}
-                          </div>
-                        </div>
-                      </button>
+                        skill={skill}
+                        onOpen={handleOpenSkill}
+                      />
                     ))}
                   </div>
                 )}

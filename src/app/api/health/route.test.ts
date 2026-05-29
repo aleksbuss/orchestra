@@ -129,7 +129,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 14 subsystems by name in a stable order", async () => {
+  it("reports all 15 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -158,6 +158,10 @@ describe("GET /api/health — happy path", () => {
       // + cron jobs silently stop running. Probe reads the singleton's
       // getHealthStatus() (lastTickAtMs vs 5-min freshness threshold).
       "cron_scheduler",
+      // Sprint 7 close — MCP servers configured-count probe. Config-shape
+      // only; live liveness happens on call_mcp_tool invocation. Probing
+      // every health call would spawn N processes / hit external networks.
+      "mcp_servers",
     ]);
   });
 });

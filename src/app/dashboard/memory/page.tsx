@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,54 @@ interface MemoryItem {
   metadata: Record<string, unknown>;
   score?: number;
 }
+
+/**
+ * PM #33 — memoised row component. The memory list can grow well past
+ * 50 items and is refreshed on SSE tick (insertMemory by the agent),
+ * so wrapping the row in React.memo lets reference-stable items skip
+ * re-render while only newly-changed rows re-render.
+ */
+const MemoryRow = memo(function MemoryRow({
+  mem,
+  onDelete,
+}: {
+  mem: MemoryItem;
+  onDelete: (id: string) => void;
+}) {
+  return (
+    <div className="border rounded-lg p-3 bg-card group">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="text-sm whitespace-pre-wrap">{mem.text}</p>
+          <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+            {mem.metadata?.area ? (
+              <span className="bg-muted px-1.5 py-0.5 rounded">
+                {String(mem.metadata.area)}
+              </span>
+            ) : null}
+            {mem.score !== undefined && (
+              <span>Score: {(mem.score * 100).toFixed(1)}%</span>
+            )}
+            {mem.metadata?.createdAt ? (
+              <span>
+                {new Date(String(mem.metadata.createdAt)).toLocaleDateString()}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => onDelete(mem.id)}
+          className="opacity-0 group-hover:opacity-100 shrink-0 text-muted-foreground hover:text-destructive"
+          aria-label="Delete memory entry"
+        >
+          <Trash2 className="size-4" />
+        </Button>
+      </div>
+    </div>
+  );
+});
 
 interface ProjectOption {
   id: string;
@@ -84,12 +132,25 @@ export default function MemoryPage() {
     setIsSearching(false);
   }
 
-  async function handleDelete(id: string) {
-    await fetch(`/api/memory?id=${id}&subdir=${subdir}`, {
-      method: "DELETE",
-    });
-    loadMemories();
-  }
+  // PM #33 — wrapped in useCallback so the reference stays stable across
+  // re-renders. Without this, every parent render hands `MemoryRow` a
+  // new function prop and the React.memo wrapper skips nothing.
+  // `loadMemories` is recreated every render (it isn't itself memoized),
+  // so we intentionally omit it from deps and rely on `subdir` as the
+  // only meaningful invalidation key. The closure captures the latest
+  // `loadMemories` lexically; React's exhaustive-deps lint correctly
+  // flags this, but the alternative (memoizing every fetch helper in
+  // the file) is a much larger refactor.
+  const handleDelete = useCallback(
+    async (id: string) => {
+      await fetch(`/api/memory?id=${id}&subdir=${subdir}`, {
+        method: "DELETE",
+      });
+      loadMemories();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see comment above
+    [subdir]
+  );
 
   return (
     <div className="flex flex-1 flex-col gap-4 p-4 md:p-6 max-w-4xl mx-auto w-full overflow-y-auto">
@@ -157,45 +218,7 @@ export default function MemoryPage() {
             </div>
           )}
           {memories.map((mem) => (
-            <div
-              key={mem.id}
-              className="border rounded-lg p-3 bg-card group"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm whitespace-pre-wrap">
-                    {mem.text}
-                  </p>
-                  <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
-                    {mem.metadata?.area ? (
-                      <span className="bg-muted px-1.5 py-0.5 rounded">
-                        {String(mem.metadata.area)}
-                      </span>
-                    ) : null}
-                    {mem.score !== undefined && (
-                      <span>
-                        Score: {(mem.score * 100).toFixed(1)}%
-                      </span>
-                    )}
-                    {mem.metadata?.createdAt ? (
-                      <span>
-                        {new Date(
-                          String(mem.metadata.createdAt)
-                        ).toLocaleDateString()}
-                      </span>
-                    ) : null}
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => handleDelete(mem.id)}
-                  className="opacity-0 group-hover:opacity-100 shrink-0 text-muted-foreground hover:text-destructive"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            </div>
+            <MemoryRow key={mem.id} mem={mem} onDelete={handleDelete} />
           ))}
         </div>
       ) : (

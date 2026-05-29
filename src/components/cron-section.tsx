@@ -626,6 +626,7 @@ export function CronSection({ projectId }: CronSectionProps) {
                       disabled={busy}
                       className="text-muted-foreground hover:text-destructive"
                       title="Delete job"
+                      aria-label={`Delete cron job ${job.name ?? job.id}`}
                     >
                       <Trash2 className="size-4" />
                     </Button>

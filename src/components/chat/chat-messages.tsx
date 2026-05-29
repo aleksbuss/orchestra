@@ -51,7 +51,23 @@ export function ChatMessages({ messages, isLoading, status = "ready" }: ChatMess
 
   return (
     <div className="flex-1 overflow-y-auto px-4 md:px-6">
-      <div className="max-w-3xl mx-auto py-4 space-y-1">
+      {/*
+        role="log" + aria-live="polite" announces new messages to screen
+        readers as they stream in via SSE without interrupting whatever
+        the user was reading. `aria-relevant="additions"` keeps the
+        announcement scoped to the new MessageBubble — re-rendering the
+        whole list (memoised per-row per PM #33) doesn't trigger spam.
+        `aria-atomic="false"` lets the assistive tech read only the
+        diff, not the entire log every time.
+      */}
+      <div
+        className="max-w-3xl mx-auto py-4 space-y-1"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-atomic="false"
+        aria-label="Chat messages"
+      >
         {messages.map((message) => (
           <MessageBubble key={message.id} message={message} />
         ))}

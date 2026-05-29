@@ -934,6 +934,7 @@ function ProjectsPageClient() {
                           void handleDelete(project.id);
                         }}
                         className="text-muted-foreground hover:text-destructive"
+                        aria-label={`Delete project ${project.name}`}
                       >
                         <Trash2 className="size-4" />
                       </Button>

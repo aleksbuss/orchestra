@@ -104,6 +104,7 @@ export default function ProjectDetailsPage() {
                             size="icon"
                             className="-ml-2 h-8 w-8"
                             onClick={() => router.push("/dashboard/projects")}
+                            aria-label="Back to projects"
                         >
                             <ArrowLeft className="size-4" />
                         </Button>

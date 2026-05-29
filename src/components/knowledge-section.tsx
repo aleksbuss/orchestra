@@ -253,6 +253,7 @@ export function KnowledgeSection({ projectId }: KnowledgeSectionProps) {
                         onChange={handleUpload}
                         className="hidden"
                         accept=".txt,.md,.json,.csv,.pdf,.docx,.xlsx,.xls,.png,.jpg,.jpeg,.gif,.bmp,.webp"
+                        aria-label="Upload knowledge file"
                     />
                     <Button
                         onClick={() => fileInputRef.current?.click()}
@@ -298,6 +299,15 @@ export function KnowledgeSection({ projectId }: KnowledgeSectionProps) {
                                             handleViewChunks(file.name);
                                         }
                                     }}
+                                    onKeyDown={(e) => {
+                                        if ((e.key === "Enter" || e.key === " ") && (file.chunkCount ?? 0) > 0) {
+                                            e.preventDefault();
+                                            handleViewChunks(file.name);
+                                        }
+                                    }}
+                                    role="button"
+                                    tabIndex={(file.chunkCount ?? 0) > 0 ? 0 : -1}
+                                    aria-label={`View chunks for ${file.name}`}
                                 >
                                     <div className="flex items-center gap-3 min-w-0 flex-1">
                                         <div className="bg-primary/10 p-2 rounded shrink-0">
@@ -326,6 +336,7 @@ export function KnowledgeSection({ projectId }: KnowledgeSectionProps) {
                                             }}
                                             disabled={deleting === file.name}
                                             title="Delete"
+                                            aria-label={`Delete file ${file.name}`}
                                         >
                                             {deleting === file.name ? (
                                                 <Loader2 className="size-4 animate-spin" />
@@ -368,6 +379,15 @@ export function KnowledgeSection({ projectId }: KnowledgeSectionProps) {
                                 <div
                                     className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
                                     onClick={() => handleViewMemory(memory, index)}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
+                                            e.preventDefault();
+                                            handleViewMemory(memory, index);
+                                        }
+                                    }}
+                                    role="button"
+                                    tabIndex={0}
+                                    aria-label={`View memory ${getMemoryTitle(memory, index)}`}
                                 >
                                     <div className="bg-primary/10 p-2 rounded shrink-0">
                                         <MessageCircle className="size-4 text-primary" />
@@ -389,6 +409,7 @@ export function KnowledgeSection({ projectId }: KnowledgeSectionProps) {
                                         onClick={() => handleDeleteMemory(memory.id)}
                                         disabled={deletingMemoryId === memory.id}
                                         title="Delete memory"
+                                        aria-label={`Delete memory ${getMemoryTitle(memory, index)}`}
                                     >
                                         {deletingMemoryId === memory.id ? (
                                             <Loader2 className="size-4 animate-spin" />

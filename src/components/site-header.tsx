@@ -18,6 +18,7 @@ export function SiteHeader({ title }: { title?: string }) {
           variant="ghost"
           size="icon"
           onClick={toggleSidebar}
+          aria-label="Toggle sidebar"
         >
           <SidebarIcon className="w-4 h-4" />
         </Button>

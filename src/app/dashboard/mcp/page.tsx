@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Globe, Loader2, Terminal, Wrench } from "lucide-react";
@@ -16,6 +16,81 @@ interface McpServerItem {
   url?: string;
   headers?: Record<string, string>;
 }
+
+/**
+ * PM #33 — memoised row component. Per-project MCP server lists are
+ * read-only (no callbacks reach the row) so the props are pure data
+ * and the default `React.memo` shallow-equals check suffices. Avoids
+ * re-rendering the whole server list when an unrelated piece of state
+ * (search query, selected project) changes.
+ */
+const McpServerRow = memo(function McpServerRow({
+  server,
+}: {
+  server: McpServerItem;
+}) {
+  return (
+    <div className="p-4 space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 min-w-0">
+          {server.transport === "http" ? (
+            <Globe className="size-4 text-primary shrink-0" />
+          ) : (
+            <Terminal className="size-4 text-primary shrink-0" />
+          )}
+          <p className="font-medium truncate">{server.id}</p>
+        </div>
+        <span className="rounded border px-2 py-0.5 text-xs text-muted-foreground shrink-0">
+          {server.transport}
+        </span>
+      </div>
+
+      {server.transport === "stdio" ? (
+        <div className="space-y-1 text-sm text-muted-foreground">
+          <p>
+            Command: <span className="font-mono">{server.command || "-"}</span>
+          </p>
+          {server.args && server.args.length > 0 ? (
+            <p>
+              Args: <span className="font-mono">{server.args.join(" ")}</span>
+            </p>
+          ) : null}
+          {server.cwd ? (
+            <p>
+              CWD: <span className="font-mono">{server.cwd}</span>
+            </p>
+          ) : null}
+          {server.env && Object.keys(server.env).length > 0 ? (
+            <details className="pt-1">
+              <summary className="cursor-pointer text-xs">
+                Environment ({Object.keys(server.env).length})
+              </summary>
+              <pre className="mt-2 rounded border bg-muted/30 p-2 text-xs font-mono whitespace-pre-wrap break-words">
+                {JSON.stringify(server.env, null, 2)}
+              </pre>
+            </details>
+          ) : null}
+        </div>
+      ) : (
+        <div className="space-y-1 text-sm text-muted-foreground">
+          <p>
+            URL: <span className="font-mono">{server.url || "-"}</span>
+          </p>
+          {server.headers && Object.keys(server.headers).length > 0 ? (
+            <details className="pt-1">
+              <summary className="cursor-pointer text-xs">
+                Headers ({Object.keys(server.headers).length})
+              </summary>
+              <pre className="mt-2 rounded border bg-muted/30 p-2 text-xs font-mono whitespace-pre-wrap break-words">
+                {JSON.stringify(server.headers, null, 2)}
+              </pre>
+            </details>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+});
 
 function normalizeServers(input: unknown): McpServerItem[] {
   if (!Array.isArray(input)) return [];
@@ -319,65 +394,7 @@ export default function McpPage() {
                 ) : (
                   <div className="divide-y">
                     {filteredServers.map((server) => (
-                      <div key={server.id} className="p-4 space-y-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-2 min-w-0">
-                            {server.transport === "http" ? (
-                              <Globe className="size-4 text-primary shrink-0" />
-                            ) : (
-                              <Terminal className="size-4 text-primary shrink-0" />
-                            )}
-                            <p className="font-medium truncate">{server.id}</p>
-                          </div>
-                          <span className="rounded border px-2 py-0.5 text-xs text-muted-foreground shrink-0">
-                            {server.transport}
-                          </span>
-                        </div>
-
-                        {server.transport === "stdio" ? (
-                          <div className="space-y-1 text-sm text-muted-foreground">
-                            <p>
-                              Command: <span className="font-mono">{server.command || "-"}</span>
-                            </p>
-                            {server.args && server.args.length > 0 ? (
-                              <p>
-                                Args: <span className="font-mono">{server.args.join(" ")}</span>
-                              </p>
-                            ) : null}
-                            {server.cwd ? (
-                              <p>
-                                CWD: <span className="font-mono">{server.cwd}</span>
-                              </p>
-                            ) : null}
-                            {server.env && Object.keys(server.env).length > 0 ? (
-                              <details className="pt-1">
-                                <summary className="cursor-pointer text-xs">
-                                  Environment ({Object.keys(server.env).length})
-                                </summary>
-                                <pre className="mt-2 rounded border bg-muted/30 p-2 text-xs font-mono whitespace-pre-wrap break-words">
-                                  {JSON.stringify(server.env, null, 2)}
-                                </pre>
-                              </details>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <div className="space-y-1 text-sm text-muted-foreground">
-                            <p>
-                              URL: <span className="font-mono">{server.url || "-"}</span>
-                            </p>
-                            {server.headers && Object.keys(server.headers).length > 0 ? (
-                              <details className="pt-1">
-                                <summary className="cursor-pointer text-xs">
-                                  Headers ({Object.keys(server.headers).length})
-                                </summary>
-                                <pre className="mt-2 rounded border bg-muted/30 p-2 text-xs font-mono whitespace-pre-wrap break-words">
-                                  {JSON.stringify(server.headers, null, 2)}
-                                </pre>
-                              </details>
-                            ) : null}
-                          </div>
-                        )}
-                      </div>
+                      <McpServerRow key={server.id} server={server} />
                     ))}
                   </div>
                 )}

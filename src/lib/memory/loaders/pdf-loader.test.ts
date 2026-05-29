@@ -1,5 +1,6 @@
 /**
- * Tests for `loadPdf` — wraps `pdfjs-dist/legacy` with the loader's
+ * Tests for `loadPdf` — wraps `pdfjs-dist/legacy` ESM build (`.mjs`,
+ * since pdfjs-dist 4.x dropped the CJS .js entry) with the loader's
  * metadata shape. The PDF parser itself is mocked: real PDF parsing
  * pulls in a worker setup that's flaky in unit tests.
  *
@@ -21,7 +22,7 @@ import fs from "node:fs/promises";
 const mockGetDocument = vi.fn();
 const mockGlobalWorkerOptions = { workerSrc: undefined as string | undefined };
 
-vi.mock("pdfjs-dist/legacy/build/pdf.js", () => ({
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   getDocument: (...args: unknown[]) => mockGetDocument(...args),
   GlobalWorkerOptions: mockGlobalWorkerOptions,
 }));

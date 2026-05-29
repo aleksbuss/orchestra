@@ -11,10 +11,14 @@ export async function loadPdf(filePath: string): Promise<LoadedDocument> {
     // Convert Buffer to Uint8Array which pdfjs expects
     const uint8Array = new Uint8Array(dataBuffer);
 
-    // Dynamic import to avoid build issues with canvas
-    // Use legacy build for better Node.js support without canvas
+    // Dynamic import to avoid build issues with canvas.
+    // Use legacy build for better Node.js support without canvas.
+    // PM #50-era note: pdfjs-dist 4.x ships ESM-only (.mjs); the legacy
+    // CJS .js entry from 2.x was removed. The runtime API surface
+    // (getDocument / numPages / getPage / getTextContent) is unchanged
+    // across 2 → 4. CVE GHSA-wgrm-67xf-hhpq is fixed in 4.2.67+.
     // @ts-ignore
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.js");
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
     // Set up a fake worker to avoid worker file loading issues in Node
     if (!pdfjs.GlobalWorkerOptions.workerSrc) {

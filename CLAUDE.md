@@ -168,17 +168,33 @@ export async function POST(req: Request) {
 - Every iteration of `src/lib/agent/daemon.ts` and `src/lib/cron/runtime.ts` checks `signal.aborted` between hops.
 - Background tasks that outlive a single request use a **separate `AbortController`** owned by `daemon.ts`, NOT `req.signal` — the request finishes, but the daemon keeps running. This is the one exception.
 
-**Pre-merge audit grep (PM #23).** Run this on every PR that touches `src/lib/agent/` or `src/lib/tools/`:
+**Pre-merge audit (PM #23).** Run on every PR that touches `src/lib/agent/` or `src/lib/tools/`. The brittle awk-based grep that used to live here gave false positives on multi-line argument blocks; use this Node bracket-balanced variant instead:
 ```bash
-for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts; do
-  total=$(grep -c "await generateText\|await generateObject\|streamText" "$f")
-  with_signal=$(awk '/await generateText|await generateObject|streamText\(/,/}\)/' "$f" | grep -c "abortSignal")
-  echo "$f: $total calls, $with_signal with abortSignal"
+for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts src/lib/agent/moa-router.ts; do
+  node -e "
+    const fs = require('fs');
+    const src = fs.readFileSync('$f', 'utf8').split('\n');
+    let inCall=false, depth=0, callStart=0, hasSignal=false, total=0, missing=[];
+    for (let i=0; i<src.length; i++) {
+      const L = src[i];
+      if (!inCall && /(await\s+generateText|await\s+generateObject|streamText)\s*\(/.test(L)) {
+        inCall=true; depth=0; callStart=i+1; hasSignal=false; total++;
+      }
+      if (inCall) {
+        if (/abortSignal/.test(L)) hasSignal=true;
+        for (const c of L) {
+          if (c==='(') depth++;
+          else if (c===')') { depth--; if (depth===0) { if (!hasSignal) missing.push(callStart); inCall=false; break; } }
+        }
+      }
+    }
+    console.log('$f: total=' + total + ', missing=' + missing.length + (missing.length ? ' at L' + missing.join(',L') : ''));
+  "
 done
 ```
-Numbers should match. If not, that's the leak.
+All five orchestration files should report `missing=0`. If not, that's the leak.
 
-**Known gaps carried as tech debt (PM #23 follow-up):** `runAgentText` ([agent.ts](src/lib/agent/agent.ts) ~line 1776) and `runSubordinateAgent` (~line 1918) still don't accept `AbortSignal`. Their callers (`cron/service.ts`, `external/handle-external-message.ts`, `tools/call-subordinate.ts`) need a coordinated refactor to thread a signal through. The cron caller will use the daemon's separate `AbortController` per the exception above; the others should use `req.signal`.
+**PM #23 closed (2026-05-28 audit):** both `runAgentText` ([agent.ts:1833](src/lib/agent/agent.ts#L1833)) and `runSubordinateAgent` ([agent.ts:1992](src/lib/agent/agent.ts#L1992)) accept `abortSignal?: AbortSignal` and plumb it into their inner `generateText` calls. Callers (`cron/service.ts`, `external/handle-external-message.ts`, `tools/call-subordinate.ts`) thread the appropriate signal — daemon's `AbortController` for cron, `req.signal` for the rest. Don't reintroduce the gap.
 
 If you cannot answer "what cancels this stream?" you MUST NOT merge the change.
 

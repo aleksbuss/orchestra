@@ -7,6 +7,10 @@
 import { NextRequest } from "next/server";
 import { getSettings } from "@/lib/storage/settings-store";
 import { PRESETS, PRESET_ORDER, type PresetTier } from "@/lib/agent/presets";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from "@/lib/security/url-guard";
 
 interface ProviderDiagnostic {
   provider: string;
@@ -157,8 +161,29 @@ async function testAnthropicApi(apiKey: string): Promise<{ ok: boolean; message:
 async function testOllamaApi(baseUrl?: string): Promise<{ ok: boolean; message: string; latencyMs: number }> {
   const start = Date.now();
   const url = (baseUrl || "http://localhost:11434").replace(/\/v1\/?$/, "");
+
+  // PM #8 — SSRF guard. `baseUrl` originates from operator settings
+  // (settings.chatModel.baseUrl), but the same defense-in-depth posture used
+  // in /api/models/route.ts applies: anything that could resolve to a
+  // private/link-local range (incl. cloud metadata 169.254.169.254) is
+  // rejected. Loopback is intentionally allowed — local Ollama is the
+  // primary use case.
+  let safeUrl: URL;
   try {
-    const res = await fetch(`${url}/api/tags`, {
+    safeUrl = assertSafeOutboundUrl(`${url}/api/tags`);
+  } catch (err) {
+    if (err instanceof UnsafeOutboundUrlError) {
+      return {
+        ok: false,
+        message: `Refused to probe baseUrl: ${err.message}`,
+        latencyMs: Date.now() - start,
+      };
+    }
+    throw err;
+  }
+
+  try {
+    const res = await fetch(safeUrl, {
       method: "GET",
       signal: AbortSignal.timeout(5000),
     });

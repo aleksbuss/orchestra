@@ -2,6 +2,10 @@ import { getSettings } from "@/lib/storage/settings-store";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { getBrokenChatFiles } from "@/lib/storage/chat-store";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+} from "@/lib/security/url-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -65,20 +69,45 @@ export async function GET() {
         headers["Authorization"] = `Bearer ${apiKey}`;
       }
 
-      const res = await fetch(modelsUrl, {
-        headers,
-        signal: AbortSignal.timeout(5000),
-      });
-      const ms = Date.now() - start;
+      // PM #8 — SSRF guard. `modelsUrl` is built from operator-stored
+      // settings (provider + baseUrl). Apply the same defense-in-depth
+      // posture used in /api/models/route.ts: reject private/link-local
+      // (incl. cloud metadata 169.254.169.254) before fetching.
+      // Loopback stays allowed — local Ollama on 11434 is by design.
+      let safeUrl: URL | null = null;
+      let guardError: string | null = null;
+      try {
+        safeUrl = assertSafeOutboundUrl(modelsUrl);
+      } catch (err) {
+        if (err instanceof UnsafeOutboundUrlError) {
+          guardError = err.message;
+        } else {
+          throw err;
+        }
+      }
 
-      checks.push({
-        name: "llm_provider",
-        status: res.ok ? "ok" : "warn",
-        detail: res.ok
-          ? `${provider} reachable (HTTP ${res.status})`
-          : `${provider} returned HTTP ${res.status}`,
-        latencyMs: ms,
-      });
+      if (!safeUrl) {
+        checks.push({
+          name: "llm_provider",
+          status: "warn",
+          detail: `Refused to probe ${provider}: ${guardError ?? "unsafe URL"}`,
+        });
+      } else {
+        const res = await fetch(safeUrl, {
+          headers,
+          signal: AbortSignal.timeout(5000),
+        });
+        const ms = Date.now() - start;
+
+        checks.push({
+          name: "llm_provider",
+          status: res.ok ? "ok" : "warn",
+          detail: res.ok
+            ? `${provider} reachable (HTTP ${res.status})`
+            : `${provider} returned HTTP ${res.status}`,
+          latencyMs: ms,
+        });
+      }
     } else {
       checks.push({
         name: "llm_provider",

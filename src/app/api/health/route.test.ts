@@ -87,11 +87,24 @@ beforeEach(async () => {
   mockedSettings.mockResolvedValue(fakeSettings());
   mockedTotal.mockReturnValue(4);
   mockedAvailable.mockReturnValue(4);
+
+  // Sprint 2 — plant a healthy cron scheduler singleton so the new
+  // `cron_scheduler` probe defaults to `ok`. Individual tests that need
+  // to exercise the warn/error paths overwrite this directly.
+  (globalThis as any).__orchestraCronScheduler__ = {
+    getHealthStatus: () => ({
+      started: true,
+      startedAtMs: Date.now() - 1000,
+      lastTickAtMs: Date.now() - 100,
+      isHealthy: true,
+    }),
+  };
 });
 
 afterEach(async () => {
   cwdSpy?.mockRestore();
   fetchSpy?.mockRestore();
+  delete (globalThis as any).__orchestraCronScheduler__;
   await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
@@ -116,7 +129,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 11 subsystems by name in a stable order", async () => {
+  it("reports all 12 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -137,7 +150,58 @@ describe("GET /api/health — happy path", () => {
       "aggregator_mode",
       "trace_memory",
       "openrouter_pricing_cache",
+      // Sprint 2 — cron scheduler heartbeat. Stalled scheduler = sweepers
+      // + cron jobs silently stop running. Probe reads the singleton's
+      // getHealthStatus() (lastTickAtMs vs 5-min freshness threshold).
+      "cron_scheduler",
     ]);
+  });
+});
+
+describe("GET /api/health — cron_scheduler subsystem (Sprint 2)", () => {
+  it("returns 'ok' when the scheduler reports healthy + recent tick", async () => {
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "cron_scheduler");
+    expect(check?.status).toBe("ok");
+    expect(check?.detail).toMatch(/last tick/i);
+  });
+
+  it("returns 'warn' when the singleton is missing on globalThis", async () => {
+    delete (globalThis as any).__orchestraCronScheduler__;
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "cron_scheduler");
+    expect(check?.status).toBe("warn");
+    expect(check?.detail).toMatch(/instrumentation-node/i);
+  });
+
+  it("returns 'warn' when the scheduler stalled (no recent tick)", async () => {
+    (globalThis as any).__orchestraCronScheduler__ = {
+      getHealthStatus: () => ({
+        started: true,
+        startedAtMs: Date.now() - 60 * 60 * 1000,
+        lastTickAtMs: Date.now() - 10 * 60 * 1000,
+        isHealthy: false,
+      }),
+    };
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "cron_scheduler");
+    expect(check?.status).toBe("warn");
+    expect(check?.detail).toMatch(/stalled/i);
+  });
+
+  it("returns 'warn' when scheduler.start() never ran", async () => {
+    (globalThis as any).__orchestraCronScheduler__ = {
+      getHealthStatus: () => ({
+        started: false,
+        startedAtMs: null,
+        lastTickAtMs: null,
+        isHealthy: false,
+      }),
+    };
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "cron_scheduler");
+    expect(check?.status).toBe("warn");
+    expect(check?.detail).toMatch(/stop\(\) was called|never reached/i);
   });
 });
 

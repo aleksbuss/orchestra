@@ -89,3 +89,76 @@ export function mergeUsage(
     fullyPriced: a.fullyPriced && b.fullyPriced,
   };
 }
+
+/**
+ * Sprint 2 — per-chat hard USD cap.
+ *
+ * `settings.costGuard.maxUsdPerChat` is optional and only enforced when set
+ * to a positive finite number. The accumulator never persists state on its
+ * own; this helper just inspects the chat's existing cumulative against the
+ * cap and tells the caller whether to refuse the next turn.
+ *
+ * Three returns:
+ *   - `{ over: false }` — no cap, or cap not exceeded, proceed.
+ *   - `{ over: true, costUsd, maxUsdPerChat }` — cap exceeded; caller
+ *     translates this into a 402 response with the included numbers.
+ *
+ * `fullyPriced=false` is deliberately enforced too: a chat whose cumulative
+ * is a lower bound and ALREADY over the cap is, by construction, AT LEAST
+ * over the cap on real spend. Better to err on the side of "stop" than
+ * silently let unpriced models bypass the guard.
+ */
+export interface BudgetCheckResult {
+  over: boolean;
+  costUsd: number;
+  maxUsdPerChat: number | null;
+}
+
+export function checkChatBudget(
+  current: ChatUsage | undefined,
+  maxUsdPerChat: number | undefined | null
+): BudgetCheckResult {
+  const cap =
+    typeof maxUsdPerChat === "number" &&
+    Number.isFinite(maxUsdPerChat) &&
+    maxUsdPerChat > 0
+      ? maxUsdPerChat
+      : null;
+  const costUsd = current?.costUsd ?? 0;
+  if (cap === null) {
+    return { over: false, costUsd, maxUsdPerChat: null };
+  }
+  return {
+    over: costUsd >= cap,
+    costUsd,
+    maxUsdPerChat: cap,
+  };
+}
+
+/**
+ * Thin wrapper that throws a labelled error when over budget. Callers can
+ * `try { assertChatBudget(...) } catch (err) { if (err instanceof
+ * ChatBudgetExceededError) ... }` to map the error to a 402.
+ */
+export class ChatBudgetExceededError extends Error {
+  readonly costUsd: number;
+  readonly maxUsdPerChat: number;
+  constructor(costUsd: number, maxUsdPerChat: number) {
+    super(
+      `Chat budget exceeded: cumulative cost $${costUsd.toFixed(4)} >= cap $${maxUsdPerChat.toFixed(2)}. Lift settings.costGuard.maxUsdPerChat or start a new chat.`
+    );
+    this.name = "ChatBudgetExceededError";
+    this.costUsd = costUsd;
+    this.maxUsdPerChat = maxUsdPerChat;
+  }
+}
+
+export function assertChatBudget(
+  current: ChatUsage | undefined,
+  maxUsdPerChat: number | undefined | null
+): void {
+  const result = checkChatBudget(current, maxUsdPerChat);
+  if (result.over && result.maxUsdPerChat !== null) {
+    throw new ChatBudgetExceededError(result.costUsd, result.maxUsdPerChat);
+  }
+}

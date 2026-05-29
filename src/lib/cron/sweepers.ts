@@ -156,10 +156,20 @@ export async function sweepOrphanQueueEntries(
  * lazily so this module doesn't pull the full chat-store at import time
  * (which would in turn install the SIGTERM-flush handler — fine in prod,
  * noisy under Vitest).
+ *
+ * Sweeps performed:
+ *   - tmp: `data/tmp/` files older than 7d
+ *   - queue: orphan `data/queue/<chatId>.json` whose chat no longer exists
+ *   - ghost: orphan in-progress GoalTree tasks for chats not currently
+ *     running. Pre-Sprint 2 this only ran ONCE at boot — any task that
+ *     went orphan mid-uptime (job crashed without the queue picking it
+ *     up) stayed in_progress until the next restart. Adding it here
+ *     gives the 6h recurring path a chance to catch it.
  */
 export async function runAllSweepers(): Promise<{
   tmp: SweepResult;
   queue: SweepResult;
+  ghost: { ok: boolean };
 }> {
   // Dynamic import: keeps the module dependency-light at boot and lets
   // tests stub the chat-store without affecting the sweeper API surface.
@@ -176,7 +186,7 @@ export async function runAllSweepers(): Promise<{
     chatIds = new Set();
   }
 
-  const [tmp, queue] = await Promise.all([
+  const [tmp, queue, ghost] = await Promise.all([
     sweepTempDir().catch((err) => {
       console.warn("[sweepers] sweepTempDir threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
@@ -185,6 +195,19 @@ export async function runAllSweepers(): Promise<{
       console.warn("[sweepers] sweepOrphanQueueEntries threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
     }),
+    // Dynamic import keeps sweepers.ts independent of the agent layer —
+    // the only edge it adds is a single fn call, and tests can stub the
+    // module without touching the daemon/goal-store wiring.
+    (async () => {
+      try {
+        const { sweepGhostTasks } = await import("@/lib/agent/ghost-sweeper");
+        await sweepGhostTasks();
+        return { ok: true };
+      } catch (err) {
+        console.warn("[sweepers] sweepGhostTasks threw:", err);
+        return { ok: false };
+      }
+    })(),
   ]);
 
   console.log(
@@ -196,10 +219,10 @@ export async function runAllSweepers(): Promise<{
       scanned: queue.scanned,
       removed: queue.removed,
       errors: queue.errors,
-    })}`
+    })}, ghost ${JSON.stringify(ghost)}`
   );
 
-  return { tmp, queue };
+  return { tmp, queue, ghost };
 }
 
 /**

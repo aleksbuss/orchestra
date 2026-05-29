@@ -4,6 +4,11 @@ import { createChat, getChat, saveChat } from "@/lib/storage/chat-store";
 import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
 import { log, withLogContext } from "@/lib/observability/logger";
+import { getSettings } from "@/lib/storage/settings-store";
+import {
+  ChatBudgetExceededError,
+  assertChatBudget,
+} from "@/lib/cost/accumulator";
 import type { ChatMessage } from "@/lib/types";
 import type { PresetTier } from "@/lib/agent/presets";
 
@@ -58,6 +63,46 @@ export async function POST(req: NextRequest) {
         if (!existing) {
           await createChat(resolvedChatId, "New Chat", projectId);
         }
+      }
+
+      // Sprint 2 — per-chat hard USD cap (companion to the PM #36 soft
+      // banner). Reads `settings.costGuard.maxUsdPerChat`; if a positive
+      // number is set AND the chat's cumulativeUsage.costUsd is already
+      // at or above it, refuse the turn with 402 Payment Required.
+      // Applies BEFORE the interactive vs background branch so neither
+      // path can bypass the cap. No-op when unconfigured (the default).
+      try {
+        const settings = await getSettings();
+        const cap = settings.costGuard?.maxUsdPerChat;
+        if (typeof cap === "number" && cap > 0) {
+          const current = await getChat(resolvedChatId);
+          assertChatBudget(current?.cumulativeUsage, cap);
+        }
+      } catch (err) {
+        if (err instanceof ChatBudgetExceededError) {
+          log.warn("chat_budget_exceeded", {
+            chatId: resolvedChatId,
+            costUsd: err.costUsd,
+            maxUsdPerChat: err.maxUsdPerChat,
+          });
+          return Response.json(
+            {
+              error: "chat_budget_exceeded",
+              message: err.message,
+              costUsd: err.costUsd,
+              maxUsdPerChat: err.maxUsdPerChat,
+            },
+            { status: 402 }
+          );
+        }
+        // Settings read failure: don't block the chat. Surface as a log
+        // line so the operator can fix the settings.json corruption; the
+        // soft budget banner is already a robust fallback if pricing
+        // computation fails downstream.
+        log.warn("chat_budget_check_failed", {
+          chatId: resolvedChatId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
       }
 
       log.info("chat_turn_started", {

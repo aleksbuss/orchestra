@@ -48,6 +48,23 @@ const MAX_LOG_ENTRIES = 200;
  *  embed — investigators can fetch the full chat via `orchestra_get_chat`. */
 const MAX_CHAT_EMBED_BYTES = 250_000;
 
+/**
+ * Sprint 5 follow-up — FIFO ring buffer cap on the postmortem directory.
+ *
+ * Per-file size is bounded (MAX_LOG_ENTRIES + MAX_CHAT_EMBED_BYTES), but
+ * the directory was unbounded — a long-running deployment that hits the
+ * error path repeatedly would accumulate thousands of files. 500 is a
+ * back-of-napkin: at ~50 KB each that's ~25 MB total, well below the
+ * "operator notices" threshold and big enough that the recent failures
+ * for any normal triage window survive. Falls in the same neighbourhood
+ * as `MAX_SNAPSHOTS_PER_PROJECT = 200` in storage/snapshots.ts.
+ *
+ * Eviction is the SAME pattern: sort by mtime descending, keep the
+ * newest N, unlink the rest. Fires from `dumpPostmortem` after a
+ * successful write (best-effort — a failed prune doesn't fail the dump).
+ */
+export const MAX_POSTMORTEMS = 500;
+
 const TRACE_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 export interface PostmortemRequestSnapshot {
@@ -241,12 +258,72 @@ export async function dumpPostmortem(
     };
 
     await safeWriteFile(filePath, JSON.stringify(file, null, 2));
+    // Best-effort prune. Don't await failures — same posture as
+    // `snapshotBeforeWrite` calling `pruneSnapshots`. A full disk during
+    // prune would be visible elsewhere via `disk_space` in /api/health.
+    prunePostmortems().catch((err) => {
+      console.warn(
+        "[postmortem] prune failed:",
+        err instanceof Error ? err.message : String(err)
+      );
+    });
     return filePath;
   } catch {
     // Postmortem dump must not propagate failures; we'd rather lose the PM
     // than turn a chat-error response into a 500.
     return null;
   }
+}
+
+/**
+ * Keep the newest `MAX_POSTMORTEMS` files; unlink the rest. Sorted by
+ * mtime descending so the freshest investigation material always wins
+ * even if the operator manually `touch`-es older files.
+ *
+ * Exported for the unit test; production callers go through the inline
+ * hook in `dumpPostmortem`.
+ */
+export async function prunePostmortems(): Promise<{ removed: number }> {
+  const dir = postmortemDir();
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { removed: 0 };
+    }
+    throw err;
+  }
+  const jsonFiles = entries.filter((f) => f.endsWith(".json"));
+  if (jsonFiles.length <= MAX_POSTMORTEMS) return { removed: 0 };
+
+  const withMtime: Array<{ name: string; mtimeMs: number }> = [];
+  for (const name of jsonFiles) {
+    try {
+      const stat = await fs.stat(path.join(dir, name));
+      withMtime.push({ name, mtimeMs: stat.mtimeMs });
+    } catch {
+      // Race with another delete; just skip — the file is already gone.
+    }
+  }
+  withMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const toDelete = withMtime.slice(MAX_POSTMORTEMS);
+
+  let removed = 0;
+  for (const entry of toDelete) {
+    try {
+      await fs.unlink(path.join(dir, entry.name));
+      removed += 1;
+    } catch (err) {
+      // Best-effort — log once and keep going. A partial prune still
+      // makes progress toward the cap on the next dump.
+      console.warn(
+        `[postmortem] failed to prune ${entry.name}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return { removed };
 }
 
 /**

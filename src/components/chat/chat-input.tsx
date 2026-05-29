@@ -254,6 +254,7 @@ export function ChatInput({
               disabled={disabled || !chatId}
               className="h-10 w-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors ml-1"
               title={chatId ? "Attach files" : "Send a message first to attach files"}
+              aria-label="Attach files"
             >
               <Paperclip className="size-4" />
             </Button>
@@ -280,6 +281,7 @@ export function ChatInput({
                 onClick={onStop}
                 className="h-10 w-10 shrink-0 rounded-full bg-red-500 hover:bg-red-600 shadow-sm transition-all animate-pulse"
                 title="Stop generation (Esc)"
+                aria-label="Stop generation"
               >
                 <Square className="size-4 fill-current" />
               </Button>
@@ -289,6 +291,7 @@ export function ChatInput({
                 onClick={onSubmit}
                 disabled={!input.trim() || disabled}
                 className="h-10 w-10 shrink-0 rounded-full bg-foreground text-background shadow-md hover:bg-foreground/90 transition-all"
+                aria-label="Send message"
               >
                 <Send className="size-4 ml-0.5" />
               </Button>

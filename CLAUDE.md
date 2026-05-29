@@ -418,7 +418,59 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 - For changes to SSE / agent / MoA / file-storage paths, run the relevant Vitest suite (`npm test -- <pattern>`) AND boot the dev server to manually verify a real chat completes end-to-end. Unit tests do not catch PM #4/#5-class bugs.
 - **Audit gate (Sprint 1 audit follow-up).** `npm run audit:gate` = `npm audit --audit-level=critical --omit=dev` is wired into `verify:strict`. Today's bar is **zero critical advisories on prod dependencies**. We deliberately do NOT block on `high` yet because 15 known transitive highs remain (their parents need coordinated bumps tracked as ongoing tech debt — see `npm audit` output for the list). Raising the bar to `high` is a one-character change here once those transitives are cleared; do it then. Reasoning: a permanently-red `high` gate trains everyone to ignore the gate, defeating the point.
 
-### 10. Non-npm dependency: `xlsx` from SheetJS CDN
+### 10. Sprint 3 — File-size decomposition follow-ups
+
+Five files cross the §8 1500-line "MUST decompose next substantive PR" line. None can be split in a single PR without a comprehensive integration test scaffold — each touches a critical contract (PM #1 abortSignal, PM #5 SSE, PM #17 tool-capability detection, PM #29 flush, PM #50 code-execution). The seam analysis below is the contract to honor when the next focused PR lands.
+
+**`src/lib/agent/agent.ts` (2097 LOC, 9 hot edits in 90d)** — orchestration core, every chat turn flows through it.
+- Natural seams:
+  - `agent-stream.ts` (~500): the `streamText` + SSE plumbing block at L1540, including the `pendingChatErrorClassification` writeback path.
+  - `agent-fallback.ts` (~400): the model-fallback retry chain. Touches PM #17 (`modelSupportsTools`) — keep both branches honest.
+  - `agent-tools.ts` (~300): `ToolSet` assembly + the `applyGlobalToolLoopGuard` wrap. Every callsite that builds tools for `generateText` MUST go through here (CLAUDE.md §4).
+  - `agent-core.ts` (~500): the `runAgent` orchestrator that composes the above.
+  - `agent.ts` itself shrinks to a re-export facade ≤200 LOC.
+- Pre-extraction guard: run `grep -n applyGlobalToolLoopGuard src/lib/agent/agent.ts` BEFORE and AFTER — same callsite count, all routed through `agent-tools.ts`.
+- Pre-extraction guard 2: PM #23 audit grep must report `missing=0` across every new file (see "AbortSignal Propagation Contract" above).
+- Test scaffolding: add `agent.integration.test.ts` that mocks `generateText`/`streamText` and asserts the end-to-end shape of (chatId → runAgent → message persisted) so a regression in any extracted file blows up the test before merge.
+
+**`src/lib/tools/tool.ts` (1919 LOC, 4 hot edits in 90d)** — every tool registration.
+- Natural seams: one file per tool family.
+  - `tools/web.ts` (web_search, web_task)
+  - `tools/memory.ts` (insert_memory, search_memory, …)
+  - `tools/project.ts` (project file ops, knowledge query)
+  - `tools/mcp.ts` (call_mcp_tool + the PM #27 `wrapUntrustedMcpOutput` boundary)
+  - `tools/cron.ts` (cron_create/list/delete)
+  - `tools/subordinate.ts` (call_subordinate — already has Sprint 4 tests)
+  - `tools/skills.ts` (load_skill, install_skill_from_github, …)
+- `tool.ts` keeps `createAgentTools` as the facade.
+- Pre-extraction guard: every tool MUST stay wrapped by `applyGlobalToolLoopGuard` after the split (one of the most regression-prone surfaces).
+
+**`src/lib/providers/llm-provider.ts` (1833 LOC, 3 hot edits in 90d)** — one branch per provider.
+- Natural seams: `providers/{openai,anthropic,google,openrouter,ollama,sglang,vllm,custom,mock}.ts`, each ~200-300 LOC.
+- `llm-provider.ts` becomes a registry: `createModel(config, opts)` dispatches by `config.provider`. Keep the `modelSupportsTools` helper here OR move to `providers/tool-support.ts` (currently lives separately — PM #17 single source of truth).
+- Pre-extraction guard: `tool-support.test.ts`'s universal cross-provider regression test (PM #17) must stay green; add positive cases for any provider whose extraction you didn't touch so the test surface widens at the same time.
+
+**`src/lib/storage/project-store.ts` (1555 LOC, no hot edits)** — multiple resources in one file.
+- Natural seams:
+  - `project-meta.ts` (~300): `getProject`, `getAllProjects`, `saveProject`, `deleteProject`, project-id validation, getWorkDir.
+  - `project-blackboard.ts` (~250): `.orchestra_blackboard.json` read/write.
+  - `project-knowledge.ts` (~300): `getProjectFiles`, `importKnowledgeFile`, the audited-route filename push-down.
+  - `project-mcp.ts` (~400): `loadProjectMcpServers`, `upsertProjectMcpServer`, `deleteProjectMcpServer`, `saveProjectMcpServersContent`.
+  - `project-files.ts` (~200): direct file CRUD inside the project workspace.
+- This is the LOWEST-RISK of the five — most callsites use one resource at a time, so the cross-file edge is thin.
+- Pre-extraction guard: the audited-routes table in §"Security Patterns" still references `importKnowledgeFile` and `loadProjectMcpServers`; the new module paths must keep the `assertPathInside` push-down in place.
+
+**`src/lib/tools/code-execution.ts` (1207 LOC, 3 hot edits in 90d)** — security-critical surface.
+- Natural seams:
+  - `code-execution/env.ts` (~150): `scrubProcessEnv` + the PM #28 always-scrub list. THIS IS THE FILE TO TEST HARDEST.
+  - `code-execution/runners/{python,node,shell}.ts` (~200 each): per-runtime spawn logic + arg normalization.
+  - `code-execution/sandbox.ts` (~200): the Docker vs local branch.
+  - `code-execution/index.ts` (~250): the public `code_execution` tool entry, composes the above.
+- Pre-extraction guard: PM #28 `grep -rn "\.\.\.process\.env" src/lib/tools/code-execution/` MUST return zero hits except inside `env.ts` `scrubProcessEnv` itself.
+
+**General rule for any of the five:** do the extraction in two PRs. PR 1 introduces the new files as re-exporters that wrap the existing implementation, with the test suite expanded to cover both shapes. PR 2 cuts the implementation across the seams. Reviewers can audit boundary changes without the noise of every callsite changing simultaneously.
+
+### 11. Non-npm dependency: `xlsx` from SheetJS CDN
 - `xlsx` in `package.json` resolves to `https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz`, NOT the npm registry. SheetJS stopped publishing to npm in 2023; the last npm-published version (0.18.5) carries two high-severity CVEs (prototype pollution GHSA-4r6h-8v6p-xvw6 and ReDoS GHSA-5pgg-2g8v-p4x9). The CDN tarball is the maintainer's recommended install path and ships the patched 0.20.3.
 - The lockfile pins the resolved URL + a SHA-512 integrity hash. CI installs and clean `npm install` work exactly the same as registry packages, with one caveat: **the build host must be able to reach `cdn.sheetjs.com` outbound**. Air-gapped / proxy-restricted environments need either a local mirror of the tarball or a pre-populated `npm cache`. Document this requirement in any deployment runbook.
 - **API surface used (verify still present before next bump):** `XLSX.read(buffer, { type: "buffer" })`, `workbook.SheetNames`, `workbook.Sheets[name]`, `XLSX.utils.sheet_to_csv(sheet, { FS, RS })` in [`src/lib/memory/loaders/xlsx-loader.ts`](src/lib/memory/loaders/xlsx-loader.ts). Tests also use `XLSX.utils.book_new`, `XLSX.utils.aoa_to_sheet`, `XLSX.utils.book_append_sheet`, `XLSX.write`.

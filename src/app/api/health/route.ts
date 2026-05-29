@@ -479,6 +479,63 @@ export async function GET() {
     });
   }
 
+  // 11. MCP servers — configured count (Sprint 5 follow-up / Sprint 7 close).
+  //
+  // Deliberately a CONFIG-shape probe, not a liveness probe. Driving real
+  // liveness (open a stdio child / hit an HTTP endpoint) on every health
+  // call would: (a) spawn N processes per request, (b) hit external
+  // networks on a high-frequency endpoint, (c) double the latency of any
+  // dashboard tile that polls /api/health. The goal here is to surface
+  // "the config exists and parses cleanly" — a non-zero count without
+  // errors confirms the surface is wired; failures actually invoking a
+  // server show up in chat-error path / call_mcp_tool toolcall traces.
+  //
+  // Returns: "ok" with a count, "warn" only when reading the project list
+  // or any per-project MCP file fails outright.
+  try {
+    const { getAllProjects, loadProjectMcpServers } = await import(
+      "@/lib/storage/project-store"
+    );
+    const projects = await getAllProjects();
+    let totalServers = 0;
+    let projectsWithMcp = 0;
+    let parseErrors = 0;
+    for (const project of projects) {
+      try {
+        const cfg = await loadProjectMcpServers(project.id);
+        const servers = cfg?.servers ?? [];
+        if (servers.length > 0) {
+          totalServers += servers.length;
+          projectsWithMcp += 1;
+        }
+      } catch {
+        parseErrors += 1;
+      }
+    }
+    if (parseErrors > 0) {
+      checks.push({
+        name: "mcp_servers",
+        status: "warn",
+        detail: `${totalServers} MCP server(s) configured across ${projectsWithMcp} project(s); ${parseErrors} project MCP file(s) failed to parse. Live-liveness probing happens on call_mcp_tool invocation, not here.`,
+      });
+    } else {
+      checks.push({
+        name: "mcp_servers",
+        status: "ok",
+        detail:
+          totalServers === 0
+            ? "No MCP servers configured in any project."
+            : `${totalServers} MCP server(s) configured across ${projectsWithMcp} project(s). Liveness checked lazily on call_mcp_tool invocation.`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: "mcp_servers",
+      status: "warn",
+      detail: `Could not enumerate MCP server configs: ${err instanceof Error ? err.message : String(err)}.`,
+    });
+  }
+
   const totalMs = Date.now() - startTotal;
   const overallStatus = checks.some((c) => c.status === "error")
     ? "unhealthy"

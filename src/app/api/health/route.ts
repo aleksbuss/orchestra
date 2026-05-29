@@ -335,6 +335,59 @@ export async function GET() {
     });
   }
 
+  // 10. Cron scheduler heartbeat (Sprint 2 audit follow-up).
+  // The scheduler lives on `globalThis.__orchestraCronScheduler__`. If it
+  // never started (cold boot path didn't reach it) OR if its last tick is
+  // more than ~5 min old (silent stall — the timer died but the process
+  // is up), the operator gets a warn here. Without this probe, sweepers
+  // + cron jobs go quiet and nothing else signals it.
+  try {
+    const scheduler = globalThis.__orchestraCronScheduler__;
+    if (!scheduler) {
+      checks.push({
+        name: "cron_scheduler",
+        status: "warn",
+        detail:
+          "Cron scheduler singleton not present on globalThis. instrumentation-node may not have run — check NEXT_RUNTIME and boot log for register() invocation.",
+      });
+    } else {
+      const status = scheduler.getHealthStatus();
+      if (status.isHealthy) {
+        const lastTickAgoSec =
+          status.lastTickAtMs !== null
+            ? Math.round((Date.now() - status.lastTickAtMs) / 1000)
+            : null;
+        checks.push({
+          name: "cron_scheduler",
+          status: "ok",
+          detail:
+            lastTickAgoSec === null
+              ? "Scheduler started; awaiting first tick (warmup window)."
+              : `Scheduler started; last tick ${lastTickAgoSec}s ago.`,
+        });
+      } else {
+        const detail = !status.started
+          ? "Scheduler exists but stop() was called (or start() never reached)."
+          : status.lastTickAtMs === null
+          ? `Scheduler started but never ticked within the 5-min warmup window. Check boot log for cron service errors.`
+          : `Scheduler stalled — last tick ${Math.round(
+              (Date.now() - status.lastTickAtMs) / 1000
+            )}s ago (> 5 min threshold). Sweepers + cron jobs not running.`;
+        checks.push({
+          name: "cron_scheduler",
+          status: "warn",
+          detail,
+        });
+      }
+    }
+  } catch (err) {
+    checks.push({
+      name: "cron_scheduler",
+      status: "warn",
+      detail: `Could not probe cron scheduler: ${err instanceof Error ? err.message : String(err)}.`,
+    });
+  }
+
   const totalMs = Date.now() - startTotal;
   const overallStatus = checks.some((c) => c.status === "error")
     ? "unhealthy"

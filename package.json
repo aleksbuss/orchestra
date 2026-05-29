@@ -51,7 +51,7 @@
     "nanoid": "^5.1.6",
     "next": "15.5.18",
     "node-ensure": "^0.0.0",
-    "pdfjs-dist": "^2.16.105",
+    "pdfjs-dist": "^4.10.38",
     "radix-ui": "^1.4.3",
     "react": "19.1.2",
     "react-dom": "19.1.2",

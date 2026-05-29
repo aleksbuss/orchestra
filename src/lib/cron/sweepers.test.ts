@@ -146,3 +146,82 @@ describe("PM #32 — ensureSweepersScheduled idempotency", () => {
     globalThis.__orchestraSweepInterval__ = undefined;
   });
 });
+
+describe("Sprint 5 — sweepOrphanChatFiles", () => {
+  it("returns zero-result when data/chat-files does not exist (fresh install)", async () => {
+    const out = await sweepers.sweepOrphanChatFiles(new Set());
+    expect(out).toEqual({
+      scanned: 0,
+      removed: 0,
+      errors: 0,
+      removedSample: [],
+    });
+  });
+
+  it("removes <chatId>/ directories whose id is NOT in the live chat set", async () => {
+    const root = path.join(tmpDir, "data", "chat-files");
+    await fs.mkdir(path.join(root, "live-1"), { recursive: true });
+    await fs.writeFile(path.join(root, "live-1", "doc.txt"), "x");
+    await fs.mkdir(path.join(root, "orphan-1"), { recursive: true });
+    await fs.writeFile(path.join(root, "orphan-1", "img.png"), "y");
+    await fs.mkdir(path.join(root, "orphan-2"), { recursive: true });
+
+    const out = await sweepers.sweepOrphanChatFiles(new Set(["live-1"]));
+
+    expect(out.scanned).toBe(3);
+    expect(out.removed).toBe(2);
+    expect(out.removedSample).toEqual(
+      expect.arrayContaining(["orphan-1", "orphan-2"])
+    );
+
+    // Live directory survives.
+    await expect(
+      fs.access(path.join(root, "live-1", "doc.txt"))
+    ).resolves.toBeUndefined();
+    // Orphan dirs gone (recursive rm including their contents).
+    await expect(
+      fs.access(path.join(root, "orphan-1"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      fs.access(path.join(root, "orphan-2"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("skips non-directory entries inside chat-files (defense — there shouldn't be any)", async () => {
+    const root = path.join(tmpDir, "data", "chat-files");
+    await fs.mkdir(root, { recursive: true });
+    await fs.writeFile(path.join(root, "stray-file.txt"), "z");
+
+    const out = await sweepers.sweepOrphanChatFiles(new Set());
+
+    expect(out.scanned).toBe(0);
+    expect(out.removed).toBe(0);
+    // Stray file still there.
+    await expect(
+      fs.access(path.join(root, "stray-file.txt"))
+    ).resolves.toBeUndefined();
+  });
+
+  it("removes nothing when every dir matches the live chat set", async () => {
+    const root = path.join(tmpDir, "data", "chat-files");
+    await fs.mkdir(path.join(root, "c1"), { recursive: true });
+    await fs.mkdir(path.join(root, "c2"), { recursive: true });
+
+    const out = await sweepers.sweepOrphanChatFiles(new Set(["c1", "c2"]));
+
+    expect(out.scanned).toBe(2);
+    expect(out.removed).toBe(0);
+  });
+
+  it("caps removedSample at 20 (logging brevity)", async () => {
+    const root = path.join(tmpDir, "data", "chat-files");
+    for (let i = 0; i < 25; i++) {
+      await fs.mkdir(path.join(root, `orphan-${i}`), { recursive: true });
+    }
+
+    const out = await sweepers.sweepOrphanChatFiles(new Set());
+
+    expect(out.removed).toBe(25);
+    expect(out.removedSample.length).toBe(20);
+  });
+});

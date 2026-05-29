@@ -81,6 +81,7 @@ beforeEach(() => {
   mockedRunAll.mockResolvedValue({
     tmp: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
     queue: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
+    chatFiles: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
     ghost: { ok: true },
   });
   mockedEnsureScheduled.mockReturnValue(undefined as any);

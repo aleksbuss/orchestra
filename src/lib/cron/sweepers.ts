@@ -36,6 +36,7 @@ import path from "path";
 const DATA_DIR = path.join(process.cwd(), "data");
 const TMP_DIR = path.join(DATA_DIR, "tmp");
 const QUEUE_DIR = path.join(DATA_DIR, "queue");
+const CHAT_FILES_DIR = path.join(DATA_DIR, "chat-files");
 
 /** Files in `data/tmp/` older than this are eligible for deletion. */
 export const TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -152,6 +153,66 @@ export async function sweepOrphanQueueEntries(
 }
 
 /**
+ * Delete `data/chat-files/<chatId>/` directories whose chatId no longer
+ * exists in the chat index. Sprint 5 — chat-files are user uploads
+ * attached to a single chat (images, PDFs, voice-note audio for STT).
+ * The live `deleteChat` path removes the directory atomically, but a
+ * crashed write between "remove the JSON" and "remove the files dir"
+ * leaves an orphan tree behind, and there was no recovery path.
+ *
+ * The chat-id set is injected so the unit test can stub it without
+ * booting chat-store (which installs the SIGTERM flush handler).
+ *
+ * Symlinks INSIDE a chat-files dir are left intact — `fs.rm` walks them
+ * via inode lookup but doesn't follow symlinks for delete decisions, so
+ * a malicious symlink can't pivot. The dir name itself is the chatId,
+ * which is a UUID by construction; we still apply `path.basename` as a
+ * paranoid sanitizer before each `path.join`.
+ */
+export async function sweepOrphanChatFiles(
+  existingChatIds: ReadonlySet<string>
+): Promise<SweepResult> {
+  const result: SweepResult = {
+    scanned: 0,
+    removed: 0,
+    errors: 0,
+    removedSample: [],
+  };
+  let entries: import("fs").Dirent[];
+  try {
+    entries = await fs.readdir(CHAT_FILES_DIR, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return result;
+    throw err;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    result.scanned += 1;
+    // Paranoid: each entry name is the chatId. Guard against any
+    // historical mishap that left a non-UUID-shaped name in the tree.
+    const chatId = path.basename(entry.name);
+    if (!chatId || chatId === "." || chatId === "..") continue;
+    if (existingChatIds.has(chatId)) continue;
+    const dirPath = path.join(CHAT_FILES_DIR, chatId);
+    try {
+      await fs.rm(dirPath, { recursive: true, force: true });
+      result.removed += 1;
+      if (result.removedSample.length < 20) {
+        result.removedSample.push(chatId);
+      }
+    } catch (err) {
+      result.errors += 1;
+      console.warn(
+        `[sweepers] sweepOrphanChatFiles failed for ${chatId}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return result;
+}
+
+/**
  * One-shot sweep of every supported subsystem. Resolves the chat id set
  * lazily so this module doesn't pull the full chat-store at import time
  * (which would in turn install the SIGTERM-flush handler — fine in prod,
@@ -160,6 +221,8 @@ export async function sweepOrphanQueueEntries(
  * Sweeps performed:
  *   - tmp: `data/tmp/` files older than 7d
  *   - queue: orphan `data/queue/<chatId>.json` whose chat no longer exists
+ *   - chatFiles: orphan `data/chat-files/<chatId>/` directories whose
+ *     chatId no longer exists (Sprint 5)
  *   - ghost: orphan in-progress GoalTree tasks for chats not currently
  *     running. Pre-Sprint 2 this only ran ONCE at boot — any task that
  *     went orphan mid-uptime (job crashed without the queue picking it
@@ -169,6 +232,7 @@ export async function sweepOrphanQueueEntries(
 export async function runAllSweepers(): Promise<{
   tmp: SweepResult;
   queue: SweepResult;
+  chatFiles: SweepResult;
   ghost: { ok: boolean };
 }> {
   // Dynamic import: keeps the module dependency-light at boot and lets
@@ -186,13 +250,17 @@ export async function runAllSweepers(): Promise<{
     chatIds = new Set();
   }
 
-  const [tmp, queue, ghost] = await Promise.all([
+  const [tmp, queue, chatFiles, ghost] = await Promise.all([
     sweepTempDir().catch((err) => {
       console.warn("[sweepers] sweepTempDir threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
     }),
     sweepOrphanQueueEntries(chatIds).catch((err) => {
       console.warn("[sweepers] sweepOrphanQueueEntries threw:", err);
+      return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
+    }),
+    sweepOrphanChatFiles(chatIds).catch((err) => {
+      console.warn("[sweepers] sweepOrphanChatFiles threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
     }),
     // Dynamic import keeps sweepers.ts independent of the agent layer —
@@ -219,10 +287,14 @@ export async function runAllSweepers(): Promise<{
       scanned: queue.scanned,
       removed: queue.removed,
       errors: queue.errors,
+    })}, chatFiles ${JSON.stringify({
+      scanned: chatFiles.scanned,
+      removed: chatFiles.removed,
+      errors: chatFiles.errors,
     })}, ghost ${JSON.stringify(ghost)}`
   );
 
-  return { tmp, queue, ghost };
+  return { tmp, queue, chatFiles, ghost };
 }
 
 /**

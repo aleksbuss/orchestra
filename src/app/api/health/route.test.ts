@@ -129,7 +129,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 12 subsystems by name in a stable order", async () => {
+  it("reports all 14 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -140,6 +140,10 @@ describe("GET /api/health — happy path", () => {
       "chat_model_tools",
       "resource_guard",
       "data_directory",
+      // Sprint 5 — disk space + embeddings DB live next to data_directory
+      // because they're all about whether the storage backbone is intact.
+      "disk_space",
+      "embeddings_db",
       // PM #30 — chat-file parse integrity surfaced through /api/health so the
       // operator sees "N chats failed to parse on rebuild" instead of silent
       // disappearance from the sidebar.
@@ -155,6 +159,37 @@ describe("GET /api/health — happy path", () => {
       // getHealthStatus() (lastTickAtMs vs 5-min freshness threshold).
       "cron_scheduler",
     ]);
+  });
+});
+
+describe("GET /api/health — disk_space + embeddings_db (Sprint 5)", () => {
+  it("disk_space reports 'ok' with usage percentage under 90%", async () => {
+    const body = await callHealth();
+    const disk = body.subsystems.find((s) => s.name === "disk_space");
+    expect(disk).toBeDefined();
+    // Real fs.statfs reading the test machine; "ok" or "warn" but never
+    // a hard error in the default fixture.
+    expect(["ok", "warn"]).toContain(disk?.status);
+    expect(disk?.detail).toMatch(/% (used|full)/i);
+    expect(disk?.detail).toMatch(/GB free/);
+  });
+
+  it("embeddings_db reports 'ok' with subdir count (fresh tmpRoot = 0)", async () => {
+    const body = await callHealth();
+    const emb = body.subsystems.find((s) => s.name === "embeddings_db");
+    expect(emb?.status).toBe("ok");
+    // tmpRoot has no data/memory/ subdir yet → fresh-install branch.
+    expect(emb?.detail).toMatch(/fresh-install|0 subdir|readable/i);
+  });
+
+  it("embeddings_db reports 'ok' with count when data/memory/ has subdirs", async () => {
+    await fs.mkdir(path.join(tmpRoot, "data", "memory", "proj-a"), {
+      recursive: true,
+    });
+    const body = await callHealth();
+    const emb = body.subsystems.find((s) => s.name === "embeddings_db");
+    expect(emb?.status).toBe("ok");
+    expect(emb?.detail).toMatch(/1 subdir/);
   });
 });
 

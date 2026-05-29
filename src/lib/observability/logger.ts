@@ -75,11 +75,27 @@ const REDACTED_KEYS = new Set<string>([
   "passwordhash",
   "password_hash",
   "password",
+  "passwd",
   "token",
   "secret",
   "authorization",
+  "bearer",
   "cookie",
   "set-cookie",
+  // Sprint 5 — fill the gaps that PM #28's `scrubProcessEnv` already
+  // recognised at the env-var boundary but the logger was silent on.
+  // Each name is matched as a whole key (lowercased), so `XApiKey` →
+  // `xapikey` doesn't fire — be explicit with the header variants we
+  // actually see in HTTP / MCP / provider integrations.
+  "x-api-key",
+  "x-token",
+  "x-auth-token",
+  "x-access-token",
+  "credential",
+  "credentials",
+  "private",
+  "private_key",
+  "privatekey",
 ]);
 
 function redact(fields: Record<string, unknown> | undefined): Record<string, unknown> {

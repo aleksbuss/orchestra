@@ -234,12 +234,16 @@ describe("computeNextRunAtMs — 'cron' schedule (UTC tz)", () => {
 
   it("returns undefined for impossible expression ('0 0 30 2 *' — Feb 30th)", () => {
     // Lookahead is capped at 2 years; Feb 30 never exists → undefined.
+    // The 2-year sweep is genuinely a lot of work — vitest 3's default 5s
+    // timeout isn't enough on slower CI. Vitest 1 didn't enforce the limit
+    // on this case for reasons that didn't survive the migration; pin it
+    // explicitly here so future bumps don't regress.
     const next = computeNextRunAtMs(
       { kind: "cron", expr: "0 0 30 2 *", tz: TZ },
       NOW_MS
     );
     expect(next).toBeUndefined();
-  });
+  }, 60_000);
 
   it("returns undefined for syntactically invalid expressions", () => {
     expect(

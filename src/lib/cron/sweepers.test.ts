@@ -224,4 +224,81 @@ describe("Sprint 5 — sweepOrphanChatFiles", () => {
     expect(out.removed).toBe(25);
     expect(out.removedSample.length).toBe(20);
   });
+
+  describe("symlink defense (Sprint 8 — security reviewer follow-up)", () => {
+    it("does NOT follow a symlink INSIDE a chat-files dir during recursive delete", async () => {
+      const root = path.join(tmpDir, "data", "chat-files");
+      const chatDir = path.join(root, "orphan-with-symlink");
+      const target = path.join(tmpDir, "sensitive-target");
+      const targetFile = path.join(target, "DO_NOT_DELETE.txt");
+
+      // Plant: orphan chat dir containing a symlink that points OUTSIDE
+      // the sandbox at a file we expect to survive.
+      await fs.mkdir(chatDir, { recursive: true });
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(targetFile, "must survive sweep", "utf-8");
+      try {
+        await fs.symlink(target, path.join(chatDir, "evil-link"));
+      } catch (err) {
+        // On Windows / restricted Docker without symlink privilege, skip
+        // the test rather than fail. The defense still holds (Node's
+        // `fs.rm({recursive:true})` doesn't follow symlinks for deletes),
+        // we just can't exercise it here.
+        if (
+          err instanceof Error &&
+          (err.message.includes("EPERM") || err.message.includes("ENOSYS"))
+        ) {
+          return;
+        }
+        throw err;
+      }
+
+      const out = await sweepers.sweepOrphanChatFiles(new Set());
+      expect(out.removed).toBe(1);
+
+      // The orphan dir + symlink itself are gone…
+      await expect(fs.access(chatDir)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      // …but the symlink TARGET (outside the sandbox) MUST be intact.
+      await expect(fs.access(targetFile)).resolves.toBeUndefined();
+      const content = await fs.readFile(targetFile, "utf-8");
+      expect(content).toBe("must survive sweep");
+    });
+
+    it("does NOT follow a top-level symlink: a chatId-named symlink is deleted as a link, not as its target", async () => {
+      const root = path.join(tmpDir, "data", "chat-files");
+      const target = path.join(tmpDir, "elsewhere");
+      const targetFile = path.join(target, "should-not-delete.txt");
+
+      await fs.mkdir(root, { recursive: true });
+      await fs.mkdir(target, { recursive: true });
+      await fs.writeFile(targetFile, "survive", "utf-8");
+      try {
+        // A top-level symlink whose NAME could pass any uuid-shaped check.
+        await fs.symlink(target, path.join(root, "uuid-shaped-symlink"));
+      } catch (err) {
+        if (
+          err instanceof Error &&
+          (err.message.includes("EPERM") || err.message.includes("ENOSYS"))
+        ) {
+          return;
+        }
+        throw err;
+      }
+
+      // The sweeper iterates `readdir(... withFileTypes:true)` and skips
+      // `!entry.isDirectory()`. A symlink → isDirectory() is false, so the
+      // entry is NEVER touched. Defense by construction.
+      const out = await sweepers.sweepOrphanChatFiles(new Set());
+      expect(out.scanned).toBe(0);
+      expect(out.removed).toBe(0);
+
+      // Symlink + target both intact.
+      await expect(
+        fs.access(path.join(root, "uuid-shaped-symlink"))
+      ).resolves.toBeUndefined();
+      await expect(fs.access(targetFile)).resolves.toBeUndefined();
+    });
+  });
 });

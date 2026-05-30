@@ -18,11 +18,12 @@ interface McpServerItem {
 }
 
 /**
- * PM #33 — memoised row component. Per-project MCP server lists are
- * read-only (no callbacks reach the row) so the props are pure data
- * and the default `React.memo` shallow-equals check suffices. Avoids
- * re-rendering the whole server list when an unrelated piece of state
- * (search query, selected project) changes.
+ * PM #33 — memoised row component. See `MemoryRow` doc in
+ * `dashboard/memory/page.tsx` for the scope-of-benefit honesty check;
+ * same applies here: memo helps on unrelated state changes (search
+ * query, selected project tab), NOT on the fetch-replace path that
+ * hands every row a fresh `server` reference. Mid-term fix is keyed
+ * state.
  */
 const McpServerRow = memo(function McpServerRow({
   server,

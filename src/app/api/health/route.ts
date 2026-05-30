@@ -16,6 +16,22 @@ interface SubsystemStatus {
   latencyMs?: number;
 }
 
+/**
+ * TODO (Sprint-7 perf review): /api/health currently runs 15 probes
+ * sequentially. On small deployments (<10 projects) total latency is
+ * ~500ms — comfortable under Docker's default 30s healthcheck timeout.
+ * On 100+ projects with 5+ MCP servers each, the `mcp_servers` probe
+ * alone hits 1-2s of fs I/O via per-project `loadProjectMcpServers`.
+ *
+ * Not refactored here because: (a) parallelization needs every probe
+ * extracted into a named fn returning SubsystemStatus[], a ~200 LOC
+ * change with regression risk on the 39-test suite; (b) current
+ * absolute latency is still well under Docker's default budget on
+ * realistic deployments. Track as a focused follow-up sprint:
+ *   - Promise.all on independent probes
+ *   - Per-project MCP read batched + cached for ~30s
+ *   - OR split into /api/health (fast) + /api/health/deep (full)
+ */
 export async function GET() {
   const checks: SubsystemStatus[] = [];
   const startTotal = Date.now();

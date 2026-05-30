@@ -220,6 +220,23 @@ describe("Sprint 2 — checkChatBudget (per-chat hard USD cap)", () => {
     // the cap, the real spend definitely does too.
     expect(checkChatBudget(usage(10, false), 5.0).over).toBe(true);
   });
+
+  it("at-cap boundary: cost === cap, fullyPriced=false → still 'over' (>= semantics)", () => {
+    // Review follow-up: pin the boundary explicitly. The implementation
+    // uses `costUsd >= cap`, so equality counts as over. A lower-bound
+    // spend that's *exactly* at the cap means real spend is at-or-past
+    // the cap; refusing the turn is the safer call.
+    const r = checkChatBudget(usage(5.0, false), 5.0);
+    expect(r.over).toBe(true);
+    expect(r.costUsd).toBe(5.0);
+    expect(r.maxUsdPerChat).toBe(5.0);
+  });
+
+  it("just-under-cap boundary: cost = cap - ε, fullyPriced=false → still 'under'", () => {
+    // Companion to the at-cap boundary — proves `>=` not `>`. A real-spend
+    // unknown chat at 4.999999 isn't blocked yet.
+    expect(checkChatBudget(usage(4.999999, false), 5.0).over).toBe(false);
+  });
 });
 
 describe("Sprint 2 — assertChatBudget (throwing wrapper)", () => {

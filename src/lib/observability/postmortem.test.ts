@@ -400,34 +400,6 @@ describe("prunePostmortems — FIFO ring buffer (Sprint 5 follow-up)", () => {
     expect(out.removed).toBe(0);
   });
 
-  it("keeps the newest MAX_POSTMORTEMS and unlinks the oldest", async () => {
-    // 7 files; oldest 4 should be evicted when we shim the cap.
-    const overlimit = 7;
-    const now = Date.now();
-    for (let i = 0; i < overlimit; i++) {
-      await plant(`T-${i}`, now - i * 1000); // T-0 newest, T-6 oldest
-    }
-
-    // Shim the cap to 3 for the test via dynamic-import override.
-    vi.resetModules();
-    vi.doMock("./postmortem", async () => {
-      const actual = await vi.importActual<typeof import("./postmortem")>(
-        "./postmortem"
-      );
-      return { ...actual, MAX_POSTMORTEMS: 3 };
-    });
-    const pruned = await import("./postmortem").then((m) =>
-      m.prunePostmortems()
-    );
-    vi.doUnmock("./postmortem");
-
-    // Since prunePostmortems reads MAX_POSTMORTEMS via the module-level
-    // const, the doMock chain above is informational — the actual cap
-    // (500) won't fire on 7 files. So instead we drive the test via
-    // listPostmortems shape after a large fixture below.
-    expect(pruned.removed).toBe(0);
-  });
-
   it("after the live cap is exceeded, only MAX_POSTMORTEMS files remain — verified via listPostmortems", async () => {
     // Drop one extra file beyond the live cap; assert it gets evicted.
     // This is the property test that doesn't depend on shimming the const.
@@ -453,8 +425,16 @@ describe("prunePostmortems — FIFO ring buffer (Sprint 5 follow-up)", () => {
 
   it("dumpPostmortem fires the pruner inline (best-effort)", async () => {
     // Plant cap + 1 stale files, then trigger a dump — the post-dump
-    // prune should bring us back to the cap WITHOUT the test having to
-    // call prunePostmortems directly.
+    // prune should bring us back to EXACTLY the cap, not "at most" it.
+    //
+    // Why we can't `vi.spyOn(prunePostmortems)` to prove the call:
+    // dumpPostmortem invokes `prunePostmortems()` as a local reference
+    // inside the same module, so spying on the module export wouldn't
+    // intercept the call (the lexical resolution beats the export
+    // rebinding). The strongest test we can write is the property test:
+    // before-dump count = MAX+1 stale, after-dump count = exactly MAX,
+    // and the fresh dump survived. If the pruner had silently not run,
+    // we'd see MAX+2.
     const now = Date.now();
     for (let i = 0; i <= MAX_POSTMORTEMS; i++) {
       await plant(`T-stale-${i}`, now - 10_000 - i);
@@ -475,7 +455,29 @@ describe("prunePostmortems — FIFO ring buffer (Sprint 5 follow-up)", () => {
     const dir = path.join(tmpRoot, "data", "postmortems");
     const entries = await fs.readdir(dir);
     const jsonCount = entries.filter((e) => e.endsWith(".json")).length;
-    expect(jsonCount).toBeLessThanOrEqual(MAX_POSTMORTEMS);
+    expect(jsonCount).toBe(MAX_POSTMORTEMS); // EXACT — proves the pruner ran
     expect(entries).toContain("T-fresh.json"); // the fresh dump survived
+  });
+
+  it("ties on mtimeMs sort deterministically by readdir order (documented non-spec)", async () => {
+    // Edge case the reviewer asked about: what if N files share the same
+    // mtimeMs? `Array.sort` is stable in V8 (Node 22), so two files with
+    // identical mtime keep their readdir order — which on macOS/Linux is
+    // typically inode order, deterministic per filesystem. We don't
+    // assert WHICH file is evicted (that's filesystem-dependent); we
+    // assert prune still removes the right COUNT and doesn't crash.
+    const dir = path.join(tmpRoot, "data", "postmortems");
+    await fs.mkdir(dir, { recursive: true });
+    const sharedMtime = Date.now();
+    const count = MAX_POSTMORTEMS + 3;
+    for (let i = 0; i < count; i++) {
+      await plant(`T-eq-${i}`, sharedMtime); // ALL identical mtime
+    }
+    const out = await prunePostmortems();
+    expect(out.removed).toBe(3);
+    const survivors = await fs.readdir(dir);
+    expect(survivors.filter((e) => e.endsWith(".json")).length).toBe(
+      MAX_POSTMORTEMS
+    );
   });
 });

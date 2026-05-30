@@ -332,6 +332,14 @@ The `mustChangeCredentials` flow gates BOTH the dashboard AND the API surface (P
 
 If you add a third auth escape hatch, document it here in the same PR.
 
+### Runtime invariant escape hatches
+
+Auth bypass is one category; runtime-invariant bypass is another. Documented in parallel because the same operator-quoting class of mistake (`KEY=1` vs `KEY=true`) bites both.
+
+- **`ORCHESTRA_MULTI_PROCESS_OK=true`** — env var read by [`src/lib/util/multi-process-guard.ts`](src/lib/util/multi-process-guard.ts) at boot. The guard normally fatal-exits when `node:cluster.isWorker === true`, `parseInt(NODE_APP_INSTANCE) > 0` (PM2 cluster), or `NODE_UNIQUE_ID` is set — Critical Rule §1's `withFileLock` single-process invariant. Setting `ORCHESTRA_MULTI_PROCESS_OK=true` (strict string compare, same posture as `ORCHESTRA_DISABLE_AUTH`) skips the check. **Use ONLY after migrating `withFileLock` to an advisory lockfile (e.g. `proper-lockfile`)**; otherwise you trade fatal-exit for silent lost-update corruption.
+
+If you add another runtime-invariant escape hatch, document it here in the same PR. Cross-link from the invariant rule (e.g. Critical Rule §1 mentions this).
+
 ---
 
 ## 💾 Data Layout (`data/`)
@@ -355,7 +363,7 @@ Orchestra has no traditional database — `data/` IS the database. Every directo
 | `data/projects/<projectId>/.orchestra_traces/<id>.json` | `agent/trace-memory.ts` | PM #55 — per-project MoA trace pool. Captures from project-owned chats land here so traces don't cross-pollute between unrelated projects. | Operator-controlled — `npm run trace:clear -- --project <id>`. Deleted with the project. |
 | `data/chat-files/<chatId>/` | `storage/chat-files-store.ts` | User uploads attached to a single chat (images, PDFs, audio for STT). Referenced by the chat as `Attachment`s with path `data/chat-files/<chatId>/<file>`. | **Sweeper added Sprint 5** — `sweepOrphanChatFiles` removes `<chatId>/` directories absent from chat-index. Atomic deletion piggybacks on `deleteChat` for the live path; the sweep handles crash-leaked dirs from before that landed. |
 | `data/snapshots/<projectId>/<snapshotId>.{json,zip}` | `storage/snapshots.ts` | Pre-write snapshots taken before destructive project operations (e.g. file overwrite) so the operator can roll back. | **Self-pruning** — `pruneSnapshots()` keeps a per-project FIFO ring buffer of `MAX_SNAPSHOTS_PER_PROJECT = 200` pairs. Fires after every `snapshotBeforeWrite`. No sweeper needed. |
-| `data/postmortems/<traceId>.json` | `observability/postmortem.ts` | PM #31-era operator artifact — when an agent run errors out, the postmortem dumps the request snapshot + sanitized settings + last 200 log lines scoped to the `traceId`. Operator inspects via the dashboard. | **Operator-controlled — currently unbounded.** Per-file size is capped (`MAX_CHAT_EMBED_BYTES = 250 KB`, `MAX_LOG_ENTRIES = 200`), but no count limit on the directory itself. Long-lived deployments should periodically `rm data/postmortems/*` or wait for a future `MAX_POSTMORTEMS` cap. Tracked as Sprint 5 follow-up. |
+| `data/postmortems/<traceId>.json` | `observability/postmortem.ts` | PM #31-era operator artifact — when an agent run errors out, the postmortem dumps the request snapshot + sanitized settings + last 200 log lines scoped to the `traceId`. Operator inspects via the dashboard. | **Self-pruning** — `prunePostmortems()` keeps a FIFO ring buffer of `MAX_POSTMORTEMS = 500` files (sorted by mtime descending; oldest evicted). Fires fire-and-forget from `dumpPostmortem` after every successful write — same posture as `pruneSnapshots`. Per-file size is also capped (`MAX_CHAT_EMBED_BYTES = 250 KB`, `MAX_LOG_ENTRIES = 200`). No sweeper needed. |
 | `data/npm-cache/` | (none — runtime artifact) | Created by npm/pnpm when `install-orchestrator` shells out to install packages on behalf of the agent. Contents are vanilla package-manager cache files, not Orchestra state. | **Ephemeral / operator-local.** Safe to `rm -rf` at any time; the next install repopulates. Excluded from backups; not user data. |
 
 When you add a new persistent surface, add a row here in the same commit (Critical Rule §7) AND state the retention strategy — one of (a) sweeper in `cron/sweepers.ts`, (b) "never auto-swept — user data" with reasoning, (c) atomic cleanup tied to a higher-level deletion, or (d) self-pruning ring buffer like `snapshots.ts`. Don't ship an unbounded directory.
@@ -406,9 +414,9 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 - **Rule:** If you can't point to which sections of `CLAUDE.md` and which `POST_MORTEMS.md` entry your change touches, your refactor of core orchestration logic is incomplete.
 
 ### 8. File-Size Discipline
-- Several core modules already cross 1500+ lines (`tool.ts` ~1966, `llm-provider.ts` ~1759, `agent.ts` ~1714, `project-store.ts` ~1512). These are not to be celebrated — they are technical debt that hurts every LLM-assisted change (the file no longer fits in a single read).
+- Five core modules cross the 1500-line hard line — line counts kept in §10 below, refreshed alongside any substantive touch (don't cite numbers in two places to avoid the drift §7 forbids). These are not to be celebrated — they are technical debt that hurts every LLM-assisted change (the file no longer fits in a single read).
 - **Soft cap: 800 lines per `.ts`/`.tsx` file.** Crossing it is a code smell, not a hard error. Crossing 1500 means the file MUST be decomposed in the next PR that touches it substantively (don't leave it worse than you found it).
-- Decomposition guidance: split by concern (one file per tool family, one file per provider, one file per resource), not by line count. Co-locate tests next to the slice they cover.
+- Decomposition guidance: split by concern (one file per tool family, one file per provider, one file per resource), not by line count. Co-locate tests next to the slice they cover. **See §10 for the seam plan per file.**
 - **Rule:** Don't add a new function to a 1500+ line file unless you also extract something equivalent. Net file growth in already-bloated modules is forbidden.
 
 ### 9. Pre-Push Hygiene

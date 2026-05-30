@@ -1989,6 +1989,29 @@ export async function runAgentText(options: {
 /**
  * Run agent for subordinate delegation (non-streaming, returns result)
  */
+export interface SubordinateResult {
+  /** The trimmed text response to surface back to the parent agent. */
+  text: string;
+  /**
+   * Sprint 8 — billing-correctness fix. Pre-Sprint-8 the subordinate's
+   * generateText `usage` was THROWN AWAY, so subordinate token spend
+   * never reached `parent.cumulativeUsage` and the per-chat USD cap was
+   * blind to it. Returning it here lets `callSubordinate` accumulate
+   * the spend back into the parent chat via `addUsageToCumulative`.
+   *
+   * `undefined` only on the rare path where `generateText` doesn't
+   * surface a usage object (e.g. provider didn't include it).
+   */
+  usage?: import("@/lib/cost/accumulator").RawUsage;
+  /**
+   * Resolved model identity (provider + model) for the subordinate's
+   * generateText call. Needed by the accumulator to look up per-token
+   * pricing — different providers price the same token count differently.
+   */
+  provider: string;
+  model: string;
+}
+
 export async function runSubordinateAgent(options: {
   task: string;
   projectId?: string;
@@ -2001,7 +2024,7 @@ export async function runSubordinateAgent(options: {
    * subordinate keeps streaming tokens while no one's listening.
    */
   abortSignal?: AbortSignal;
-}): Promise<string> {
+}): Promise<SubordinateResult> {
   const settings = await getSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
   const model = createModel(settings.chatModel, {
@@ -2084,7 +2107,18 @@ export async function runSubordinateAgent(options: {
       ? getLastResponseToolText(responseMessages) || result.text
       : result.text;
 
-    return responseText.trim() || "Subordinate agent finished but returned no text.";
+    const text =
+      responseText.trim() || "Subordinate agent finished but returned no text.";
+
+    return {
+      text,
+      // Vercel AI SDK's GenerateTextResult exposes `usage` as the
+      // top-level token tally; we forward it verbatim so the parent
+      // chat's `addUsageToCumulative` can apply provider pricing.
+      usage: (result as unknown as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage,
+      provider: settings.chatModel.provider,
+      model: settings.chatModel.model,
+    };
   } finally {
     if (mcpCleanupSub) {
       try {

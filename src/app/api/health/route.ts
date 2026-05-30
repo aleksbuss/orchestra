@@ -498,7 +498,6 @@ export async function GET() {
     );
     const projects = await getAllProjects();
     let totalServers = 0;
-    let projectsWithMcp = 0;
     let parseErrors = 0;
     for (const project of projects) {
       try {
@@ -506,17 +505,24 @@ export async function GET() {
         const servers = cfg?.servers ?? [];
         if (servers.length > 0) {
           totalServers += servers.length;
-          projectsWithMcp += 1;
         }
       } catch {
         parseErrors += 1;
       }
     }
+    // Sprint 7 security follow-up — `/api/health` is in `isPublicApi`
+    // (middleware.ts:17), so this response is reachable unauthenticated.
+    // The pre-fix detail surfaced `projectsWithMcp` and `totalServers`
+    // counts, which leak workspace activity (operator added/removed a
+    // project → count changes, visible to anyone polling /api/health).
+    // The check still PROBES every project (to surface parse-errors
+    // that would otherwise be silent), but the detail string only
+    // exposes a coarse boolean: configured / not / errors.
     if (parseErrors > 0) {
       checks.push({
         name: "mcp_servers",
         status: "warn",
-        detail: `${totalServers} MCP server(s) configured across ${projectsWithMcp} project(s); ${parseErrors} project MCP file(s) failed to parse. Live-liveness probing happens on call_mcp_tool invocation, not here.`,
+        detail: `MCP enumeration completed with parse errors. Live-liveness probing happens on call_mcp_tool invocation, not here.`,
       });
     } else {
       checks.push({
@@ -524,15 +530,18 @@ export async function GET() {
         status: "ok",
         detail:
           totalServers === 0
-            ? "No MCP servers configured in any project."
-            : `${totalServers} MCP server(s) configured across ${projectsWithMcp} project(s). Liveness checked lazily on call_mcp_tool invocation.`,
+            ? "No MCP servers configured."
+            : `MCP configuration present. Liveness checked lazily on call_mcp_tool invocation.`,
       });
     }
   } catch (err) {
     checks.push({
       name: "mcp_servers",
       status: "warn",
-      detail: `Could not enumerate MCP server configs: ${err instanceof Error ? err.message : String(err)}.`,
+      // Error message intentionally generic — pre-fix the JS error
+      // message could include a project path on filesystem errors,
+      // leaking the operator's workspace layout to unauth callers.
+      detail: `Could not enumerate MCP server configs (${err instanceof Error ? err.constructor.name : "Error"}).`,
     });
   }
 

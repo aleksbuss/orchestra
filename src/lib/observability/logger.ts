@@ -96,10 +96,81 @@ const REDACTED_KEYS = new Set<string>([
   "private",
   "private_key",
   "privatekey",
+  // Sprint 7 security review — OAuth2 + cloud-provider secrets that
+  // appeared in upstream provider responses + MCP tool outputs. Listed
+  // explicitly because the previous set only caught the canonical names
+  // (`token`, `apikey`) and missed the OAuth2 family + cloud-vendor
+  // naming. Each one has been seen leaking through `log.info({...})`
+  // at least once during integration testing.
+  "id_token",
+  "refresh_token",
+  "client_secret",
+  "client_id", // not strictly a secret, but often log-spammy and pairs with client_secret
+  "access_token",
+  "jwt",
+  "x-csrf-token",
+  "csrf",
+  "csrf_token",
+  "session_id",
+  "session-id",
+  "aws_access_key_id",
+  "aws_secret_access_key",
+  "aws_session_token",
+  "azure_client_secret",
+  "azure_storage_connection_string",
+  "connection_string",
+  "database_url",
+  "dsn",
 ]);
+
+/**
+ * Recursive redaction (Sprint 7 security review fix).
+ *
+ * Pre-Sprint-7 the loop iterated only the TOP-LEVEL keys and passed
+ * nested objects through verbatim. So a perfectly innocent-looking
+ * `log.info("request", { request: { headers: { authorization: "Bearer xyz" } } })`
+ * leaked the bearer token because `request` isn't in REDACTED_KEYS and
+ * the nested `headers` was never walked.
+ *
+ * Now: walks the object tree, redacting at every level. Errors keep
+ * their special treatment (top-level only — promoting `.stack` to the
+ * outer object only makes sense at the root). Arrays are walked
+ * element-wise; primitives are passed through unchanged. Cycle
+ * detection via a visited Set prevents stack overflow on circular
+ * references (which `console.log` would normally hit anyway, but the
+ * defensive check costs nothing).
+ */
+function redactValue(
+  value: unknown,
+  visited: WeakSet<object>,
+  depth: number
+): unknown {
+  // Defensive depth cap — a sufficiently nested log payload would otherwise
+  // blow the stack. 32 is well past any realistic config object.
+  if (depth > 32) return "[REDACTED:depth]";
+  if (value === null || typeof value !== "object") return value;
+  if (value instanceof Error) return value.message;
+  if (visited.has(value)) return "[REDACTED:cycle]";
+  visited.add(value);
+
+  if (Array.isArray(value)) {
+    return value.map((item) => redactValue(item, visited, depth + 1));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (REDACTED_KEYS.has(k.toLowerCase())) {
+      out[k] = "[REDACTED]";
+      continue;
+    }
+    out[k] = redactValue(v, visited, depth + 1);
+  }
+  return out;
+}
 
 function redact(fields: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!fields) return {};
+  const visited = new WeakSet<object>();
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(fields)) {
     if (REDACTED_KEYS.has(k.toLowerCase())) {
@@ -112,7 +183,7 @@ function redact(fields: Record<string, unknown> | undefined): Record<string, unk
       if (!("stack" in out) && v.stack) out.stack = v.stack;
       continue;
     }
-    out[k] = v;
+    out[k] = redactValue(v, visited, 1);
   }
   return out;
 }

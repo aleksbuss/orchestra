@@ -205,6 +205,102 @@ describe("redaction — sensitive field names never reach the wire", () => {
     expect(raw).not.toContain("AKIA");
     expect(raw).not.toContain("BEGIN RSA PRIVATE KEY");
   });
+
+  it("Sprint 7 — OAuth2 + cloud-provider keys: id_token / refresh_token / client_secret / aws_* / jwt", () => {
+    log.info("evt", {
+      id_token: "eyJhbGc...",
+      refresh_token: "rft-real",
+      client_secret: "shh-oauth",
+      access_token: "at-real",
+      jwt: "header.payload.signature",
+      aws_access_key_id: "AKIAIOSFODNN7EXAMPLE",
+      aws_secret_access_key: "wJalrXUtnFEMI/REAL/SECRET",
+      azure_storage_connection_string:
+        "DefaultEndpointsProtocol=https;AccountKey=REALKEY",
+      connection_string: "postgres://u:p@host/db",
+      database_url: "postgres://u:p@host/db",
+      dsn: "https://abc@sentry.io/123",
+      "x-csrf-token": "csrf-real",
+      csrf: "csrf-real",
+      session_id: "sess-real",
+    });
+    const entry = lastJsonOn(stdoutSpy);
+    for (const key of [
+      "id_token",
+      "refresh_token",
+      "client_secret",
+      "access_token",
+      "jwt",
+      "aws_access_key_id",
+      "aws_secret_access_key",
+      "azure_storage_connection_string",
+      "connection_string",
+      "database_url",
+      "dsn",
+      "x-csrf-token",
+      "csrf",
+      "session_id",
+    ]) {
+      expect(entry[key]).toBe("[REDACTED]");
+    }
+    // Raw-byte sanity check on the high-value secrets.
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).not.toContain("AKIAIOSFODNN7EXAMPLE");
+    expect(raw).not.toContain("wJalrXUtnFEMI");
+    expect(raw).not.toContain("eyJhbGc...");
+  });
+
+  it("Sprint 7 — RECURSIVE redaction: nested headers.authorization leak closed", () => {
+    // The pre-Sprint-7 bug: a perfectly innocent-looking
+    // `log.info("req", { request: { headers: { authorization: "Bearer xyz" } } })`
+    // leaked the bearer token because `request` isn't a redacted key and
+    // the nested `headers` was never walked.
+    log.info("req", {
+      request: {
+        method: "POST",
+        headers: {
+          authorization: "Bearer sk-real-leaky",
+          "x-api-key": "ak-real",
+        },
+        body: { password: "should-not-leak" },
+      },
+    });
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).not.toContain("sk-real-leaky");
+    expect(raw).not.toContain("ak-real");
+    expect(raw).not.toContain("should-not-leak");
+    // And confirm the redaction shape via parsed entry.
+    const entry = lastJsonOn(stdoutSpy);
+    const req = entry.request as Record<string, unknown>;
+    const headers = req.headers as Record<string, unknown>;
+    expect(headers.authorization).toBe("[REDACTED]");
+    expect(headers["x-api-key"]).toBe("[REDACTED]");
+    const body = req.body as Record<string, unknown>;
+    expect(body.password).toBe("[REDACTED]");
+    // Non-secret fields survive.
+    expect(req.method).toBe("POST");
+  });
+
+  it("Sprint 7 — recursive redaction inside arrays of objects", () => {
+    log.info("multi", {
+      events: [
+        { name: "ok", token: "should-redact-1" },
+        { name: "ok", token: "should-redact-2" },
+      ],
+    });
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).not.toContain("should-redact-1");
+    expect(raw).not.toContain("should-redact-2");
+  });
+
+  it("Sprint 7 — circular references don't blow the stack", () => {
+    type Cyc = { name: string; self?: Cyc };
+    const a: Cyc = { name: "a" };
+    a.self = a;
+    expect(() => log.info("cyc", { a })).not.toThrow();
+    const raw = (stdoutSpy.mock.calls.at(-1)?.[0] as string) ?? "";
+    expect(raw).toContain("[REDACTED:cycle]");
+  });
 });
 
 describe("Error capture — message + stack lifted automatically", () => {

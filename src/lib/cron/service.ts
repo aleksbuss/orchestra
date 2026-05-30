@@ -2,6 +2,10 @@ import { createChat, getChat } from "@/lib/storage/chat-store";
 import { getAllProjects, getProject } from "@/lib/storage/project-store";
 import { getTelegramIntegrationRuntimeConfig } from "@/lib/storage/telegram-integration-store";
 import { runAgentText } from "@/lib/agent/agent";
+import {
+  ChatBudgetExceededError,
+  enforceChatBudget,
+} from "@/lib/cost/budget-guard";
 import { parseAbsoluteTimeMs } from "@/lib/cron/parse";
 import { resolveCronRunLogPath, resolveCronStorePath, GLOBAL_CRON_PROJECT_ID } from "@/lib/cron/paths";
 import { appendCronRunLog, readCronRunLogEntries } from "@/lib/cron/run-log";
@@ -728,6 +732,27 @@ async function executeCronJob(job: CronJob): Promise<RunResult> {
       timeoutHandle = setTimeout(() => {
         cronAbort.abort(new Error("Cron job execution timed out."));
       }, timeoutMs);
+    }
+
+    // Sprint 7 security follow-up — per-chat USD cap enforcement.
+    // Cron-driven runs were the SECOND silent bypass surfaced by the
+    // security review: a recurring schedule (e.g. "every minute") with
+    // an expensive prompt would burn the operator's API budget without
+    // the cap ever firing. Check before the run; if over cap, mark the
+    // run as a finished failure (status=error) and skip the LLM call.
+    try {
+      await enforceChatBudget(chatId);
+    } catch (err) {
+      if (err instanceof ChatBudgetExceededError) {
+        return {
+          status: "error",
+          error: err.message,
+          summary: undefined,
+          startedAt,
+          endedAt: Date.now(),
+        };
+      }
+      throw err;
     }
 
     let output: string;

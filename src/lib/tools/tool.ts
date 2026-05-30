@@ -1909,7 +1909,8 @@ export function createAgentTools(
           context.projectId,
           context.agentNumber,
           context.history,
-          abortSignal
+          abortSignal,
+          context.chatId
         );
       },
     });

@@ -16,10 +16,23 @@ interface MemoryItem {
 }
 
 /**
- * PM #33 — memoised row component. The memory list can grow well past
- * 50 items and is refreshed on SSE tick (insertMemory by the agent),
- * so wrapping the row in React.memo lets reference-stable items skip
- * re-render while only newly-changed rows re-render.
+ * PM #33 — memoised row component. Scope-of-benefit (Sprint-7 perf
+ * review honesty check): `loadMemories` does `setMemories(newArray)`
+ * after every fetch, which replaces the array reference, which makes
+ * every row's `mem` prop reference change, which makes React.memo's
+ * shallow-compare skip nothing for the fetch-driven re-render. The
+ * memo IS still load-bearing for the OTHER re-render triggers in
+ * this component: search-box typing (`setSearchQuery`), tab switching
+ * (active subdir), and any unrelated state change that doesn't touch
+ * `memories`. Those re-pass the same array → memo skips all 50+ rows.
+ *
+ * Sprint-7 commit message overclaimed "PM #33 pattern applied";
+ * documenting the actual benefit here so a future maintainer doesn't
+ * either (a) over-rely on the memo as if it solves all re-render
+ * cases, or (b) rip it out thinking it does nothing. The mid-term
+ * fix is keyed state (Map<id, MemoryItem>) so individual upserts
+ * keep references stable across array-replace fetches — tracked as
+ * a follow-up if memory grows past ~200 items.
  */
 const MemoryRow = memo(function MemoryRow({
   mem,

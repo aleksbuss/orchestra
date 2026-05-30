@@ -30,11 +30,12 @@ interface InstalledSkillItem {
 }
 
 /**
- * PM #33 — memoised row. Installed-skills lists per-project can grow
- * past 50 once an operator pulls in a full bundled-skills catalog; the
- * row is interactive (onClick opens a Sheet), so we keep the onClick
- * stable via useCallback in the parent and let React.memo skip rows
- * whose `skill` reference hasn't changed.
+ * PM #33 — memoised row. See `MemoryRow` doc in
+ * `dashboard/memory/page.tsx` for the scope-of-benefit honesty check;
+ * the memo helps on unrelated state changes (search query, active
+ * project tab, the Sheet open/close) but NOT on the fetch-replace
+ * path that hands every row a fresh `skill` reference. `onOpen` is
+ * useCallback-wrapped so it doesn't itself bust the memo.
  */
 const InstalledSkillRow = memo(function InstalledSkillRow({
   skill,

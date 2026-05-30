@@ -1,4 +1,8 @@
 import type { ModelMessage } from "ai";
+import {
+  ChatBudgetExceededError,
+  enforceChatBudget,
+} from "@/lib/cost/budget-guard";
 
 const MAX_SUBORDINATE_CONCURRENCY = 2;
 const SUBORDINATE_RETRY_DELAYS_MS = [1000, 2500] as const;
@@ -235,16 +239,42 @@ async function runSubordinateWithRetry<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Delegate a task to a subordinate agent
+ * Delegate a task to a subordinate agent.
+ *
+ * Sprint 7 security follow-up — the `chatId` parameter was added to plumb
+ * the parent's chat through so we can enforce the per-chat USD cap BEFORE
+ * spinning up a subordinate. Pre-fix, a single parent turn could invoke
+ * `call_subordinate` repeatedly, each invocation spending unbounded LLM
+ * tokens against the chat's cap. With this gate, an over-cap chat refuses
+ * to launch additional subordinates and surfaces the cap message as a
+ * tool-error (caught by the loop-guard so the agent reports it).
+ *
+ * Caveat — subordinate spend itself is NOT yet bubbled back to the
+ * parent's `cumulativeUsage`. That means a chat can run ONE expensive
+ * subordinate even if cumulative is near the cap; subsequent ones are
+ * blocked. Full spend-back accumulation is tracked as a follow-up.
  */
 export async function callSubordinate(
   task: string,
   projectId: string | undefined,
   parentAgentNumber: number,
   parentHistory: ModelMessage[],
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  parentChatId?: string
 ): Promise<string> {
   try {
+    // Budget gate first — cheap, no LLM call, fails fast on over-cap chats.
+    if (parentChatId) {
+      try {
+        await enforceChatBudget(parentChatId);
+      } catch (err) {
+        if (err instanceof ChatBudgetExceededError) {
+          return `Subordinate agent refused: ${err.message}`;
+        }
+        throw err;
+      }
+    }
+
     // Dynamic import to avoid circular dependency
     const { runSubordinateAgent } = await import("@/lib/agent/agent");
 

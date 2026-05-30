@@ -6,6 +6,10 @@ import type { PresetTier } from "@/lib/agent/presets";
 import { getActiveGoal } from "@/lib/storage/goal-store";
 import type { GoalTask } from "@/lib/types";
 import { enqueueJob, dequeueJob } from "@/lib/storage/queue-store";
+import {
+  ChatBudgetExceededError,
+  enforceChatBudget,
+} from "@/lib/cost/budget-guard";
 
 export interface AgentJobPayload {
   chatId: string;
@@ -201,10 +205,49 @@ async function runBackgroundJob(options: AgentJobPayload, signal: AbortSignal) {
             // started a new job that's already running on this chat.
             if (signal.aborted) return;
             if (activeJobs.has(options.chatId)) return;
-            dispatchAgentJob({
-              ...options,
-              userMessage: "System [Auto-Pilot]: Proceed with the next pending task in the active Goal Tree. Remember to use 'update_task_status' when finished."
-            });
+            // Sprint 7 security follow-up — re-check the per-chat USD cap
+            // BEFORE every auto-pilot iteration. /api/chat checks once at
+            // job dispatch; without this re-check, an over-cap chat that
+            // squeezed through the initial check (because the first turn
+            // hadn't billed yet) keeps spending across 50 iterations of
+            // expensive turns. Cap-exceeded → silently stop the auto-pilot
+            // loop. The chat's last assistant message has already surfaced
+            // the budget warning via the soft banner from PM #36.
+            void enforceChatBudget(options.chatId)
+              .then(() => {
+                dispatchAgentJob({
+                  ...options,
+                  userMessage:
+                    "System [Auto-Pilot]: Proceed with the next pending task in the active Goal Tree. Remember to use 'update_task_status' when finished.",
+                });
+              })
+              .catch((err) => {
+                if (err instanceof ChatBudgetExceededError) {
+                  console.warn(
+                    `[Auto-Pilot] Chat ${options.chatId}: budget cap exceeded, stopping iterations. ${err.message}`
+                  );
+                  autoPilotIterations.delete(options.chatId);
+                  publishUiSyncEvent({
+                    topic: "chat",
+                    chatId: options.chatId,
+                    projectId: options.projectId ?? null,
+                    reason: `[Auto-Pilot] Stopped: ${err.message}`,
+                  });
+                  return;
+                }
+                // Other failures (settings read crash, etc.) — log and
+                // dispatch anyway. We don't want a missing settings file
+                // to silently kill the entire auto-pilot flow.
+                console.warn(
+                  `[Auto-Pilot] budget check failed (non-fatal):`,
+                  err
+                );
+                dispatchAgentJob({
+                  ...options,
+                  userMessage:
+                    "System [Auto-Pilot]: Proceed with the next pending task in the active Goal Tree. Remember to use 'update_task_status' when finished.",
+                });
+              });
           }, delayMs);
           autoPilotTimeouts.set(options.chatId, timer);
         }

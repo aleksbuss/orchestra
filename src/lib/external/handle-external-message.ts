@@ -2,6 +2,10 @@ import { runAgentText } from "@/lib/agent/agent";
 import { createChat, getChat } from "@/lib/storage/chat-store";
 import { getAllProjects, getProject } from "@/lib/storage/project-store";
 import {
+  ChatBudgetExceededError,
+  enforceChatBudget,
+} from "@/lib/cost/budget-guard";
+import {
   contextKey,
   getOrCreateExternalSession,
   saveExternalSession,
@@ -258,6 +262,29 @@ export async function handleExternalMessage(
 
   const beforeChat = await getChat(resolvedChatId);
   const beforeCount = beforeChat?.messages.length ?? 0;
+
+  // Sprint 7 security follow-up — per-chat USD cap enforcement.
+  // Pre-security-review this entry-point bypassed the cap entirely; an
+  // unbounded webhook (e.g. Telegram with a chatty user) could spend the
+  // operator's whole API budget. Match the same contract as `/api/chat`
+  // (which returns 402) — but the external relay translates the throw
+  // into an ExternalMessageError so the route layer can surface the
+  // right HTTP shape (status 402, `error: "chat_budget_exceeded"`).
+  try {
+    await enforceChatBudget(resolvedChatId);
+  } catch (err) {
+    if (err instanceof ChatBudgetExceededError) {
+      throw new ExternalMessageError(402, {
+        error: "chat_budget_exceeded",
+        message: err.message,
+        // Note: not echoing costUsd / maxUsdPerChat here. The
+        // ExternalMessageError JSON IS exposed to the webhook caller
+        // (e.g. Telegram); leaking the cap policy is a low-value info
+        // leak for a local-first product but trivially avoidable.
+      });
+    }
+    throw err;
+  }
 
   const reply = await runAgentText({
     chatId: resolvedChatId,

@@ -513,18 +513,28 @@ export async function GET() {
       "@/lib/storage/project-store"
     );
     const projects = await getAllProjects();
+    // Sprint 8 perf-review follow-up — pre-fix this loop was O(N projects)
+    // sequential: 100 projects × ~10ms loadProjectMcpServers = ~1s of pure
+    // serial I/O wait on every /api/health (Docker pings every 30s).
+    // Promise.all collapses it to wall-clock max-of-N which is bounded by
+    // the slowest single project load (~10-20ms), independent of count.
+    // Each per-project promise still has its own try/catch so a single
+    // parse error doesn't poison the whole probe.
+    const perProject = await Promise.all(
+      projects.map(async (project) => {
+        try {
+          const cfg = await loadProjectMcpServers(project.id);
+          return { count: cfg?.servers?.length ?? 0, parseError: false };
+        } catch {
+          return { count: 0, parseError: true };
+        }
+      })
+    );
     let totalServers = 0;
     let parseErrors = 0;
-    for (const project of projects) {
-      try {
-        const cfg = await loadProjectMcpServers(project.id);
-        const servers = cfg?.servers ?? [];
-        if (servers.length > 0) {
-          totalServers += servers.length;
-        }
-      } catch {
-        parseErrors += 1;
-      }
+    for (const { count, parseError } of perProject) {
+      if (parseError) parseErrors += 1;
+      else totalServers += count;
     }
     // Sprint 7 security follow-up — `/api/health` is in `isPublicApi`
     // (middleware.ts:17), so this response is reachable unauthenticated.

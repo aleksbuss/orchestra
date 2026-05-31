@@ -33,6 +33,14 @@ import { callSubordinate } from "./call-subordinate";
  * shape `{ text, usage?, provider, model }` (was raw `string`). Tests
  * use this helper to construct the shape without spelling out the
  * boilerplate every time.
+ *
+ * Sprint 10 — Sprint 9 review caught that earlier fixtures used
+ * `"openrouter"` + `"test/model"` which has no pricing entry, so
+ * `addUsageToCumulative` accumulated `costUsd: 0, fullyPriced: false`.
+ * The bubble-up test asserted token counts but the COST PATH was
+ * never exercised. Switched to `anthropic` + `claude-3-5-haiku` which
+ * has a real pricing entry ($0.80/M in, $4/M out per pricing.ts L76);
+ * tests can now assert `costUsd > 0` and verify the full pipeline.
  */
 function subResult(
   text: string,
@@ -45,8 +53,8 @@ function subResult(
 } {
   return {
     text,
-    provider: "openrouter",
-    model: "test/model",
+    provider: "anthropic",
+    model: "claude-3-5-haiku",
     ...override,
   };
 }
@@ -154,13 +162,22 @@ describe("callSubordinate — happy path", () => {
     const fakeChat: { cumulativeUsage?: unknown } = {};
     reducer(fakeChat);
     expect(fakeChat.cumulativeUsage).toBeDefined();
-    expect(
-      (fakeChat.cumulativeUsage as { promptTokens?: number })?.promptTokens
-    ).toBe(1500);
-    expect(
-      (fakeChat.cumulativeUsage as { completionTokens?: number })
-        ?.completionTokens
-    ).toBe(800);
+    const acc = fakeChat.cumulativeUsage as {
+      promptTokens?: number;
+      completionTokens?: number;
+      costUsd?: number;
+      fullyPriced?: boolean;
+    };
+    expect(acc.promptTokens).toBe(1500);
+    expect(acc.completionTokens).toBe(800);
+    // Sprint 10 — verify the COST PATH actually computed something with
+    // the real pricing table. Pre-Sprint-10 the fixture used "test/model"
+    // (no pricing) so costUsd was always 0 and the test passed for the
+    // wrong reason. claude-3-5-haiku has $0.80/M in + $4/M out:
+    //   1500 × 0.80/1M + 800 × 4/1M = 0.0012 + 0.0032 = $0.0044
+    expect(acc.costUsd).toBeGreaterThan(0);
+    expect(acc.costUsd).toBeCloseTo(0.0044, 4);
+    expect(acc.fullyPriced).toBe(true);
 
     updateChatSpy.mockRestore();
   });

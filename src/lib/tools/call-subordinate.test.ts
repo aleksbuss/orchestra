@@ -95,6 +95,34 @@ describe("callSubordinate — happy path", () => {
     );
   });
 
+  it("Sprint 9 — forwards parentChatId to runSubordinateAgent (closes recursive-subordinate billing leak)", async () => {
+    // Pre-Sprint-9 the subordinate's AgentContext.chatId was a synthetic
+    // `subordinate-${Date.now()}`. If the subordinate invoked its OWN
+    // `call_subordinate` (allowed until agentNumber >= 3), the recursive
+    // level bypassed budget enforcement AND spend bubble-up because both
+    // targeted a phantom chat that didn't exist on disk. Sprint 9
+    // threads the real parent chat id all the way down via the new
+    // `parentChatId` option on `runSubordinateAgent`. This test pins
+    // the wire: callSubordinate MUST forward parentChatId verbatim,
+    // not the synthetic id.
+    runSubordinateAgentMock.mockResolvedValue(subResult("ok"));
+    await callSubordinate("x", undefined, 0, [], undefined, "real-parent-id");
+    expect(runSubordinateAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({ parentChatId: "real-parent-id" })
+    );
+  });
+
+  it("Sprint 9 — omits parentChatId when caller doesn't supply one (no-cap path)", async () => {
+    // Some callers (cron, legacy) don't pass parentChatId. The forward
+    // must be `undefined`, not a fabricated value — otherwise
+    // runSubordinateAgent would use a bogus real-looking id and any
+    // downstream bubble-up would write to the wrong chat.
+    runSubordinateAgentMock.mockResolvedValue(subResult("ok"));
+    await callSubordinate("x", undefined, 0, []);
+    const callArgs = runSubordinateAgentMock.mock.calls[0][0];
+    expect(callArgs.parentChatId).toBeUndefined();
+  });
+
   it("Sprint 8 — bubbles subordinate usage to parent's cumulativeUsage via updateChat", async () => {
     // Verify the bubble-up contract: callSubordinate, when given a
     // parentChatId AND a subordinate that returned usage, calls

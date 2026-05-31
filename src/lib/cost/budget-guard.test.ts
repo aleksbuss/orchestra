@@ -164,3 +164,59 @@ describe("enforceChatBudget — failure modes (NEVER throws non-budget errors)",
     await expect(enforceChatBudget("c-1")).resolves.toBeUndefined();
   });
 });
+
+describe("enforceChatBudget — Sprint 9 end-to-end roundtrip", () => {
+  // The reviewer's MED concern: Sprint 8 added subordinate spend bubble-up
+  // but never proved that the NEXT call to enforceChatBudget sees the
+  // freshly-accumulated spend. If chat-store cached a stale cumulative,
+  // or if updateChat didn't sync, the cap could miss the new spend.
+  // This test simulates the flow: chat at $0.99/$1 → subordinate adds
+  // $0.50 → next enforce should see $1.49 and throw.
+
+  it("sees the freshly-accumulated cumulativeUsage on the next call (no stale read)", async () => {
+    getSettingsMock.mockResolvedValue({
+      costGuard: { maxUsdPerChat: 1.0 },
+    });
+    // Simulate the chat's read-state advancing between calls (as if
+    // updateChat had flushed in between).
+    let currentCost = 0.99;
+    getChatMock.mockImplementation(async () => ({
+      cumulativeUsage: {
+        promptTokens: 1000,
+        completionTokens: 500,
+        costUsd: currentCost,
+        fullyPriced: true,
+      },
+    }));
+
+    // First call: 0.99 < 1.0 → passes.
+    await expect(enforceChatBudget("c-1")).resolves.toBeUndefined();
+
+    // Simulate subordinate spend accumulation (this is what Sprint 8's
+    // bubble-up does: updateChat increments cumulativeUsage.costUsd).
+    currentCost = 1.49;
+
+    // Second call: 1.49 >= 1.0 → throws. Pins that there's no in-memory
+    // cache shielding enforceChatBudget from the on-disk update.
+    await expect(enforceChatBudget("c-1")).rejects.toBeInstanceOf(
+      ChatBudgetExceededError
+    );
+  });
+
+  it("at-cap boundary: chat exactly at cap → throws (>= semantics, not >)", async () => {
+    getSettingsMock.mockResolvedValue({
+      costGuard: { maxUsdPerChat: 5.0 },
+    });
+    getChatMock.mockResolvedValue({
+      cumulativeUsage: {
+        promptTokens: 0,
+        completionTokens: 0,
+        costUsd: 5.0, // exactly at cap
+        fullyPriced: true,
+      },
+    });
+    await expect(enforceChatBudget("c-1")).rejects.toBeInstanceOf(
+      ChatBudgetExceededError
+    );
+  });
+});

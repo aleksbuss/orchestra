@@ -513,23 +513,35 @@ export async function GET() {
       "@/lib/storage/project-store"
     );
     const projects = await getAllProjects();
-    // Sprint 8 perf-review follow-up — pre-fix this loop was O(N projects)
-    // sequential: 100 projects × ~10ms loadProjectMcpServers = ~1s of pure
-    // serial I/O wait on every /api/health (Docker pings every 30s).
-    // Promise.all collapses it to wall-clock max-of-N which is bounded by
-    // the slowest single project load (~10-20ms), independent of count.
-    // Each per-project promise still has its own try/catch so a single
-    // parse error doesn't poison the whole probe.
-    const perProject = await Promise.all(
-      projects.map(async (project) => {
-        try {
-          const cfg = await loadProjectMcpServers(project.id);
-          return { count: cfg?.servers?.length ?? 0, parseError: false };
-        } catch {
-          return { count: 0, parseError: true };
-        }
-      })
-    );
+    // Sprint 8 collapsed sequential O(N projects) to parallel max-of-N
+    // wall-clock via Promise.all. Sprint 10 follow-up: bound concurrency
+    // to avoid EMFILE ("too many open files") on deployments with
+    // 1000+ projects. Linux default soft limit is ~1024 file descriptors
+    // per process; macOS is ~256. Unbounded Promise.all on 1000 projects
+    // would race against that limit and may cause /api/health (which
+    // Docker pings every ~30s) to flap on large deployments.
+    //
+    // Window of 32 is a back-of-napkin: each loadProjectMcpServers opens
+    // 1 fd briefly, 32 in flight is well under both Linux & macOS
+    // defaults and gives ~32× speedup vs sequential. Each per-project
+    // promise still has its own try/catch so a single parse error
+    // doesn't poison the whole probe.
+    const MCP_PROBE_BATCH_SIZE = 32;
+    const perProject: Array<{ count: number; parseError: boolean }> = [];
+    for (let i = 0; i < projects.length; i += MCP_PROBE_BATCH_SIZE) {
+      const batch = projects.slice(i, i + MCP_PROBE_BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map(async (project) => {
+          try {
+            const cfg = await loadProjectMcpServers(project.id);
+            return { count: cfg?.servers?.length ?? 0, parseError: false };
+          } catch {
+            return { count: 0, parseError: true };
+          }
+        })
+      );
+      perProject.push(...batchResults);
+    }
     let totalServers = 0;
     let parseErrors = 0;
     for (const { count, parseError } of perProject) {

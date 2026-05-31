@@ -2024,6 +2024,27 @@ export async function runSubordinateAgent(options: {
    * subordinate keeps streaming tokens while no one's listening.
    */
   abortSignal?: AbortSignal;
+  /**
+   * Sprint 9 — the REAL parent chat id (top-level chat that originated
+   * the agent run). Required for the recursive-subordinate path:
+   *   - level 0 (top): runs in `context.chatId = realChatId`
+   *   - level 1 (subordinate): if absent here, used to construct a
+   *     synthetic `subordinate-${Date.now()}` for context.chatId →
+   *     budget-check + spend bubble-up would target a phantom chat
+   *     that doesn't exist on disk → `updateChat` silent no-op
+   *     → REAL parent's `cumulativeUsage` never sees the spend.
+   *   - level 2 (subordinate of subordinate): same problem, doubly so.
+   *
+   * Sprint 8 closed the LEVEL-1 leak by accumulating in
+   * `callSubordinate`. Sprint 9 closes the LEVEL-2+ leak by propagating
+   * the real parent id ALL THE WAY DOWN. Now every level's
+   * `enforceChatBudget` + spend bubble-up targets the same real chat.
+   *
+   * Backwards-compat: optional + falls back to the synthetic id (the
+   * pre-Sprint-9 behavior). Production callers (`callSubordinate`)
+   * always pass it now.
+   */
+  parentChatId?: string;
 }): Promise<SubordinateResult> {
   const settings = await getSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
@@ -2033,7 +2054,11 @@ export async function runSubordinateAgent(options: {
 
   const workDir = await resolveWorkDirForProject(options.projectId);
   const context: AgentContext = {
-    chatId: `subordinate-${Date.now()}`,
+    // Sprint 9 — use the REAL parent chat id so deeper-level recursive
+    // subordinates also see the real chat for budget + bubble-up.
+    // Fallback synthetic id retained for the unusual case of a caller
+    // that doesn't pass parentChatId (no production caller; defensive).
+    chatId: options.parentChatId ?? `subordinate-${Date.now()}`,
     projectId: options.projectId,
     workDir,
     memorySubdir: options.projectId

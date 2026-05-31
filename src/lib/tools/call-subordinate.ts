@@ -335,6 +335,14 @@ export async function callSubordinate(
           parentAgentNumber,
           parentHistory,
           abortSignal,
+          // Sprint 9 — propagate the real parent chat id all the way
+          // down. Without this, the subordinate's `context.chatId`
+          // gets the synthetic `subordinate-${Date.now()}` fallback,
+          // and if the subordinate itself invokes `call_subordinate`
+          // (allowed until agentNumber >= 3), the recursive level
+          // bypasses budget enforcement AND spend bubble-up — both
+          // would target a phantom chat.
+          parentChatId,
         })
       )
     );

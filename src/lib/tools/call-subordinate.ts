@@ -31,6 +31,13 @@ export interface SubordinateSlotState {
   readonly waitQueue: Array<() => void>;
 }
 
+/**
+ * @internal
+ * Companion to `withSubordinateSlot` — see that function's docblock for
+ * the "do not import this in production code" rationale. Exported only
+ * for the unit test that exercises the concurrency cap with deterministic
+ * state.
+ */
 export function createSlotState(
   maxConcurrency: number = MAX_SUBORDINATE_CONCURRENCY
 ): SubordinateSlotState {
@@ -247,6 +254,24 @@ function releaseSubordinateSlot(state: SubordinateSlotState): void {
   state.activeCount = Math.max(0, state.activeCount - 1);
 }
 
+/**
+ * @internal
+ *
+ * Sprint 10 — flagged by security review: this export is the semaphore
+ * gate enforcing `MAX_SUBORDINATE_CONCURRENCY`. A future caller importing
+ * this directly with a hand-rolled `SubordinateSlotState` would BYPASS
+ * the cap. The public, stable API is `callSubordinate` only.
+ *
+ * Reasons this stays exported despite being internal:
+ *   - The unit test in `call-subordinate.test.ts` needs it to verify the
+ *     cap behaves correctly via DI (closed Sprint 8's "fragile module
+ *     state" coverage gap).
+ *   - `createSlotState` is the matching test-only constructor.
+ *
+ * Treat both as internal: do NOT import from production code outside
+ * this file. If you find yourself needing to, you almost certainly want
+ * `callSubordinate` instead.
+ */
 export async function withSubordinateSlot<T>(
   fn: () => Promise<T>,
   state: SubordinateSlotState = defaultSlotState
@@ -366,6 +391,40 @@ export async function callSubordinate(
           );
           return chat;
         });
+
+        // Sprint 10 — post-bubble-up cap re-check.
+        //
+        // The TOCTOU window flagged by both Sprint 9 reviewers: when the
+        // parent agent's LLM response emits N parallel `tool_use` blocks
+        // calling `call_subordinate`, all N callers pass `enforceChatBudget`
+        // at the SAME pre-spend cumulative snapshot. After they all return,
+        // total spend can exceed cap by up to N × per-call cost.
+        //
+        // Bounded by `withSubordinateSlot` (MAX_SUBORDINATE_CONCURRENCY = 2),
+        // so worst-case overshoot is 2× per-subordinate spend (typically
+        // tens of cents on a $1 cap — annoying but not catastrophic on a
+        // local-first single-operator product).
+        //
+        // We don't refund tokens already spent (impossible). What we DO is
+        // emit a structured warn line the operator can grep when reconciling
+        // bills, AND the NEXT call_subordinate / next parent turn will see
+        // the now-over-cap state via enforceChatBudget and refuse. So the
+        // runaway is contained to the in-flight batch.
+        try {
+          await enforceChatBudget(parentChatId);
+        } catch (postErr) {
+          if (postErr instanceof ChatBudgetExceededError) {
+            console.warn(
+              `[callSubordinate] post-bubble-up cap crossed during in-flight subordinate (TOCTOU window): ${postErr.message}. Subsequent call_subordinate invocations on this chat WILL refuse.`
+            );
+            // Deliberately swallow — this subordinate's work is already
+            // done and paid for; throwing here would drop a real result
+            // the user can use, AND wouldn't refund the spend. The next
+            // pre-check fires on the next call.
+          } else {
+            throw postErr;
+          }
+        }
       } catch (accErr) {
         console.warn(
           "[callSubordinate] Failed to accumulate subordinate usage to parent:",

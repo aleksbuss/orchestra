@@ -2,7 +2,11 @@ import fs from "fs/promises";
 import path from "path";
 import { Chat, ChatListItem, ChatSchema } from "@/lib/types";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
+import {
+  assertPathInside,
+  withFileLock,
+  safeWriteFile,
+} from "@/lib/storage/fs-utils";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const CHATS_DIR = path.join(DATA_DIR, "chats");
@@ -48,8 +52,29 @@ interface PendingFlush {
 }
 const pendingFlushes = new Map<string, PendingFlush>();
 
+/**
+ * Sprint 11 security fix — `chatId` originates from request bodies in
+ * `/api/chat`, `/api/external/message`, and other entry-points that
+ * don't always validate the value as a UUID. A malicious `chatId =
+ * "../settings/settings"` or `"../../../../tmp/evil"` would, with the
+ * pre-fix naive `path.join(CHATS_DIR, ${chatId}.json)`, resolve to a
+ * path OUTSIDE `data/chats/` — escaping the chat sandbox.
+ *
+ * Worst-case primitive pre-fix: any authenticated chat-creation
+ * caller could write a `.json` file anywhere on the filesystem reachable
+ * by `path.join` normalization, including `data/settings/settings.json`
+ * (overwriting auth state) or anywhere outside `data/` entirely. CVE-
+ * class arbitrary-file-write through the chat layer.
+ *
+ * `assertPathInside` (PM #6 / PM #16 canonical defense) uses
+ * `path.resolve + startsWith(CHATS_DIR + path.sep)` so sibling-prefix
+ * tricks like `..chats-evil/foo` also fail. Throws synchronously on
+ * traversal; callers should treat this as a hard error and 400 the
+ * request. Production callers pass UUIDs from `crypto.randomUUID()`
+ * so this is silent under correct usage.
+ */
 function chatFilePath(chatId: string): string {
-  return path.join(CHATS_DIR, `${chatId}.json`);
+  return assertPathInside(CHATS_DIR, `${chatId}.json`);
 }
 
 async function flushNow(chatId: string): Promise<void> {
@@ -486,6 +511,15 @@ export async function createChat(
   title: string,
   projectId?: string
 ): Promise<Chat> {
+  // Sprint 11 — eager path-traversal validation. `chatFilePath` would
+  // throw later when `flushNow` runs, but the indirection through
+  // `scheduleFlush` (promise tracked separately) swallows the rejection
+  // and `createChat` returns a chat that was never actually persisted —
+  // a confusing silent-corruption state. Call `chatFilePath` eagerly
+  // for its side-effect; on traversal it throws synchronously here
+  // before any state is mutated.
+  chatFilePath(id);
+
   const now = new Date().toISOString();
   const chat: Chat = {
     id,

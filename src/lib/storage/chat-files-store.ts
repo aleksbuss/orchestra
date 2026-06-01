@@ -33,7 +33,20 @@ export async function getChatFiles(chatId: string): Promise<ChatFile[]> {
         for (const entry of entries) {
             if (entry.isFile()) {
                 const fullPath = path.join(dir, entry.name);
-                const stat = await fs.stat(fullPath);
+                // Sprint 11 defensive — `fs.stat` follows symlinks. If a
+                // TOCTOU race between readdir (Dirent type from d_type) and
+                // stat lets a symlink slip past `isFile()` (e.g. inode
+                // replaced between the two syscalls), `fs.stat` would
+                // happily read the target's metadata (size, mtime) of a
+                // sensitive file like /etc/passwd. `fs.lstat` returns
+                // metadata for the LINK itself, not the target, closing
+                // the TOCTOU. Cost: one syscall, same surface.
+                const stat = await fs.lstat(fullPath);
+                // Belt-and-suspenders: if the entry is now a symlink
+                // (post-TOCTOU), skip it. `Dirent.isFile()` from readdir
+                // already excludes symlinks, so this should be unreachable
+                // under normal conditions.
+                if (stat.isSymbolicLink()) continue;
                 const ext = path.extname(entry.name).toLowerCase();
 
                 files.push({

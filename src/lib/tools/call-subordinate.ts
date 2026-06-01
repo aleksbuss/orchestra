@@ -3,6 +3,7 @@ import {
   ChatBudgetExceededError,
   enforceChatBudget,
 } from "@/lib/cost/budget-guard";
+import { log } from "@/lib/observability/logger";
 
 const MAX_SUBORDINATE_CONCURRENCY = 2;
 const SUBORDINATE_RETRY_DELAYS_MS = [1000, 2500] as const;
@@ -37,10 +38,25 @@ export interface SubordinateSlotState {
  * the "do not import this in production code" rationale. Exported only
  * for the unit test that exercises the concurrency cap with deterministic
  * state.
+ *
+ * Sprint 11 — validates `maxConcurrency` is a positive finite integer.
+ * Without this, a caller passing `Infinity` / `NaN` / `0` / negative
+ * silently disabled the subordinate-fan-out cap (the semaphore would
+ * accept unlimited acquires OR never wake any waiter). Throws on bad
+ * input rather than degrading to a hard-to-debug runtime corruption.
  */
 export function createSlotState(
   maxConcurrency: number = MAX_SUBORDINATE_CONCURRENCY
 ): SubordinateSlotState {
+  if (
+    !Number.isFinite(maxConcurrency) ||
+    !Number.isInteger(maxConcurrency) ||
+    maxConcurrency <= 0
+  ) {
+    throw new Error(
+      `createSlotState: maxConcurrency must be a positive integer, got ${maxConcurrency}`
+    );
+  }
   return {
     maxConcurrency,
     activeCount: 0,
@@ -391,45 +407,77 @@ export async function callSubordinate(
           );
           return chat;
         });
-
-        // Sprint 10 — post-bubble-up cap re-check.
-        //
-        // The TOCTOU window flagged by both Sprint 9 reviewers: when the
-        // parent agent's LLM response emits N parallel `tool_use` blocks
-        // calling `call_subordinate`, all N callers pass `enforceChatBudget`
-        // at the SAME pre-spend cumulative snapshot. After they all return,
-        // total spend can exceed cap by up to N × per-call cost.
-        //
-        // Bounded by `withSubordinateSlot` (MAX_SUBORDINATE_CONCURRENCY = 2),
-        // so worst-case overshoot is 2× per-subordinate spend (typically
-        // tens of cents on a $1 cap — annoying but not catastrophic on a
-        // local-first single-operator product).
-        //
-        // We don't refund tokens already spent (impossible). What we DO is
-        // emit a structured warn line the operator can grep when reconciling
-        // bills, AND the NEXT call_subordinate / next parent turn will see
-        // the now-over-cap state via enforceChatBudget and refuse. So the
-        // runaway is contained to the in-flight batch.
-        try {
-          await enforceChatBudget(parentChatId);
-        } catch (postErr) {
-          if (postErr instanceof ChatBudgetExceededError) {
-            console.warn(
-              `[callSubordinate] post-bubble-up cap crossed during in-flight subordinate (TOCTOU window): ${postErr.message}. Subsequent call_subordinate invocations on this chat WILL refuse.`
-            );
-            // Deliberately swallow — this subordinate's work is already
-            // done and paid for; throwing here would drop a real result
-            // the user can use, AND wouldn't refund the spend. The next
-            // pre-check fires on the next call.
-          } else {
-            throw postErr;
-          }
-        }
       } catch (accErr) {
-        console.warn(
-          "[callSubordinate] Failed to accumulate subordinate usage to parent:",
-          accErr instanceof Error ? accErr.message : String(accErr)
-        );
+        // Sprint 11 — Sprint 10 had a re-throw inside this block from the
+        // post-bubble-up cap check; the re-thrown error was caught HERE
+        // and misattributed as "Failed to accumulate". Sprint 11 separates
+        // the two concerns: accumulation failures stay here, the post-
+        // check moves to its OWN try/catch below so error attribution is
+        // honest. Also: `log.warn` (Sprint 5 structured logger) routes
+        // through the recursive-redaction pipeline + JSONL persistence,
+        // so the line survives log rotation. Pre-Sprint-11 was raw
+        // `console.warn` which bypassed both.
+        log.warn("callSubordinate_accumulate_failed", {
+          parentChatId,
+          parentAgentNumber,
+          err: accErr instanceof Error ? accErr.message : String(accErr),
+        });
+      }
+
+      // Sprint 10 — post-bubble-up cap re-check.
+      //
+      // The TOCTOU window flagged by both Sprint 9 reviewers: when the
+      // parent agent's LLM response emits N parallel `tool_use` blocks
+      // calling `call_subordinate`, all N callers pass `enforceChatBudget`
+      // at the SAME pre-spend cumulative snapshot. After they all return,
+      // total spend can exceed cap by up to N × per-call cost.
+      //
+      // Bounded by `withSubordinateSlot` (MAX_SUBORDINATE_CONCURRENCY = 2),
+      // so worst-case overshoot is 2× per-subordinate spend (typically
+      // tens of cents on a $1 cap — annoying but not catastrophic on a
+      // local-first single-operator product).
+      //
+      // We don't refund tokens already spent (impossible). What we DO is
+      // emit a structured warn line the operator can grep when reconciling
+      // bills, AND the NEXT call_subordinate / next parent turn will see
+      // the now-over-cap state via enforceChatBudget and refuse. So the
+      // runaway is contained to the in-flight batch.
+      //
+      // Sprint 11 moved this OUT of the accumulator-error catch so a
+      // settings-read failure inside enforceChatBudget is logged as
+      // `callSubordinate_cap_recheck_failed` rather than misattributed
+      // to accumulation. Structured fields make billing reconciliation
+      // greppable per-chatId.
+      try {
+        await enforceChatBudget(parentChatId);
+      } catch (postErr) {
+        if (postErr instanceof ChatBudgetExceededError) {
+          log.warn("callSubordinate_post_bubble_cap_exceeded", {
+            parentChatId,
+            parentAgentNumber,
+            costUsd: postErr.costUsd,
+            maxUsdPerChat: postErr.maxUsdPerChat,
+            overshootUsd: Number(
+              (postErr.costUsd - postErr.maxUsdPerChat).toFixed(4)
+            ),
+            // Subsequent call_subordinate invocations on this chat WILL
+            // refuse via the next pre-check; this in-flight call is
+            // deliberately allowed to complete.
+          });
+          // Deliberately swallow — this subordinate's work is already
+          // done and paid for; throwing here would drop a real result.
+        } else {
+          log.warn("callSubordinate_cap_recheck_failed", {
+            parentChatId,
+            parentAgentNumber,
+            err:
+              postErr instanceof Error
+                ? postErr.message
+                : String(postErr),
+          });
+          // Don't propagate — a settings-read failure shouldn't break
+          // the tool. The pre-check on the NEXT call will retry settings.
+        }
       }
     }
 

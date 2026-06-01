@@ -217,6 +217,10 @@ describe("callSubordinate — happy path", () => {
   });
 
   it("Sprint 8 — bubble-up failure is best-effort: logged, doesn't fail the tool", async () => {
+    // Sprint 11 — bubble-up failures now go through the structured logger
+    // (`log.warn`) instead of `console.warn`, so they participate in
+    // redaction + JSONL persistence. Spy on the named export instead of
+    // the global console.
     runSubordinateAgentMock.mockResolvedValue(
       subResult("ok", { usage: { inputTokens: 10, outputTokens: 5 } })
     );
@@ -224,7 +228,8 @@ describe("callSubordinate — happy path", () => {
     const updateChatSpy = vi
       .spyOn(chatStore, "updateChat")
       .mockRejectedValue(new Error("disk full"));
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logger = await import("@/lib/observability/logger");
+    const warnSpy = vi.spyOn(logger.log, "warn").mockImplementation(() => {});
 
     const result = await callSubordinate("x", undefined, 0, [], undefined, "parent-id");
     await new Promise((r) => setImmediate(r));
@@ -232,8 +237,11 @@ describe("callSubordinate — happy path", () => {
     // Tool still returns success — bubble-up is best-effort.
     expect(result).toContain("Subordinate Agent 1 completed");
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/Failed to accumulate subordinate usage/),
-      expect.any(String)
+      "callSubordinate_accumulate_failed",
+      expect.objectContaining({
+        parentChatId: "parent-id",
+        err: expect.stringContaining("disk full"),
+      })
     );
     updateChatSpy.mockRestore();
     warnSpy.mockRestore();
@@ -487,5 +495,41 @@ describe("withSubordinateSlot — concurrency cap via DI (Sprint 8)", () => {
     // overload accepts an omitted second arg (production callers).
     const r = await withSubordinateSlot(async () => "default-state-ok");
     expect(r).toBe("default-state-ok");
+  });
+
+  describe("Sprint 11 — createSlotState input validation (HIGH security fix)", () => {
+    // Pre-Sprint-11 `createSlotState` accepted any number without
+    // validation. A test or future refactor passing Infinity / NaN / 0 /
+    // negative silently disabled the cap (security reviewer #2 finding).
+    // Sprint 11 throws on bad input.
+
+    it("rejects Infinity (would silently disable the cap)", () => {
+      expect(() => createSlotState(Infinity)).toThrow(
+        /positive integer/
+      );
+    });
+
+    it("rejects NaN", () => {
+      expect(() => createSlotState(Number.NaN)).toThrow(/positive integer/);
+    });
+
+    it("rejects 0 (no slots → all callers park forever)", () => {
+      expect(() => createSlotState(0)).toThrow(/positive integer/);
+    });
+
+    it("rejects negative numbers", () => {
+      expect(() => createSlotState(-1)).toThrow(/positive integer/);
+    });
+
+    it("rejects non-integer (fractional) values", () => {
+      expect(() => createSlotState(2.5)).toThrow(/positive integer/);
+    });
+
+    it("accepts positive integers (1, 2, 8, 16)", () => {
+      for (const n of [1, 2, 8, 16]) {
+        const s = createSlotState(n);
+        expect(s.maxConcurrency).toBe(n);
+      }
+    });
   });
 });

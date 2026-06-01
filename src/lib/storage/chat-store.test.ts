@@ -131,4 +131,64 @@ describe("Chat Store", () => {
     const { deleteChat } = await import("@/lib/storage/chat-store");
     await deleteChat(chatId);
   });
+
+  describe("Sprint 11 — chatId path-traversal defense (CVE-class arbitrary file write)", () => {
+    // Pre-Sprint-11 `chatFilePath` used naive `path.join(CHATS_DIR,
+    // \`\${chatId}.json\`)`. An attacker-controlled chatId of
+    // `"../settings/settings"` would resolve to `data/settings/settings.json`
+    // (clobbering auth state) or `"../../../../tmp/evil"` could escape
+    // `data/` entirely. The fix wraps the path build with
+    // `assertPathInside(CHATS_DIR, ...)` which throws on traversal.
+
+    it("createChat with `../` in chatId throws instead of writing outside CHATS_DIR", async () => {
+      const { createChat } = await import("@/lib/storage/chat-store");
+      await expect(
+        createChat("../settings/evil", "Malicious")
+      ).rejects.toThrow(/escapes the allowed root/);
+    });
+
+    it("getChat with `../` in chatId throws (defense at the path-resolve layer)", async () => {
+      const { getChat } = await import("@/lib/storage/chat-store");
+      await expect(getChat("../../../etc/passwd")).rejects.toThrow(
+        /escapes the allowed root/
+      );
+    });
+
+    it("updateChat with `../` in chatId throws (defense applies to all callers)", async () => {
+      const { updateChat } = await import("@/lib/storage/chat-store");
+      await expect(
+        updateChat("../poisoned", (chat) => chat)
+      ).rejects.toThrow(/escapes the allowed root/);
+    });
+
+    it("deleteChat with `../` in chatId throws (defense applies to all callers)", async () => {
+      const { deleteChat } = await import("@/lib/storage/chat-store");
+      await expect(deleteChat("../../traces/evil")).rejects.toThrow(
+        /escapes the allowed root/
+      );
+    });
+
+    it("sibling-prefix bypass: chatId starting with chat-dir prefix doesn't slip through", async () => {
+      // The PM #16 class of bug: a bare startsWith(root) would accept
+      // `data/chats-evil/foo` because the resolved path literally starts
+      // with `data/chats`. `assertPathInside` adds `path.sep` suffix so
+      // sibling prefixes don't match. This test pins that guarantee
+      // even after a refactor.
+      const { createChat } = await import("@/lib/storage/chat-store");
+      // chatId crafted to land at `data/chats-evil/x.json` after join+resolve
+      await expect(
+        createChat("../chats-evil/x", "Sibling prefix attack")
+      ).rejects.toThrow(/escapes the allowed root/);
+    });
+
+    it("normal UUID-shaped chatIds pass through unchanged", async () => {
+      const { createChat, deleteChat } = await import(
+        "@/lib/storage/chat-store"
+      );
+      // Production callers use `crypto.randomUUID()` — must not regress.
+      const safeId = "550e8400-e29b-41d4-a716-446655440000";
+      await expect(createChat(safeId, "Safe")).resolves.toBeDefined();
+      await deleteChat(safeId);
+    });
+  });
 });

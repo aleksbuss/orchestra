@@ -267,6 +267,7 @@ The helper does `path.resolve` + `startsWith(root + path.sep)` — the `path.sep
 | `POST /api/chat/files` | multipart `filename` | ✓ `chat-files-store.saveChatFile` uses `path.basename` |
 | `DELETE /api/chat/files` | query `filename` | ✓ PM #16 (`chat-files-store.deleteChatFile` uses `assertPathInside`) |
 | `GET /api/files/download` | query `path` | ✓ PM #16 |
+| `GET /api/files` | query `path` | ✓ PM #16 (route-layer `assertPathInside` + push-down to `getProjectFiles`) |
 | `DELETE /api/files` | body `path` | ✓ PM #16 |
 | `POST /api/memory` | body `subdir` | ✓ PM #6 defect-#2 (`getDbPath` uses `assertPathInside`) |
 
@@ -310,6 +311,12 @@ const res = await fetch(safeUrl, { signal: AbortSignal.timeout(5000) });
 **Known caveats** (carried in PM #8): DNS rebinding bypasses the guard; loopback scans of `localhost:<other-service>` are still reachable; no response-body size cap. The real defense for those is route auth + CSRF tokens, not URL filtering.
 
 Failure mode if you skip the helper: PM #8.
+
+### Privacy Mode air-gap — every LLM entry point (PM #47, PM #58)
+
+When `settings.privacyMode.enabled` is true, NO user data may leave the box to a cloud LLM vendor. The runtime guard is `assertPrivacyModeAllowsSettings(settings)` (`agent.ts`) — it throws when `chatModel`, `utilityModel`, `embeddingsModel`, `proposerTiers`, or the tournament judge resolves to a non-local backend.
+
+**The guard must be called at EVERY function that creates a model and calls the AI SDK — not just `runAgent`.** PM #58 was a P0 data-egress leak caused by enforcing it at the interactive `runAgent` only: `runAgentText` (cron + the unauthenticated Telegram webhook) and `runSubordinateAgent` (`call_subordinate`, incl. the recursive path) skipped it, so cron ticks and Telegram messages silently shipped prompts to OpenAI/Anthropic/Google while the UI showed Privacy Mode ON. Call `assertPrivacyModeAllowsSettings(settings)` immediately after `getSettings()`, before `createModel`. Audit with `grep -n assertPrivacyModeAllowsSettings src/lib/agent/agent.ts` — every `getSettings()` that precedes a `createModel` must have a guard line. Regression: [`agent-entrypoints-privacy.test.ts`](src/lib/agent/agent-entrypoints-privacy.test.ts). **Rule:** a security control enforced at "the" entry point is only as strong as the number of entry points; a new `runAgent`-like function inherits ZERO guards — re-apply the air-gap (and the abortSignal plumb + loop-guard wrap) explicitly.
 
 ### Secrets hygiene
 
@@ -388,11 +395,13 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 - **AbortSignals are MANDATORY** — see "🛑 AbortSignal Propagation Contract" above. PM #1 was a P0 outage caused by ignoring this.
 - **Loop Guard middleware** — see "Core Subsystems §4 Loop Guard". Every `ToolSet` must be wrapped by `applyGlobalToolLoopGuard` before reaching `generateText`.
 - **Daemon Limits (`daemon.ts`):** Background auto-pilot is hard-capped via `MAX_AUTO_PILOT_ITERATIONS = 50` (`daemon.ts:24`) to prevent infinite billing loops. Iteration counters live in the in-memory `autoPilotIterations` Map keyed by `chatId` — they evaporate on restart, which is intentional; a new run starts fresh.
+- **Counter-reset semantics (PM #59):** the iteration counter MUST survive the Auto-Pilot self-dispatch that increments it. `dispatchAgentJob` calls `abortJob` first on every entry; `abortJob` resets `autoPilotIterations` BY DEFAULT (a user abort should start the next run from a clean budget), but the Auto-Pilot continuation passes `abortJob(chatId, { preserveAutoPilotCounter: true })` so the count accumulates toward the cap. PM #59 was a P0 infinite-billing loop caused by an unconditional reset here: the count cycled 0→1→0→1 and `>= 50` never tripped. When you touch `abortJob`/`dispatchAgentJob`, keep "user-initiated → reset, system continuation → preserve" intact.
 
 ### 4. Background Daemons & "Ghost Tasks"
 - **Memory Transience:** Background tasks (`daemon.ts`) are tracked in Node's memory (`activeJobs`). 
 - **Ghost Sweeper:** Because Orchestra does not use external Redis/Queues, restarting the server clears `activeJobs`. `ghost-sweeper.ts` runs exactly once on server boot to find orphaned tasks in `GoalTree` JSON files and mark them as `"failed"`.
 - **Rule:** If you add new persistent asynchronous state, you MUST ensure it has a recovery or cleanup mechanism in `ghost-sweeper.ts` or `cron/runtime.ts`.
+- **Sweepers must FAIL-SAFE (PM #60):** any sweep that calls `fs.unlink`/`fs.rm` against an "orphan" set (entries NOT in a live keep-set) must skip the delete when the keep-set can't be resolved. `runAllSweepers` derives the live-chat set from `getAllChats()`; on a throw it sets `chatIds = null` ("unknown") and SKIPS the orphan-keyed sweeps for that cycle (chat-independent sweeps still run). Never substitute an empty `Set()` on error — empty means "everything is an orphan", so fail-open on a destructive op mass-deletes queue entries + `data/chat-files/`. A legitimate empty result (zero chats) is distinct from "unknown" and still cleans orphans.
 
 ### 5. UI & Styling Standards (Cyber-Premium)
 - **Aesthetics First:** Orchestra is designed to look premium. Use glassmorphism (`backdrop-blur`), subtle gradients, and semantic colors. Avoid harsh default browser styles.

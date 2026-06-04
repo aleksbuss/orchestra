@@ -15,6 +15,19 @@ export async function GET(req: NextRequest) {
     );
   }
 
+  // PM #16 — `path.join(baseDir, subPath)` inside getProjectFiles normalizes
+  // `../` silently, so `?path=../..` would `fs.readdir` outside the project
+  // sandbox (directory enumeration of data/settings, data/chats, …). The
+  // DELETE handler below already guards; the GET side was the gap. Validate
+  // at the route layer AND push down into getProjectFiles (defense-in-depth).
+  if (subPath) {
+    try {
+      assertPathInside(getWorkDir(projectId), subPath);
+    } catch {
+      return Response.json({ error: "Invalid path" }, { status: 400 });
+    }
+  }
+
   const files = await getProjectFiles(projectId, subPath);
   return Response.json(files);
 }

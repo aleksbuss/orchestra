@@ -5,6 +5,9 @@ import { dispatchAgentJob, abortJob } from "./daemon";
 import {
   hasPendingAutoPilotTimeout,
   primeAutoPilotTimeout,
+  getAutoPilotIterations,
+  setAutoPilotIterations,
+  clearAutoPilotIterations,
 } from "./daemon.testing";
 import { runAgent } from "./agent";
 import { getActiveGoal } from "@/lib/storage/goal-store";
@@ -211,6 +214,75 @@ describe("PM #7 — production setTimeout path (integration; Defect #6 from 2026
       expect.objectContaining({ forceSwarm: true })
     );
 
+    abortJob(chatId);
+  });
+
+  it("an auto-pilot continuation dispatch INCREMENTS the counter (does not reset to 1)", async () => {
+    // review bug_001: abortJob unconditionally wiped autoPilotIterations, and
+    // dispatchAgentJob calls abortJob first — so the continuation path cycled
+    // 5→(wipe)→0→1 every iteration and MAX_AUTO_PILOT_ITERATIONS never tripped.
+    // The fix preserves the counter on auto-pilot continuations.
+    const chatId = "ap-counter-chat";
+    setAutoPilotIterations(chatId, 5);
+
+    vi.mocked(runAgent).mockResolvedValue({
+      text: Promise.resolve("done"),
+    } as unknown as Awaited<ReturnType<typeof runAgent>>);
+    vi.mocked(getActiveGoal).mockResolvedValue({
+      id: "goal-1",
+      chatId,
+      status: "active",
+      tasks: [{ id: "task-1", status: "pending", subtasks: [] }],
+    } as unknown as Awaited<ReturnType<typeof getActiveGoal>>);
+
+    await dispatchAgentJob({
+      chatId,
+      userMessage:
+        "System [Auto-Pilot]: Proceed with the next pending task in the active Goal Tree.",
+    });
+
+    // Must climb to 6 (5 + 1), NOT reset to 1.
+    await vi.waitFor(
+      () => {
+        expect(getAutoPilotIterations(chatId)).toBe(6);
+      },
+      { timeout: 1000, interval: 10 }
+    );
+
+    abortJob(chatId);
+    clearAutoPilotIterations(chatId);
+  });
+
+  it("abortJob preserves the counter only when preserveAutoPilotCounter is set", () => {
+    const chatId = "ap-abort-opt";
+    setAutoPilotIterations(chatId, 7);
+
+    // Auto-pilot continuation re-entry: keep the count.
+    abortJob(chatId, { preserveAutoPilotCounter: true });
+    expect(getAutoPilotIterations(chatId)).toBe(7);
+
+    // Genuine user abort (default): reset to a fresh budget.
+    abortJob(chatId);
+    expect(getAutoPilotIterations(chatId)).toBe(0);
+  });
+
+  it("a user-initiated dispatch resets the counter to a fresh budget", async () => {
+    const chatId = "ap-user-reset";
+    setAutoPilotIterations(chatId, 9);
+
+    vi.mocked(runAgent).mockResolvedValue({
+      text: Promise.resolve("done"),
+    } as unknown as Awaited<ReturnType<typeof runAgent>>);
+    vi.mocked(getActiveGoal).mockResolvedValue(null);
+
+    await dispatchAgentJob({ chatId, userMessage: "a real user message" });
+
+    await vi.waitFor(
+      () => {
+        expect(getAutoPilotIterations(chatId)).toBe(0);
+      },
+      { timeout: 1000, interval: 10 }
+    );
     abortJob(chatId);
   });
 

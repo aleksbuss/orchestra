@@ -13,7 +13,7 @@ import {
 import { deleteChatsByProjectId } from "@/lib/storage/chat-store";
 import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { safeWriteFile, withFileLock } from "./fs-utils";
+import { assertPathInside, safeWriteFile, withFileLock } from "./fs-utils";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
@@ -1520,9 +1520,17 @@ export async function getProjectFiles(
   subPath: string = ""
 ): Promise<{ name: string; type: "file" | "directory"; size: number }[]> {
   const baseDir = getWorkDir(projectId);
-  const targetDir = subPath
-    ? path.join(baseDir, subPath)
-    : baseDir;
+  // PM #16 defense-in-depth — `path.join` normalizes `../` silently, so a
+  // caller that forgot to validate `subPath` could escape the project
+  // sandbox. Guard here too; route-layer validation is not assumed.
+  let targetDir = baseDir;
+  if (subPath) {
+    try {
+      targetDir = assertPathInside(baseDir, subPath);
+    } catch {
+      return [];
+    }
+  }
 
   try {
     const entries = await fs.readdir(targetDir, { withFileTypes: true });

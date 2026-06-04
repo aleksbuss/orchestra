@@ -67,13 +67,37 @@ export function __getAutoPilotTimeoutsForTesting(): Map<
   return autoPilotTimeouts;
 }
 
+/**
+ * Internal accessor for the auto-pilot iteration counter Map. Same posture
+ * as `__getAutoPilotTimeoutsForTesting` — `*.testing.ts` only. Used to pin
+ * the regression that the counter ACCUMULATES across continuation dispatches
+ * (a prior unconditional reset in `abortJob` made the cap a no-op).
+ */
+export function __getAutoPilotIterationsForTesting(): Map<string, number> {
+  return autoPilotIterations;
+}
+
 /** Check if a job is currently running for a given chatId */
 export function isJobActive(chatId: string): boolean {
   return activeJobs.has(chatId);
 }
 
-/** Abort a running background job by chatId. Returns true if a job was found and aborted. */
-export function abortJob(chatId: string): boolean {
+/**
+ * Abort a running background job by chatId. Returns true if a job was found
+ * and aborted.
+ *
+ * @param opts.preserveAutoPilotCounter — when true, the per-chat
+ *   `autoPilotIterations` count is NOT reset. This MUST be set on the
+ *   auto-pilot continuation dispatch: that path calls `dispatchAgentJob`
+ *   → `abortJob` on every iteration, and an unconditional reset here made
+ *   the counter cycle 0→1→0→1 forever, so `MAX_AUTO_PILOT_ITERATIONS` never
+ *   tripped and the runaway-billing guard was a no-op. A genuine user abort
+ *   (the default) still resets, so a manual resume starts from a clean budget.
+ */
+export function abortJob(
+  chatId: string,
+  opts: { preserveAutoPilotCounter?: boolean } = {}
+): boolean {
   const controller = activeJobs.get(chatId);
   // Always cancel any queued auto-pilot next-iteration, even if the
   // primary controller is gone — protects against the abort-during-backoff
@@ -83,7 +107,11 @@ export function abortJob(chatId: string): boolean {
   // from a fresh budget, not inherit the count from the cancelled run.
   // Without this, the Map grows unbounded for chats that were aborted but
   // never resumed (bounded leak, but architecturally untidy).
-  autoPilotIterations.delete(chatId);
+  // EXCEPTION: an auto-pilot continuation re-enters this function on every
+  // iteration — resetting there would defeat the iteration cap (see opts doc).
+  if (!opts.preserveAutoPilotCounter) {
+    autoPilotIterations.delete(chatId);
+  }
   if (controller) {
     controller.abort();
     activeJobs.delete(chatId);
@@ -102,12 +130,16 @@ export function abortJob(chatId: string): boolean {
  * This is crucial for local LLMs that may take hours to complete complex tasks.
  */
 export async function dispatchAgentJob(options: AgentJobPayload) {
-  // Cancel any previous job on the same chat
-  abortJob(options.chatId);
-  // Reset auto-pilot counter when user explicitly starts a new job
-  if (!options.userMessage.startsWith("System [Auto-Pilot]")) {
-    autoPilotIterations.delete(options.chatId);
-  }
+  // An auto-pilot continuation re-dispatches itself every iteration; its
+  // iteration counter MUST survive the abortJob below, otherwise the cap
+  // never trips. A user-initiated dispatch resets to a clean budget.
+  const isAutoPilotContinuation =
+    options.userMessage.startsWith("System [Auto-Pilot]");
+  // Cancel any previous job on the same chat (preserving the counter only
+  // for auto-pilot continuations).
+  abortJob(options.chatId, {
+    preserveAutoPilotCounter: isAutoPilotContinuation,
+  });
 
   const controller = new AbortController();
   activeJobs.set(options.chatId, controller);

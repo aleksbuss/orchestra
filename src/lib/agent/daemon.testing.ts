@@ -21,7 +21,10 @@
  * actual safety net. If you want to exclude this from prod bundles, add a
  * webpack/turbopack ignore rule for `*.testing.ts` in `next.config.mjs`.
  */
-import { __getAutoPilotTimeoutsForTesting } from "./daemon";
+import {
+  __getAutoPilotTimeoutsForTesting,
+  __getAutoPilotIterationsForTesting,
+} from "./daemon";
 
 function assertNotProduction(): void {
   if (process.env.NODE_ENV === "production") {
@@ -36,6 +39,24 @@ function assertNotProduction(): void {
 export function hasPendingAutoPilotTimeout(chatId: string): boolean {
   assertNotProduction();
   return __getAutoPilotTimeoutsForTesting().has(chatId);
+}
+
+/** Current auto-pilot iteration count for a chat (0 if absent). */
+export function getAutoPilotIterations(chatId: string): number {
+  assertNotProduction();
+  return __getAutoPilotIterationsForTesting().get(chatId) ?? 0;
+}
+
+/** Directly seed the iteration counter (test setup for the cap-bypass regression). */
+export function setAutoPilotIterations(chatId: string, n: number): void {
+  assertNotProduction();
+  __getAutoPilotIterationsForTesting().set(chatId, n);
+}
+
+/** Clear the iteration counter for a chat (test cleanup). */
+export function clearAutoPilotIterations(chatId: string): void {
+  assertNotProduction();
+  __getAutoPilotIterationsForTesting().delete(chatId);
 }
 
 /**

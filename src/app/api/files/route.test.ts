@@ -43,8 +43,8 @@ vi.mock("@/lib/storage/project-store", async () => {
   };
 });
 
-import { DELETE } from "./route";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { DELETE, GET } from "./route";
+import { getWorkDir, getProjectFiles } from "@/lib/storage/project-store";
 
 let tmpRoot: string;
 let workDir: string;
@@ -116,5 +116,43 @@ describe("DELETE /api/files — PM #6 path traversal", () => {
     const res = await DELETE(deleteRequest("readme.txt"));
     expect(res.status).toBe(200);
     await expect(fs.stat(path.join(workDir, "readme.txt"))).rejects.toThrow();
+  });
+});
+
+function getRequest(subPath?: string): NextRequest {
+  const url = new URL("http://localhost:3000/api/files");
+  url.searchParams.set("project", "foo");
+  if (subPath !== undefined) url.searchParams.set("path", subPath);
+  return new NextRequest(url, { method: "GET" });
+}
+
+describe("GET /api/files — path traversal (auth'd directory enumeration)", () => {
+  it("rejects ../.. traversal with 400 and never calls getProjectFiles", async () => {
+    // Without the route-layer guard, `path.join(workDir, "../..")` inside
+    // getProjectFiles fs.readdir's a directory OUTSIDE the project sandbox
+    // and returns a JSON listing of data/settings, data/chats, etc.
+    const res = await GET(getRequest("../.."));
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toMatch(/invalid/i);
+    expect(getProjectFiles).not.toHaveBeenCalled();
+  });
+
+  it("rejects sibling-prefix bypass (../foo-evil) with 400", async () => {
+    const res = await GET(getRequest("../foo-evil"));
+    expect(res.status).toBe(400);
+    expect(getProjectFiles).not.toHaveBeenCalled();
+  });
+
+  it("allows a legitimate in-sandbox subPath (reaches getProjectFiles)", async () => {
+    const res = await GET(getRequest("subdir"));
+    expect(res.status).toBe(200);
+    expect(getProjectFiles).toHaveBeenCalledWith("foo", "subdir");
+  });
+
+  it("allows empty subPath (project root listing)", async () => {
+    const res = await GET(getRequest());
+    expect(res.status).toBe(200);
+    expect(getProjectFiles).toHaveBeenCalledWith("foo", "");
   });
 });

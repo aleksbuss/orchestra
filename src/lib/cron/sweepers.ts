@@ -50,6 +50,13 @@ export interface SweepResult {
   errors: number;
   /** File paths that were removed — bounded to first 20 for log brevity. */
   removedSample: string[];
+  /**
+   * True when an orphan-keyed sweep was deliberately NOT run because the
+   * set of live chat ids could not be resolved (e.g. `getAllChats` threw on
+   * a transient FS error). Distinguishes "ran, found nothing" from "did not
+   * run" so the log doesn't look like a healthy zero-removal cycle.
+   */
+  skipped?: boolean;
 }
 
 /**
@@ -238,31 +245,50 @@ export async function runAllSweepers(): Promise<{
   // Dynamic import: keeps the module dependency-light at boot and lets
   // tests stub the chat-store without affecting the sweeper API surface.
   const { getAllChats } = await import("@/lib/storage/chat-store");
-  let chatIds: Set<string>;
+  // CRITICAL: a `null` chatIds means "live set unknown". The orphan sweepers
+  // treat "chatId not in this set" as "orphan → delete", so substituting an
+  // empty Set() here on a transient `getAllChats` failure (EMFILE/EACCES/
+  // EBUSY) would mass-`fs.unlink` EVERY queue entry and recursively `fs.rm`
+  // EVERY data/chat-files/<chatId>/ dir. That is irreversible. Fail SAFE:
+  // skip the orphan-keyed sweeps entirely this cycle, run only the
+  // chat-independent ones (tmp, ghost). The next healthy cycle catches up.
+  let chatIds: Set<string> | null = null;
   try {
     const items = await getAllChats();
     chatIds = new Set(items.map((c) => c.id));
   } catch (err) {
     console.warn(
-      "[sweepers] Could not enumerate chats for queue-orphan sweep:",
+      "[sweepers] Could not enumerate chats — SKIPPING orphan-keyed sweeps " +
+        "this cycle (fail-safe; will retry next cycle):",
       err instanceof Error ? err.message : String(err)
     );
-    chatIds = new Set();
   }
+
+  const skippedResult = (): SweepResult => ({
+    scanned: 0,
+    removed: 0,
+    errors: 0,
+    removedSample: [],
+    skipped: true,
+  });
 
   const [tmp, queue, chatFiles, ghost] = await Promise.all([
     sweepTempDir().catch((err) => {
       console.warn("[sweepers] sweepTempDir threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
     }),
-    sweepOrphanQueueEntries(chatIds).catch((err) => {
-      console.warn("[sweepers] sweepOrphanQueueEntries threw:", err);
-      return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
-    }),
-    sweepOrphanChatFiles(chatIds).catch((err) => {
-      console.warn("[sweepers] sweepOrphanChatFiles threw:", err);
-      return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
-    }),
+    chatIds
+      ? sweepOrphanQueueEntries(chatIds).catch((err) => {
+          console.warn("[sweepers] sweepOrphanQueueEntries threw:", err);
+          return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
+        })
+      : Promise.resolve(skippedResult()),
+    chatIds
+      ? sweepOrphanChatFiles(chatIds).catch((err) => {
+          console.warn("[sweepers] sweepOrphanChatFiles threw:", err);
+          return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
+        })
+      : Promise.resolve(skippedResult()),
     // Dynamic import keeps sweepers.ts independent of the agent layer —
     // the only edge it adds is a single fn call, and tests can stub the
     // module without touching the daemon/goal-store wiring.

@@ -133,6 +133,77 @@ describe("PM #32 — sweepOrphanQueueEntries", () => {
   });
 });
 
+describe("runAllSweepers — fail-safe when getAllChats throws (review bug_002)", () => {
+  it("SKIPS orphan-keyed sweeps and preserves queue + chat-files on transient FS error", async () => {
+    // Plant exactly the data a buggy `chatIds = new Set()` fallback would
+    // mass-delete: a queued job + an attachment dir. Both MUST survive when
+    // the live-chat enumeration fails — fail-safe, not fail-destructive.
+    const queue = path.join(tmpDir, "data", "queue");
+    await fs.mkdir(queue, { recursive: true });
+    await fs.writeFile(path.join(queue, "job-1.json"), "{}");
+    const chatDir = path.join(tmpDir, "data", "chat-files", "chat-1");
+    await fs.mkdir(chatDir, { recursive: true });
+    await fs.writeFile(path.join(chatDir, "a.png"), "x");
+
+    vi.resetModules();
+    vi.doMock("@/lib/storage/chat-store", () => ({
+      getAllChats: vi.fn(async () => {
+        throw new Error("EMFILE: too many open files");
+      }),
+    }));
+    vi.doMock("@/lib/agent/ghost-sweeper", () => ({
+      sweepGhostTasks: vi.fn(async () => undefined),
+    }));
+
+    const freshSweepers = await import("./sweepers");
+    const out = await freshSweepers.runAllSweepers();
+
+    // Orphan-keyed sweeps were skipped, not run-with-empty-set.
+    expect(out.queue.skipped).toBe(true);
+    expect(out.chatFiles.skipped).toBe(true);
+    expect(out.queue.removed).toBe(0);
+    expect(out.chatFiles.removed).toBe(0);
+
+    // The data is still on disk — the whole point.
+    await expect(
+      fs.access(path.join(queue, "job-1.json"))
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(chatDir, "a.png"))
+    ).resolves.toBeUndefined();
+
+    vi.doUnmock("@/lib/storage/chat-store");
+    vi.doUnmock("@/lib/agent/ghost-sweeper");
+  });
+
+  it("runs orphan sweeps normally when getAllChats succeeds (no false skip)", async () => {
+    const queue = path.join(tmpDir, "data", "queue");
+    await fs.mkdir(queue, { recursive: true });
+    await fs.writeFile(path.join(queue, "orphan.json"), "{}");
+
+    vi.resetModules();
+    vi.doMock("@/lib/storage/chat-store", () => ({
+      getAllChats: vi.fn(async () => [{ id: "live-1" }]),
+    }));
+    vi.doMock("@/lib/agent/ghost-sweeper", () => ({
+      sweepGhostTasks: vi.fn(async () => undefined),
+    }));
+
+    const freshSweepers = await import("./sweepers");
+    const out = await freshSweepers.runAllSweepers();
+
+    expect(out.queue.skipped).toBeFalsy();
+    // "orphan.json" → chatId "orphan" not in {live-1} → removed.
+    expect(out.queue.removed).toBe(1);
+    await expect(
+      fs.access(path.join(queue, "orphan.json"))
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    vi.doUnmock("@/lib/storage/chat-store");
+    vi.doUnmock("@/lib/agent/ghost-sweeper");
+  });
+});
+
 describe("PM #32 — ensureSweepersScheduled idempotency", () => {
   it("multi-call doesn't stack interval timers", () => {
     sweepers.ensureSweepersScheduled();

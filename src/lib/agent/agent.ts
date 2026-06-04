@@ -1583,6 +1583,13 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         const responseMessages = event.response.messages;
         const lastAssistantText = getLastAssistantText(responseMessages);
         let continuationText = "";
+        // PM #36 — auto-continuation is a real billing call (full context
+        // re-sent + up to 1200 output tokens). Capture its usage so it folds
+        // into chat.cumulativeUsage alongside streamUsage; dropping it
+        // under-reports the cost banner AND the per-chat USD cap.
+        let continuationUsage:
+          | import("@/lib/cost/accumulator").RawUsage
+          | undefined;
 
         if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
           try {
@@ -1605,6 +1612,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               abortSignal: options.abortSignal,
             });
             continuationText = (continuation.text || "").trim();
+            continuationUsage =
+              (continuation as unknown as {
+                usage?: import("@/lib/cost/accumulator").RawUsage;
+              }).usage ?? undefined;
           } catch (error) {
             // Auto-continuation is an enhancement (it extends a truncated
             // reply); silent console.warn meant the user never learned a
@@ -1664,6 +1675,16 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
               streamUsage
+            );
+            // PM #36 — fold the auto-continuation call's usage too. Same
+            // model handle as the outer streamText, so provider/model
+            // identity for the pricing lookup is unambiguous. Undefined
+            // (no continuation, or it threw) is a zero-add by construction.
+            next = addUsageToCumulative(
+              next,
+              resolvedModelConfig.provider,
+              resolvedModelConfig.model,
+              continuationUsage
             );
             if (turnExtraUsage) {
               next = mergeUsage(next, turnExtraUsage);
@@ -1848,6 +1869,12 @@ export async function runAgentText(options: {
   abortSignal?: AbortSignal;
 }): Promise<string> {
   const settings = await getSettings();
+  // PM #47 — Privacy Mode air-gap must hold on EVERY LLM entry point, not
+  // just the interactive `runAgent`. This is the cron + Telegram-relay path
+  // (the Telegram webhook is unauthenticated); without the guard a cloud
+  // `chatModel` would silently ship user data off-box while the UI shows
+  // Privacy Mode ON.
+  assertPrivacyModeAllowsSettings(settings);
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
   const model = createModel(settings.chatModel, {
     projectId: options.projectId,
@@ -2047,6 +2074,11 @@ export async function runSubordinateAgent(options: {
   parentChatId?: string;
 }): Promise<SubordinateResult> {
   const settings = await getSettings();
+  // PM #47 — defense-in-depth: the subordinate is normally entered via a
+  // parent `runAgent` that already enforced the air-gap, but the recursive
+  // path (Sprint 9) and any future direct caller must not be able to reach
+  // a cloud provider with Privacy Mode ON. One line, settings already in scope.
+  assertPrivacyModeAllowsSettings(settings);
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
   const model = createModel(settings.chatModel, {
     projectId: options.projectId,

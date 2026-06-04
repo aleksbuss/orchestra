@@ -16,9 +16,11 @@ import {
   assertChatBudget,
   ChatBudgetExceededError,
   checkChatBudget,
+  foldTurnUsage,
   mergeUsage,
   normalizeUsage,
 } from "./accumulator";
+import type { ChatUsage } from "@/lib/types";
 
 describe("normalizeUsage", () => {
   it("returns zero record on undefined / null", () => {
@@ -281,5 +283,75 @@ describe("Sprint 2 — assertChatBudget (throwing wrapper)", () => {
       expect((err as Error).message).toMatch(/\$7\.4200/);
       expect((err as Error).message).toMatch(/\$5\.00/);
     }
+  });
+});
+
+describe("foldTurnUsage — every billing surface is counted (PM #36 / bug_005)", () => {
+  // Unknown model → estimateCostFor returns knownPricing:false / $0, so costUsd
+  // stays 0 and we can assert on exact token sums without pricing arithmetic.
+  const P = "unknown-provider";
+  const M = "unknown-model-xyz";
+
+  it("sums stream + continuation + MoA token counts in one fold", () => {
+    const moa: ChatUsage = {
+      promptTokens: 5,
+      completionTokens: 3,
+      costUsd: 0,
+      fullyPriced: true,
+    };
+    const out = foldTurnUsage(undefined, P, M, {
+      streamUsage: { inputTokens: 100, outputTokens: 40 },
+      continuationUsage: { inputTokens: 30, outputTokens: 20 },
+      turnExtraUsage: moa,
+    });
+    expect(out.promptTokens).toBe(135); // 100 + 30 + 5
+    expect(out.completionTokens).toBe(63); // 40 + 20 + 3
+  });
+
+  it("REGRESSION (bug_005): continuationUsage is NOT dropped from the fold", () => {
+    const withCont = foldTurnUsage(undefined, P, M, {
+      streamUsage: { inputTokens: 100, outputTokens: 40 },
+      continuationUsage: { inputTokens: 1000, outputTokens: 200 },
+    });
+    const withoutCont = foldTurnUsage(undefined, P, M, {
+      streamUsage: { inputTokens: 100, outputTokens: 40 },
+    });
+    // The auto-continuation's 1200 tokens MUST land in the cumulative.
+    expect(withCont.promptTokens).toBe(1100);
+    expect(withCont.completionTokens).toBe(240);
+    expect(withCont.promptTokens).toBeGreaterThan(withoutCont.promptTokens);
+    expect(withCont.completionTokens).toBeGreaterThan(withoutCont.completionTokens);
+  });
+
+  it("undefined continuation/stream are zero-adds (no continuation fired)", () => {
+    const out = foldTurnUsage(undefined, P, M, {
+      streamUsage: { inputTokens: 50, outputTokens: 10 },
+      continuationUsage: undefined,
+    });
+    expect(out.promptTokens).toBe(50);
+    expect(out.completionTokens).toBe(10);
+  });
+
+  it("accumulates onto an existing cumulative base", () => {
+    const base: ChatUsage = {
+      promptTokens: 1000,
+      completionTokens: 500,
+      costUsd: 0,
+      fullyPriced: false,
+    };
+    const out = foldTurnUsage(base, P, M, {
+      streamUsage: { inputTokens: 10, outputTokens: 5 },
+      continuationUsage: { inputTokens: 10, outputTokens: 5 },
+    });
+    expect(out.promptTokens).toBe(1020);
+    expect(out.completionTokens).toBe(510);
+  });
+
+  it("omitting turnExtraUsage is fine (no MoA bundle this turn)", () => {
+    const out = foldTurnUsage(undefined, P, M, {
+      streamUsage: { inputTokens: 7, outputTokens: 7 },
+    });
+    expect(out.promptTokens).toBe(7);
+    expect(out.completionTokens).toBe(7);
   });
 });

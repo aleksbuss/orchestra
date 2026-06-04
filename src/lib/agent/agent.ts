@@ -9,7 +9,7 @@ import {
 } from "ai";
 import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
-import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
+import { foldTurnUsage } from "@/lib/cost/accumulator";
 import type { ModelConfig } from "@/lib/types";
 import {
   classifyModelError,
@@ -1666,30 +1666,17 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 options.userMessage.slice(0, 60) +
                 (options.userMessage.length > 60 ? "..." : "");
             }
-            // PM #36 — fold streamText turn usage + MoA bundle usage into
-            // the running per-chat cumulative. Resolved chat-model identity
-            // is captured in `resolvedModelConfig` from the outer scope.
-            let next = chat.cumulativeUsage;
-            next = addUsageToCumulative(
-              next,
+            // PM #36 — fold ALL of this turn's billing surfaces (main stream
+            // + auto-continuation + MoA bundle) into the running per-chat
+            // cumulative via the single accounting helper. Resolved chat-model
+            // identity comes from `resolvedModelConfig`; the continuation reuses
+            // the same model handle, so the pricing lookup is unambiguous.
+            chat.cumulativeUsage = foldTurnUsage(
+              chat.cumulativeUsage,
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
-              streamUsage
+              { streamUsage, continuationUsage, turnExtraUsage }
             );
-            // PM #36 — fold the auto-continuation call's usage too. Same
-            // model handle as the outer streamText, so provider/model
-            // identity for the pricing lookup is unambiguous. Undefined
-            // (no continuation, or it threw) is a zero-add by construction.
-            next = addUsageToCumulative(
-              next,
-              resolvedModelConfig.provider,
-              resolvedModelConfig.model,
-              continuationUsage
-            );
-            if (turnExtraUsage) {
-              next = mergeUsage(next, turnExtraUsage);
-            }
-            chat.cumulativeUsage = next;
             return chat;
           });
         } catch (saveErr) {

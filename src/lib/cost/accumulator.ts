@@ -91,6 +91,40 @@ export function mergeUsage(
 }
 
 /**
+ * Fold a single agent turn's usage into the running per-chat cumulative.
+ *
+ * A turn can bill across THREE surfaces and every one must be counted (PM #36):
+ *   - `streamUsage`       — the main `streamText` call.
+ *   - `continuationUsage` — the auto-continuation `generateText` call that
+ *     extends a length-truncated reply (full context re-sent + up to 1200
+ *     output tokens). Dropping this under-reports the cost banner AND the
+ *     per-chat USD cap on every truncated turn (the bug this helper closes).
+ *   - `turnExtraUsage`    — the MoA bundle (router + proposers + aggregator),
+ *     already summed into a single `ChatUsage` by the MoA layer.
+ *
+ * Centralising the fold keeps the contract in one testable place: a future
+ * refactor that forgets one source fails the unit test rather than silently
+ * leaking spend. Pure function — caller persists the result.
+ */
+export function foldTurnUsage(
+  base: ChatUsage | undefined,
+  provider: string,
+  modelId: string,
+  sources: {
+    streamUsage?: RawUsage | null;
+    continuationUsage?: RawUsage | null;
+    turnExtraUsage?: ChatUsage;
+  }
+): ChatUsage {
+  let next = addUsageToCumulative(base, provider, modelId, sources.streamUsage);
+  next = addUsageToCumulative(next, provider, modelId, sources.continuationUsage);
+  if (sources.turnExtraUsage) {
+    next = mergeUsage(next, sources.turnExtraUsage) ?? next;
+  }
+  return next;
+}
+
+/**
  * Sprint 2 — per-chat hard USD cap.
  *
  * `settings.costGuard.maxUsdPerChat` is optional and only enforced when set

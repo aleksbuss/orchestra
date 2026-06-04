@@ -38,6 +38,42 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 60. `runAllSweepers` was fail-destructive — a transient FS error wiped every queue entry + chat-files dir
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P0 (irreversible data loss)
+**Symptoms:** After a brief I/O hiccup, an operator's pending Auto-Pilot queue entries vanished and every chat's uploaded attachments (`data/chat-files/<chatId>/`) were gone. Chat history itself survived, so attachment references 404'd and queued work never resumed. No error surfaced beyond a single buried `console.warn`.
+**Detection:** Found by the 2026-06 ultrareview self-review of PR #1 (bug_002), not by an incident — but the failure path was live and reachable.
+**Root Cause:** `runAllSweepers` (`cron/sweepers.ts`) resolved the live-chat id set via `getAllChats()`. On ANY throw (EMFILE under fd pressure, EACCES, EBUSY — `rebuildChatIndex` does an un-guarded `fs.readdir(CHATS_DIR)`) the catch substituted `chatIds = new Set()` and proceeded. The orphan sweepers treat "chatId ∉ set" as "orphan → delete", so an empty set made `sweepOrphanQueueEntries` `fs.unlink` every queue file and `sweepOrphanChatFiles` recursively `fs.rm` every attachment dir. Fail-OPEN on a destructive operation is the worst posture.
+**Resolution:** `chatIds` is now `Set<string> | null`; `null` means "live set unknown". When `getAllChats` throws, the orphan-keyed sweeps are SKIPPED for the cycle (returning a `{ skipped: true }` `SweepResult`) while the chat-independent sweeps (`sweepTempDir`, `sweepGhostTasks`) still run. A legitimate empty result (`new Set()`, truthy) is preserved and still cleans orphans — only the "unknown" state skips. The next healthy cycle catches up.
+**Regression Coverage:** `src/lib/cron/sweepers.test.ts` — "runAllSweepers — fail-safe when getAllChats throws": asserts a planted queue entry + chat-files dir SURVIVE when `getAllChats` is mocked to throw, and that a successful enumeration still removes orphans (no false skip).
+**Doc Updates:** `CLAUDE.md` § Critical Rules §4 (sweeper fail-safe rule).
+**Rule:** A sweep that calls `fs.unlink`/`fs.rm` must FAIL-SAFE: if the "keep" set can't be resolved, skip the delete — never treat "unknown" as "empty", because empty means "everything is an orphan".
+
+## 59. Auto-pilot iteration cap was a silent no-op — counter wiped by `abortJob` every iteration
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P0 (infinite billing loop)
+**Symptoms:** A non-converging Auto-Pilot goal looped every ~3 seconds forever on the operator's API key. The UI permanently read "iteration 1/50" and the exponential backoff never climbed past 3 s, so `MAX_AUTO_PILOT_ITERATIONS = 50` never tripped. Visually indistinguishable from a healthy first iteration.
+**Detection:** 2026-06 ultrareview self-review of PR #1 (bug_001).
+**Root Cause:** `abortJob(chatId)` (`agent/daemon.ts`) unconditionally ran `autoPilotIterations.delete(chatId)`, and `dispatchAgentJob` calls `abortJob` as its first step on EVERY entry — including the Auto-Pilot continuation dispatch. So each iteration wiped the counter to 0, then `runBackgroundJob` set it back to 1: the count cycled 0→1→0→1 and `iterations >= 50` was never true. The pre-existing `if (!userMessage.startsWith("System [Auto-Pilot]"))` guard in `dispatchAgentJob` was dead on this path — `abortJob` had already deleted the key before it ran. With `costGuard.maxUsdPerChat` unset (the default), the iteration cap was the ONLY runaway-loop defense, and it was inert.
+**Resolution:** `abortJob` now takes `{ preserveAutoPilotCounter?: boolean }`; `dispatchAgentJob` sets it to `true` when the message is an Auto-Pilot continuation, so the counter accumulates across iterations. A genuine user abort (the default, e.g. `abort/route.ts`) still resets to a fresh budget.
+**Regression Coverage:** `src/lib/agent/daemon.test.ts` — "an auto-pilot continuation dispatch INCREMENTS the counter (does not reset to 1)" (seeds 5, asserts 6), plus the `preserveAutoPilotCounter` flag semantics and the user-reset path. New `__getAutoPilotIterationsForTesting` accessor in `daemon.testing.ts`.
+**Doc Updates:** `CLAUDE.md` § Critical Rules §3 (Daemon Limits — counter-reset semantics).
+**Rule:** A monotonic guard counter must survive the self-dispatch that increments it. If a function resets per-chat state AND is called at the top of the dispatch that's supposed to advance that state, the reset silently defeats the guard — gate the reset on "user-initiated vs. system continuation".
+
+## 58. Privacy Mode air-gap held only at `runAgent` — cron + Telegram + subordinate paths leaked to cloud
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P0 (silent data egress / compliance breach)
+**Symptoms:** With Privacy Mode ON and a cloud `chatModel`, interactive chat correctly refused — but every scheduled cron job and every inbound Telegram message silently called OpenAI/Anthropic/Google with the operator's key, while the UI badge still showed Privacy Mode enabled. The Telegram webhook is unauthenticated (`middleware.ts` `isPublicApi`), so an outside party who knew the endpoint could drive cloud LLM calls under a green privacy badge.
+**Detection:** 2026-06 ultrareview self-review of PR #1 (bug_008).
+**Root Cause:** `assertPrivacyModeAllowsSettings` (PM #47) was invoked at exactly one production callsite — `runAgent`. Two parallel LLM-entry functions in `agent.ts` skipped it: `runAgentText` (called by `cron/service.ts` and `external/handle-external-message.ts`) and `runSubordinateAgent` (called by `tools/call-subordinate.ts`). The PM #47 doc described "single chokepoint at runAgent entry" as a location, which read as a threat-model guarantee but wasn't one.
+**Resolution:** `assertPrivacyModeAllowsSettings(settings)` added immediately after `getSettings()` in both `runAgentText` and `runSubordinateAgent`, so the guard throws before `createModel`/`generateText`. Same posture as the AbortSignal and loop-guard contracts: the invariant must hold on EVERY entry point, not the one the original PR exercised.
+**Regression Coverage:** `src/lib/agent/agent-entrypoints-privacy.test.ts` — mocks `getSettings` to return privacy-on + cloud `chatModel` and asserts both `runAgentText` and `runSubordinateAgent` reject before reaching the model.
+**Doc Updates:** `CLAUDE.md` § Security Patterns (new "Privacy Mode air-gap — every LLM entry point" subsection).
+**Rule:** A security control enforced at "the" entry point is only as strong as the number of entry points. When you add a parallel `runAgent`-like function, it inherits ZERO of the guards from the original — re-apply the air-gap, the abortSignal plumb, and the loop-guard wrap explicitly.
+
 ## 57. Decomposition of `moa.ts` — Bringing the Orchestration File Back Under the Hard Cap
 **Date:** 2026-05
 **Status:** RESOLVED

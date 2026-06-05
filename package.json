@@ -9,7 +9,9 @@
   "scripts": {
     "dev": "next dev",
     "prebuild": "npm run lint",
-    "build": "next build --turbopack --no-lint",
+    "build": "node scripts/build-with-data-guard.mjs",
+    "build:raw": "next build --turbopack --no-lint",
+    "test:build-guard": "node --test scripts/build-with-data-guard.nodetest.mjs",
     "start": "next start",
     "lint": "eslint",
     "lint:strict": "eslint --max-warnings 0",

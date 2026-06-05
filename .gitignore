@@ -47,3 +47,6 @@ next-env.d.ts
 # python
 __pycache__/
 *.py[cod]
+
+# Build data-symlink guard manifest (crash-recovery breadcrumb)
+.next-data-symlink-guard.json

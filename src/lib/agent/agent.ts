@@ -21,7 +21,7 @@ import { saveSettings } from "@/lib/storage/settings-store";
 import { classifyChatError } from "@/lib/observability/classify-error";
 import { getCurrentTraceId, log } from "@/lib/observability/logger";
 import { dumpPostmortem } from "@/lib/observability/postmortem";
-import { buildSystemPrompt } from "@/lib/agent/prompts";
+import { buildSystemPrompt, PLAIN_CHAT_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
 import { createAgentTools } from "@/lib/tools/tool";
@@ -670,6 +670,45 @@ function stripThinkingTags(text: string): string {
  * Convert AI SDK ModelMessage to our ChatMessage format for storage.
  * Tool messages can contain multiple tool results, so this returns an array.
  */
+/**
+ * PM #61 — Models frequently emit the final `response` tool call as TEXT (a
+ * JSON code block like `{"call":"response","arguments":{"message":"..."}}`)
+ * instead of a native tool call — especially under heavy context (MoA) or on
+ * mid-tier models. Orchestra has no parser for that, so the real answer gets
+ * persisted as a raw JSON blob and the UI renders "no answer". This unwraps
+ * that shape and returns the inner message; non-matching text passes through
+ * unchanged (conservative — only unwraps when the WHOLE text is the call).
+ */
+export function unwrapSerializedResponseCall(text: string): string {
+  if (!text || !text.includes("response")) return text;
+  let body = text.trim();
+  // Strip a single surrounding ```json ... ``` (or bare ```) fence.
+  const fence = body.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?```$/);
+  if (fence) body = fence[1].trim();
+  if (!body.startsWith("{") || !body.endsWith("}")) return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return text;
+  }
+  const rec = asRecord(parsed);
+  if (!rec) return text;
+  const toolName = rec.call ?? rec.name ?? rec.tool ?? rec.function;
+  if (toolName !== "response") return text;
+  const args =
+    asRecord(rec.arguments) ?? asRecord(rec.input) ?? asRecord(rec.parameters) ?? rec;
+  const message =
+    typeof args.message === "string"
+      ? args.message
+      : typeof args.text === "string"
+        ? args.text
+        : typeof args.answer === "string"
+          ? args.answer
+          : null;
+  return message && message.trim() ? message : text;
+}
+
 function convertModelMessageToChatMessages(msg: ModelMessage, now: string): ChatMessage[] {
   if (msg.role === "tool") {
     // Tool result - AI SDK may include multiple tool-result parts in one message.
@@ -744,7 +783,7 @@ function convertModelMessageToChatMessages(msg: ModelMessage, now: string): Chat
       return [{
         id: crypto.randomUUID(),
         role: "assistant",
-        content: stripThinkingTags(textContent),
+        content: stripThinkingTags(unwrapSerializedResponseCall(textContent)),
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
         createdAt: now,
       }];
@@ -753,7 +792,7 @@ function convertModelMessageToChatMessages(msg: ModelMessage, now: string): Chat
     return [{
       id: crypto.randomUUID(),
       role: "assistant",
-      content: typeof content === "string" ? stripThinkingTags(content) : "",
+      content: typeof content === "string" ? stripThinkingTags(unwrapSerializedResponseCall(content)) : "",
       createdAt: now,
     }];
   }
@@ -1531,6 +1570,14 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
 
   if (!useTools) {
     console.log(`[Agent] ⚠ Model "${resolvedModelConfig.model}" does not support tools → running in plain chat mode`);
+    // PM #61 — the system prompt is built for TOOL mode (it mandates the
+    // `response` tool, describes tool usage, goal trees, self-healing loops).
+    // In plain-chat mode NO tools are forwarded, but the model still receives
+    // that prompt. Tool-trained models (e.g. google/gemma-4-31b-it) then emit
+    // literal `<call:tool .../>` text instead of an answer — which Orchestra
+    // has no parser for, so it ships to the chat as garbage and the user sees
+    // "no answer". Override the tool mandate so the model replies in prose.
+    systemPrompt += PLAIN_CHAT_TOOL_OVERRIDE;
   } else {
     console.log(`[Agent] Tools enabled: ${Object.keys(tools).length} tools registered`);
   }

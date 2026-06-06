@@ -64,6 +64,22 @@ async function getAllProjectFilesRecursive(
 }
 
 /**
+ * PM #61 — appended to the system prompt when the agent runs in plain-chat
+ * mode (the selected model can't call tools, so no tools are forwarded). The
+ * rest of the prompt is written for tool mode and mandates the `response`
+ * tool + `<call:...>` usage; without this override, tool-trained models emit
+ * literal tool-call text instead of an answer. Kept as an exported constant
+ * so the contract is greppable and unit-testable.
+ */
+export const PLAIN_CHAT_TOOL_OVERRIDE =
+  "\n\n## ⚠️ PLAIN-CHAT MODE — NO TOOLS AVAILABLE\n" +
+  "The selected model cannot call tools, so NO tools are available this turn. " +
+  "Disregard every earlier instruction about calling tools, the `response` tool, " +
+  "goal trees, self-healing loops, or `<call:...>` / function-call syntax — none of " +
+  "that applies now. Reply to the user directly in natural-language prose. Do NOT " +
+  "output any tool-call markup, XML-like tags, or function-call syntax; just write the answer.";
+
+/**
  * Build the complete system prompt for the agent
  */
 export async function buildSystemPrompt(options: {

@@ -1062,7 +1062,12 @@ async function runSubAgent(
       maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
       abortSignal,
     });
-    const responseText = getLastResponseToolText(result.response.messages) || result.text;
+    // PM #61 — unwrap a serialized `response` call if the model emitted it as
+    // text (JSON/`<call:>`); no-op on clean text. Applies to the swarm-agent
+    // result returned into the parent's context.
+    const responseText = unwrapSerializedResponseCall(
+      getLastResponseToolText(result.response.messages) || result.text
+    );
     const outputText = responseText.trim() || "Agent finished but returned no text.";
 
     // DAG: publish agent_node completed
@@ -1997,7 +2002,9 @@ export async function runAgentText(options: {
       Array.isArray(responseMessages) && responseMessages.length > 0
         ? getLastResponseToolText(responseMessages) || getLastAssistantText(responseMessages)
         : "";
-    const finalText = text.trim() ? text : fallbackReply;
+    // PM #61 — runAgentText powers cron + the Telegram reply; unwrap a
+    // serialized `response` call so those channels never ship a raw JSON blob.
+    const finalText = unwrapSerializedResponseCall(text.trim() ? text : fallbackReply);
 
     try {
       await updateChat(options.chatId, (latest) => {
@@ -2194,9 +2201,13 @@ export async function runSubordinateAgent(options: {
       result as unknown as { response?: { messages?: ModelMessage[] } }
     ).response?.messages;
 
-    const responseText = (Array.isArray(responseMessages) && responseMessages.length > 0)
-      ? getLastResponseToolText(responseMessages) || result.text
-      : result.text;
+    // PM #61 — unwrap a text-serialized `response` call before the subordinate
+    // result flows back into the parent agent's context.
+    const responseText = unwrapSerializedResponseCall(
+      (Array.isArray(responseMessages) && responseMessages.length > 0)
+        ? getLastResponseToolText(responseMessages) || result.text
+        : result.text
+    );
 
     const text =
       responseText.trim() || "Subordinate agent finished but returned no text.";

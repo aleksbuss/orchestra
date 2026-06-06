@@ -38,6 +38,25 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 61. Final answer never reached the chat — the `response` tool call was emitted as TEXT, not a tool call
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (user-visible: agent runs, no answer shown)
+**Symptoms:** Operator asks a question; MoA proposers / tools visibly run (the DAG works, `data/chats/<id>.json` grows), but no assistant answer appears in the chat. Reproduced across models, free AND paid. The persisted assistant message, when inspected, was either a raw JSON blob `{"call":"response","arguments":{"message":"<the real answer>"}}` or literal `<call:tool .../>` text.
+**Detection:** Operator report ("subagents worked, no answer written"), then reproduced live via `POST /api/chat` (background) + inspecting `data/chats/<id>.json` — the answer was present but wrapped/garbled in the message content.
+**Root Cause:** Orchestra delivers the final answer through a `response` tool (`prompts.ts`/`system.md`: "Always respond using the response tool; your answer does not go to the user otherwise"; the stream loop stops on `hasToolCall("response")`). Two failure modes leave the answer trapped:
+  1. **Tool-capable models** (e.g. `deepseek/deepseek-chat`), especially under heavy context (MoA injects a 13–17k-token prompt), emit the `response` call as a TEXT JSON code block instead of a native tool call. `getLastResponseToolText` only reads real tool-call/tool-result parts, so it returns nothing and `convertModelMessageToChatMessages` persists the raw JSON as the assistant content. There was no text-level parser for a serialized tool call.
+  2. **Non-tool models** (anything matching `NO_TOOL_PATTERNS`, e.g. gemma) run in plain-chat mode (`useTools=false`, `effectiveTools={}`), but the system prompt was still the full TOOL-mode prompt (mandating the response tool + `<call:...>` usage). Tool-trained models then emit `<call:search_web .../>` / `<call:response .../>` text instead of prose.
+  Aggravating config factor: invalid model ids like `google/gemma-4-31b-it` (gemma-4 does not exist) return OpenRouter "No endpoints found", trip the free-model fallback, and can yield empty output — which looked like the same bug.
+**Resolution:**
+  1. `unwrapSerializedResponseCall(text)` (`agent.ts`) — conservatively detects a whole-text serialized `response` call (fenced or bare JSON with `call/name/tool/function === "response"` and `arguments/input/parameters.message`) and returns the inner message; non-matching text passes through. Applied at the single persistence chokepoint `convertModelMessageToChatMessages` (covers stream + non-stream paths).
+  2. `PLAIN_CHAT_TOOL_OVERRIDE` (`prompts.ts`) — appended to the system prompt when `useTools=false`, instructing the model to ignore tool/response-tool/`<call:...>` instructions and answer in plain prose.
+**Regression Coverage:** `src/lib/agent/unwrap-response.test.ts` (10 cases — fenced/bare JSON, field variants, conservative no-ops on prose, non-response JSON, malformed JSON, empty-message fallback). E2E verified live: deepseek-chat + Swarm → clean 998-char prose answer; local non-tool `gemma3:4b` plain-chat → clean prose.
+**Doc Updates:** `CLAUDE.md` § Core Subsystems (response-tool robustness rule).
+**Rule:** Any mechanism that requires the model to emit structured output (a specific tool call, JSON, XML) MUST have a text-level fallback parser — mid-tier and heavily-prompted models routinely emit the structure as prose/code-fence instead. And when a feature is gated behind a model capability (tools), the prompt for the no-capability path must be DIFFERENT, not the capability-assuming prompt with the calls stripped.
+
+---
+
 ## 60. `runAllSweepers` was fail-destructive — a transient FS error wiped every queue entry + chat-files dir
 **Date:** 2026-06
 **Status:** RESOLVED

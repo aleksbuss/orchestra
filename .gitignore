@@ -53,3 +53,6 @@ __pycache__/
 
 # E2E isolated data dir (PM #62 — never the real data/)
 .e2e-data/
+scratch.ts
+/scratch/
+playwright-report/

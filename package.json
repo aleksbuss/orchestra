@@ -2,6 +2,16 @@
   "name": "orchestra",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
+  "description": "Local-first AI workspace with a real Mixture-of-Agents (MoA) pipeline. Self-hosted, BYOK.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aleksbuss/orchestra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/aleksbuss/orchestra/issues"
+  },
+  "homepage": "https://github.com/aleksbuss/orchestra#readme",
   "engines": {
     "node": ">=22.0.0",
     "npm": ">=10.0.0"

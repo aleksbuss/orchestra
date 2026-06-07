@@ -1,6 +1,6 @@
 
 import fs from "fs/promises";
-import { LoadedDocument } from "./index";
+import type { LoadedDocument } from "./types";
 
 export async function loadText(filePath: string): Promise<LoadedDocument> {
     const content = await fs.readFile(filePath, "utf-8");

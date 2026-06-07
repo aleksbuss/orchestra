@@ -43,7 +43,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { safeWriteFile } from "@/lib/storage/fs-utils";
-import type { ModelPricing } from "./pricing";
+import type { ModelPricing } from "./pricing-types";
 import { getDataDir } from "@/lib/storage/data-dir";
 
 /**

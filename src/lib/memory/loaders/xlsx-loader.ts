@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs/promises";
 import * as XLSX from "xlsx";
-import type { LoadedDocument } from "./index";
+import type { LoadedDocument } from "./types";
 
 /**
  * Load Excel (.xlsx, .xls) file and convert sheets to text (CSV-style) for vectorization.

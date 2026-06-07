@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import mammoth from "mammoth";
-import type { LoadedDocument } from "./index";
+import type { LoadedDocument } from "./types";
 
 /**
  * Load DOCX (Word) document and extract plain text for vectorization.

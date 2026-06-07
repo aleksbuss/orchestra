@@ -28,13 +28,11 @@
 // here, and we want the type re-export to win). The function itself is
 // a pure synchronous Map.get, so the indirection is cheap.
 import { getCachedOpenRouterPricing } from "./openrouter-pricing";
+import type { ModelPricing } from "./pricing-types";
 
-export interface ModelPricing {
-  /** USD charged per 1,000,000 prompt tokens. */
-  inputUsdPerMillion: number;
-  /** USD charged per 1,000,000 completion tokens. */
-  outputUsdPerMillion: number;
-}
+// Canonical definition lives in ./pricing-types (breaks the openrouter-pricing
+// cycle); re-exported here so existing `from "./pricing"` importers still work.
+export type { ModelPricing } from "./pricing-types";
 
 export interface UsageRecord {
   promptTokens: number;

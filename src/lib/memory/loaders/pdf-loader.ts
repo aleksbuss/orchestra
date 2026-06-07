@@ -1,6 +1,6 @@
 
 import fs from "fs/promises";
-import { LoadedDocument } from "./index";
+import type { LoadedDocument } from "./types";
 
 // Define strict types for the local variables to avoid "any"
 /* eslint-disable @typescript-eslint/no-explicit-any */

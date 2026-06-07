@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs/promises";
 import { createWorker } from "tesseract.js";
-import type { LoadedDocument } from "./index";
+import type { LoadedDocument } from "./types";
 
 /**
  * Absolute path to Tesseract Node worker script.

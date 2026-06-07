@@ -28,56 +28,8 @@
  *   - The visual onboarding wizard (multi-step, has its own coverage in
  *     `swarm.spec.ts`).
  */
-import { test, expect, request as pwRequest } from "@playwright/test";
-
-const TEST_PASSWORD = "orchestra-e2e-pw-9!";
-const BASE_URL = "http://localhost:3000";
-
-/**
- * Programmatic login + credentials-rotation. Uses the API directly to
- * sidestep the multi-step UI onboarding wizard — that flow has its own
- * coverage and isn't what this spec is regression-testing.
- *
- * Returns the auth cookie value, which we inject into the browser
- * context. The cookie carries `mustChangeCredentials: false`, so
- * middleware lets us straight through to the chat UI.
- */
-async function loginViaApi(): Promise<{ name: string; value: string; domain: string; path: string }[]> {
-  const ctx = await pwRequest.newContext({ baseURL: BASE_URL });
-
-  // Step 1: login with admin/admin (default after `npm run auth:reset`).
-  let loginRes = await ctx.post("/api/auth/login", {
-    data: { username: "admin", password: "admin" },
-  });
-
-  // If admin/admin doesn't work, the password was rotated on a previous
-  // run. Try our test password — same outcome.
-  if (loginRes.status() !== 200) {
-    loginRes = await ctx.post("/api/auth/login", {
-      data: { username: "admin", password: TEST_PASSWORD },
-    });
-  }
-  expect(
-    loginRes.status(),
-    "could not log in with either admin/admin or the test password. " +
-      "Run `npm run auth:reset` and try again."
-  ).toBe(200);
-
-  // Step 2: if the response says mustChangeCredentials, rotate it. After
-  // this the session cookie carries the post-rotation state.
-  const loginBody = await loginRes.json();
-  if (loginBody.mustChangeCredentials) {
-    const rotateRes = await ctx.put("/api/auth/credentials", {
-      data: { username: "admin", password: TEST_PASSWORD },
-    });
-    expect(rotateRes.status()).toBe(200);
-  }
-
-  // Pull the cookies out so we can inject them into the browser context.
-  const state = await ctx.storageState();
-  await ctx.dispose();
-  return state.cookies.filter((c) => c.name === "orchestra_auth");
-}
+import { test, expect } from "@playwright/test";
+import { loginViaApi } from "./helpers";
 
 test.describe("send-message — golden path", () => {
   test("user can send a message and the chat API does not 500", async ({
@@ -117,6 +69,19 @@ test.describe("send-message — golden path", () => {
     // Sidebar / settings UIs use plain inputs, not textareas.
     const chatInput = page.locator("textarea").first();
     await chatInput.waitFor({ state: "visible", timeout: 15000 });
+
+    // ── 4b. Disable Swarm for the smoke path ─────────────────────────
+    // Swarm (default ON) runs the full MoA ensemble (5 proposers) BEFORE the
+    // interactive stream's HTTP response is returned, which blocks the POST
+    // response well past a smoke-test timeout. This test only asserts "the
+    // chat API does not 500" — Swarm has its own spec — so turn it off to
+    // exercise the fast single-model path.
+    const swarmToggle = page.getByLabel("Toggle Swarm mode");
+    if (await swarmToggle.isVisible({ timeout: 5000 }).catch(() => false)) {
+      if ((await swarmToggle.getAttribute("aria-pressed")) === "true") {
+        await swarmToggle.click();
+      }
+    }
 
     // ── 5. Send a message + intercept the API call ───────────────────
     // We don't care what the LLM says back. We care that:

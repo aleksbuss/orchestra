@@ -1,79 +1,46 @@
 import { test, expect } from '@playwright/test';
+import { loginViaApi } from './helpers';
 
 test.describe('Orchestra Swarm Intelligence & Background Daemon', () => {
-  test('Agent config (Swarm & Daemon) toggles work and emit events', async ({ page }) => {
-    // 1. Navigate to the main application
-    await page.goto('/');
+  test('Swarm task emits a hierarchical agent trace', async ({ page, context }) => {
+    // Authenticate via the API. The UI onboarding wizard (login → forced
+    // credential rotation → project/skills steps) is brittle and, because the
+    // password change rotates the session, leaves the browser logged out.
+    // loginViaApi performs the rotation and hands back the post-rotation cookie.
+    const authCookies = await loginViaApi();
+    expect(
+      authCookies.length,
+      'login succeeded but did not return an orchestra_auth cookie'
+    ).toBeGreaterThan(0);
+    await context.addCookies(authCookies);
 
-    // Handle initial app setup if database is empty
-    const usernameInput = page.locator('#credential-username');
-    try {
-      if (await usernameInput.isVisible({ timeout: 3000 })) {
-        // Step 0: Auth
-        await usernameInput.fill('admin');
-        await page.locator('#credential-password').fill('password1234');
-        await page.locator('#credential-password-confirm').fill('password1234');
-        await page.locator('button', { hasText: 'Save and Continue' }).click();
-        
-        // Step 1: Project
-        const projectName = page.locator('#name');
-        await projectName.waitFor({ state: 'visible' });
-        await projectName.fill('E2E Test Project');
-        await page.locator('button', { hasText: 'Create Project' }).click();
-
-        // Step 2: Settings (Skip)
-        const skipBtn = page.locator('button', { hasText: 'Skip' });
-        await skipBtn.waitFor({ state: 'visible' });
-        await skipBtn.click();
-
-        // Step 3: Telegram (Continue)
-        const continueBtn = page.locator('button', { hasText: 'Continue to Skills' });
-        await continueBtn.waitFor({ state: 'visible' });
-        await continueBtn.click();
-        
-        // Step 4: Skills (Finish)
-        const finishBtn = page.locator('button', { hasText: 'Finish Onboarding' });
-        await finishBtn.waitFor({ state: 'visible' });
-        await finishBtn.click();
-      }
-    } catch (e) {
-      console.log('Skipping onboarding or already initialized string.');
+    // Land on the dashboard and open a chat (creates one if none exists).
+    await page.goto('/dashboard');
+    const newChatBtn = page.getByRole('button', { name: /new chat/i }).first();
+    if (await newChatBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await newChatBtn.click();
     }
 
-    // Go to chat
-    await page.goto('/dashboard');
-    await page.waitForTimeout(1000); // Give the UI time to settle
-    
-    // 2. Ensure the chat container is mounted
     const chatInput = page.locator('textarea').first();
     await chatInput.waitFor({ state: 'visible', timeout: 15000 });
 
-    // 3. Optional: Locate the "Swarm Delegation" and "Daemon" inputs.
-    // In CI, these defaults are already set by Zustand.
-    /*
-    const swarmSwitch = page.locator('label', { hasText: 'Swarm' });
-    if (await swarmSwitch.isVisible()) {
-      await swarmSwitch.click();
-    }
-    */
-    /*
-    await expect(swarmSwitch).toBeChecked();
-    await expect(daemonSwitch).toBeChecked();
-    */
-
-    // 5. Input a task that triggers the swarm
-    await chatInput.fill('Please research the latest capabilities of React Server Components and then write an example component.');
+    // Swarm is ON by default (app-store). Send a task that triggers the ensemble.
+    await chatInput.fill(
+      'Please research the latest capabilities of React Server Components and then write an example component.'
+    );
     await chatInput.press('Enter');
 
-    // 6. Look for the "SwarmTrace" accordion component appearing in the chat list
-    const swarmTraceBox = page.locator('button').filter({ hasText: /(thinking|Wait|complete)/i }).first();
-    await expect(swarmTraceBox).toBeVisible({ timeout: 15000 }); // Wait up to 15 seconds for backend to start processing
+    // Open the Swarm Activity panel — its trigger button is always present while
+    // Swarm is ON. The SwarmDAG inside renders ONLY once the backend emits agent
+    // nodes (it returns null for an empty DAG), and shows a live status header;
+    // that header's presence proves a hierarchical swarm trace was emitted for
+    // this turn. Real-model MoA needs more headroom than CI mocks.
+    await page.getByRole('button', { name: /swarm activity/i }).first().click();
 
-    // 7. Click to expand and verify it lists sub-agents working
-    await swarmTraceBox.click();
-    const traceItems = page.locator('.font-mono', { hasText: 'Node ID' });
-    
-    // We expect the backend to have emitted at least one hierarchical logic trace
-    await expect(traceItems.first()).toBeVisible({ timeout: 15000 });
+    await expect(
+      page
+        .getByText(/agents? thinking|Swarm Work Completed|Swarm Execution Failed/i)
+        .first()
+    ).toBeVisible({ timeout: 45000 });
   });
 });

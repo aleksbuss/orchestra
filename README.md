@@ -111,6 +111,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 | `TELEGRAM_BOT_TOKEN` | No | Telegram bot gateway |
 | `ORCHESTRA_AUTH_COOKIE_SECURE` | No | Force `Secure` cookie (auto-detect HTTPS otherwise) |
 | `ORCHESTRA_LOG_TO_FILE` | No | Write structured JSONL logs to `data/logs/` |
+| `ORCHESTRA_DATA_DIR` | No | Override the data root (default `<cwd>/data`). Point at a throwaway dir to isolate tests/dev runs without touching real data. |
 | `ORCHESTRA_DISABLE_AUTH` | Local dev only | Skip auth entirely (`true`) — never enable on a reachable deployment |
 
 ---

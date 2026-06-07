@@ -2,6 +2,7 @@ import { getSettings } from "@/lib/storage/settings-store";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { getBrokenChatFiles } from "@/lib/storage/chat-store";
+import { getDataDir, dataPath } from "@/lib/storage/data-dir";
 import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
@@ -193,7 +194,7 @@ export async function GET() {
   // 5. Data directory
   try {
     const fs = await import("fs/promises");
-    const dataDir = process.cwd() + "/data";
+    const dataDir = getDataDir();
     await fs.access(dataDir);
     const entries = await fs.readdir(dataDir);
     checks.push({
@@ -217,8 +218,7 @@ export async function GET() {
   // warns — not knowing the disk state is worse than knowing it's full.
   try {
     const fs = await import("fs/promises");
-    const path = await import("path");
-    const dataDir = path.join(process.cwd(), "data");
+    const dataDir = getDataDir();
     const stats = await fs.statfs(dataDir);
     const totalBytes = stats.blocks * stats.bsize;
     const freeBytes = stats.bavail * stats.bsize;
@@ -256,7 +256,7 @@ export async function GET() {
   try {
     const fs = await import("fs/promises");
     const path = await import("path");
-    const memoryRoot = path.join(process.cwd(), "data", "memory");
+    const memoryRoot = dataPath("memory");
     let subdirs: string[] = [];
     try {
       subdirs = await fs.readdir(memoryRoot);
@@ -356,8 +356,7 @@ export async function GET() {
       });
     } else {
       const fs = await import("fs/promises");
-      const path = await import("path");
-      const tracesDir = path.join(process.cwd(), "data", "traces");
+      const tracesDir = dataPath("traces");
       let entries: string[] = [];
       try {
         entries = await fs.readdir(tracesDir);
@@ -387,11 +386,7 @@ export async function GET() {
   // 9. OpenRouter pricing cache (PM #53 — surface PM #49 state)
   try {
     const fs = await import("fs/promises");
-    const path = await import("path");
-    const cachePath = path.join(
-      process.cwd(),
-      "data",
-      "cache",
+    const cachePath = dataPath("cache",
       "openrouter-pricing.json"
     );
     let raw: string | null = null;

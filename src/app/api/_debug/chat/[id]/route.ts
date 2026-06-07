@@ -27,11 +27,12 @@ import path from "path";
 import { NextRequest } from "next/server";
 import { getChat } from "@/lib/storage/chat-store";
 import { isJobActive } from "@/lib/agent/daemon";
+import { dataPath } from "@/lib/storage/data-dir";
 
 export const dynamic = "force-dynamic";
 
 const MAX_RECENT_LOG_LINES = 20;
-const LOGS_DIR = path.join(process.cwd(), "data", "logs");
+const LOGS_DIR = dataPath("logs");
 
 /**
  * Tail the last N lines of a JSONL file that match a `chatId` field.

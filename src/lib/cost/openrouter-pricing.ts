@@ -44,6 +44,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { safeWriteFile } from "@/lib/storage/fs-utils";
 import type { ModelPricing } from "./pricing";
+import { getDataDir } from "@/lib/storage/data-dir";
 
 /**
  * OpenRouter `/api/v1/models` response shape (subset we use).
@@ -78,7 +79,7 @@ let inMemoryFetchedAt: number | null = null;
 function dataDir(): string {
   // Mirrors the convention used by chat-store / project-store — `data/`
   // at the repo root, overridable via env for tests.
-  return process.env.ORCHESTRA_DATA_DIR || path.join(process.cwd(), "data");
+  return getDataDir();
 }
 
 function cacheFilePath(): string {

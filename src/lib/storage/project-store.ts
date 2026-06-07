@@ -14,8 +14,9 @@ import { deleteChatsByProjectId } from "@/lib/storage/chat-store";
 import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { assertPathInside, safeWriteFile, withFileLock } from "./fs-utils";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 
 /** ID used for "No Project (Global)" — work dir is data/projects */

@@ -1,7 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const INTEGRATIONS_DIR = path.join(DATA_DIR, "integrations");
 const TELEGRAM_DIR = path.join(INTEGRATIONS_DIR, "telegram");
 const PROCESSED_UPDATES_FILE = path.join(TELEGRAM_DIR, "processed-updates.json");

@@ -42,6 +42,7 @@ import crypto from "crypto";
 import { safeWriteFile } from "@/lib/storage/fs-utils";
 import { embedTexts } from "@/lib/memory/embeddings";
 import type { AppSettings, ModelConfig } from "@/lib/types";
+import { getDataDir } from "@/lib/storage/data-dir";
 
 export interface TraceSignals {
   /** Fraction of proposers that returned a non-error draft. 0-1. */
@@ -131,7 +132,7 @@ export function computeTraceId(userPrompt: string): string {
 }
 
 function dataDir(): string {
-  return process.env.ORCHESTRA_DATA_DIR || path.join(process.cwd(), "data");
+  return getDataDir();
 }
 
 /**

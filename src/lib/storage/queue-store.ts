@@ -2,8 +2,9 @@ import fs from "fs/promises";
 import path from "path";
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
 import type { AgentJobPayload } from "@/lib/agent/daemon";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const QUEUE_DIR = path.join(DATA_DIR, "queue");
 
 async function ensureDir() {

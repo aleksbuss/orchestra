@@ -1,7 +1,8 @@
 import fs from "fs/promises";
 import path from "path";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const EXTERNAL_SESSIONS_DIR = path.join(DATA_DIR, "external-sessions");
 const GLOBAL_CONTEXT_KEY = "__global__";
 const SESSION_ID_REGEX = /^[a-zA-Z0-9._:-]{1,128}$/;

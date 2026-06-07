@@ -38,6 +38,22 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 62. Data root was un-isolatable → test isolation moved the live `data/` → 34 user chats permanently lost
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P0 (irreversible user-data loss)
+**Symptoms:** 34 of the operator's chat conversations vanished — `chat-index.json` still listed 41 chats but only 7 `data/chats/*.json` files remained. Unrecoverable: no Time Machine destination configured, no APFS local snapshots, `data/` is gitignored, and no attachment/postmortem/trace held the bodies.
+**Detection:** Noticed a size/count drop (`463 MB / 36 chats` → `258 MB / 7 chats`) immediately after a sequence of test-isolation operations; confirmed via index-vs-files mismatch.
+**Root Cause:** The on-disk data root was hardcoded as `path.join(process.cwd(), "data")`, duplicated across ~30 modules (storage layer, routes, cron, observability, tools) **with no override hook**. To run the destructive Playwright E2E suite (it calls `auth:reset` and writes chats/projects) against a clean DB, the only apparent option was to physically `mv` the live `data/` aside and restore it afterward. Repeating that move/restore dance — `rm -rf data` paired with a restore — across turns lost the real chat files (the exact mis-step was never pinpointed, which is itself the lesson: a process that *can* lose data this way is the defect).
+**Resolution:**
+  1. **Single source of truth** — `src/lib/storage/data-dir.ts` exports `getDataDir()` / `dataPath()`, honoring `ORCHESTRA_DATA_DIR` (absolute or cwd-relative; falls back to `<cwd>/data`). Every one of the ~30 `path.join(process.cwd(), "data")` sites now routes through it, plus `scripts/auth-reset.ts`.
+  2. **First-class, safe isolation** — Playwright's `tests/e2e/global-setup.ts` builds a fresh isolated dir, copies the operator's settings read-only, and runs `auth:reset` scoped to it; `playwright.config.ts` sets `ORCHESTRA_DATA_DIR=.e2e-data`, passes it to the dev server via `webServer.env`, and uses `reuseExistingServer: false`. global-setup hard-refuses if `ORCHESTRA_DATA_DIR` resolves to the real `data/`.
+**Regression Coverage:** `src/lib/storage/data-dir.test.ts` (env override / relative / empty / default). Verified empirically: a dev server AND the full E2E suite run with `ORCHESTRA_DATA_DIR` set leave the real `data/` **byte-for-byte unchanged** (md5 of `data/chats`+`data/settings` identical before/after).
+**Doc Updates:** `CLAUDE.md` § Data Layout (ORCHESTRA_DATA_DIR), `README` env docs.
+**Rule:** NEVER `mv`/`rm` a user's live data directory to isolate a test or dev run. Data location must be a single, env-overridable resolver (`getDataDir()`); isolate by pointing `ORCHESTRA_DATA_DIR` at a throwaway dir, never by moving the original. Any new code that needs the data root MUST call `getDataDir()`/`dataPath()` — a fresh `path.join(process.cwd(), "data")` is a defect (grep for it in review).
+
+---
+
 ## 61. Final answer never reached the chat — the `response` tool call was emitted as TEXT, not a tool call
 **Date:** 2026-06
 **Status:** RESOLVED

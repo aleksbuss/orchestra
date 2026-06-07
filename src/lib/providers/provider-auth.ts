@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import type { ChatAuthMethod } from "@/lib/types";
+import { getDataDir } from "@/lib/storage/data-dir";
 
 export type CliProvider = "codex-cli" | "gemini-cli";
 
@@ -116,7 +117,7 @@ function collectHomeCandidates(): string[] {
   addCandidate(process.env.HOME);
   addCandidate("/home/node");
   addCandidate("/root");
-  addCandidate(path.join(process.cwd(), "data"));
+  addCandidate(getDataDir());
 
   for (const dir of listChildDirs("/home")) {
     addCandidate(dir);

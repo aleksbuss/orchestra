@@ -3,8 +3,9 @@ import path from "path";
 import { importKnowledge } from "@/lib/memory/knowledge";
 import { getSettings } from "@/lib/storage/settings-store";
 import { assertPathInside } from "@/lib/storage/fs-utils";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const KNOWLEDGE_ROOT = path.join(DATA_DIR, "knowledge");
 
 // Memory subdir must be a flat identifier — not a path. We use it as a

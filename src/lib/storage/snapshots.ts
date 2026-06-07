@@ -36,11 +36,12 @@
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
+import { dataPath } from "@/lib/storage/data-dir";
 
 // Computed lazily on each call so tests can stub `process.cwd()`. Module-load-
 // time capture would freeze the path before tests have a chance to redirect it.
 function getSnapshotsRoot(): string {
-  return path.join(process.cwd(), "data", "snapshots");
+  return dataPath("snapshots");
 }
 const MAX_SNAPSHOTS_PER_PROJECT = 200;
 

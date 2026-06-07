@@ -1,7 +1,7 @@
 import { getSettings } from "@/lib/storage/settings-store";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
-import { getBrokenChatFiles } from "@/lib/storage/chat-store";
+import { getBrokenChatFiles, getOrphanIndexEntries } from "@/lib/storage/chat-store";
 import { getDataDir, dataPath } from "@/lib/storage/data-dir";
 import {
   assertSafeOutboundUrl,
@@ -295,23 +295,39 @@ export async function GET() {
     });
   }
 
-  // 6. Broken chat files (PM #30)
-  // Files in data/chats/ that failed to parse during the last index rebuild.
-  // Two-strike condition (chat-index.json corrupt + a chat-file corrupt) used
-  // to silently omit those chats from the sidebar. Now we surface them so the
-  // operator can recover the file or accept the loss.
+  // 6. Chat index integrity (PM #30 + PM #62)
+  // Two drift signatures are surfaced so neither is silent:
+  //   - PM #30: chat files that failed to PARSE on the last index rebuild
+  //     (corrupt index + corrupt chat-file two-strike → sidebar omission).
+  //   - PM #62: index entries whose chat FILE is MISSING ("orphans") — ghost
+  //     sidebar rows that open to nothing. This is the exact signature of the
+  //     PM #62 data loss (index listed 41 chats, only 7 files on disk); making
+  //     it a visible `warn` is what would have caught that loss immediately.
   const broken = getBrokenChatFiles();
+  const orphans = await getOrphanIndexEntries();
+  const issues: string[] = [];
   if (broken.length > 0) {
+    issues.push(
+      `${broken.length} chat file(s) failed to parse on last rebuild (${broken.map((b) => b.file).join(", ")})`
+    );
+  }
+  if (orphans.length > 0) {
+    const sample = orphans.slice(0, 5).join(", ");
+    issues.push(
+      `${orphans.length} index entr${orphans.length === 1 ? "y references a missing chat file" : "ies reference missing chat files"} (${sample}${orphans.length > 5 ? ", …" : ""}) — ghost sidebar rows; reconcile via rebuildChatIndex`
+    );
+  }
+  if (issues.length > 0) {
     checks.push({
       name: "chat_index_integrity",
       status: "warn",
-      detail: `${broken.length} chat file(s) failed to parse on last rebuild: ${broken.map((b) => b.file).join(", ")}. See PM #30 in POST_MORTEMS.md.`,
+      detail: `${issues.join("; ")}. See PM #30 / PM #62 in POST_MORTEMS.md.`,
     });
   } else {
     checks.push({
       name: "chat_index_integrity",
       status: "ok",
-      detail: "All chat files parsed successfully on last rebuild.",
+      detail: "Chat index and chat files are consistent.",
     });
   }
 

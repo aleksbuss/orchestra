@@ -38,9 +38,13 @@ const DATA_DIR = getDataDir();
 const TMP_DIR = path.join(DATA_DIR, "tmp");
 const QUEUE_DIR = path.join(DATA_DIR, "queue");
 const CHAT_FILES_DIR = path.join(DATA_DIR, "chat-files");
+const CHAT_TRASH_DIR = path.join(DATA_DIR, ".trash", "chats");
 
 /** Files in `data/tmp/` older than this are eligible for deletion. */
 export const TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Soft-deleted chats in `data/.trash/chats/` older than this are purged (PM #63). */
+export const CHAT_TRASH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Period for the recurring sweep timer (6h). Boot-time sweep is separate. */
 const SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -103,6 +107,52 @@ export async function sweepTempDir(
       result.errors += 1;
       console.warn(
         `[sweepers] sweepTempDir failed for ${file}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return result;
+}
+
+/**
+ * PM #63 — purge soft-deleted chats from `data/.trash/chats/` once they exceed
+ * `maxAgeMs` (default 30 days). Mirrors sweepTempDir; the longer TTL gives a
+ * generous recovery window for an accidental / in-app chat deletion. The trash
+ * holds only regular `.json` files, but lstat-gating keeps it crash-safe.
+ */
+export async function sweepChatTrash(
+  maxAgeMs: number = CHAT_TRASH_MAX_AGE_MS
+): Promise<SweepResult> {
+  const result: SweepResult = {
+    scanned: 0,
+    removed: 0,
+    errors: 0,
+    removedSample: [],
+  };
+  let files: string[];
+  try {
+    files = await fs.readdir(CHAT_TRASH_DIR);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return result;
+    throw err;
+  }
+
+  const cutoffMs = Date.now() - maxAgeMs;
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    const filePath = path.join(CHAT_TRASH_DIR, file);
+    result.scanned += 1;
+    try {
+      const stat = await fs.lstat(filePath);
+      if (!stat.isFile()) continue;
+      if (stat.mtimeMs > cutoffMs) continue;
+      await fs.unlink(filePath);
+      result.removed += 1;
+      if (result.removedSample.length < 20) result.removedSample.push(file);
+    } catch (err) {
+      result.errors += 1;
+      console.warn(
+        `[sweepers] sweepChatTrash failed for ${file}:`,
         err instanceof Error ? err.message : String(err)
       );
     }
@@ -239,6 +289,7 @@ export async function sweepOrphanChatFiles(
  */
 export async function runAllSweepers(): Promise<{
   tmp: SweepResult;
+  trash: SweepResult;
   queue: SweepResult;
   chatFiles: SweepResult;
   ghost: { ok: boolean };
@@ -273,9 +324,14 @@ export async function runAllSweepers(): Promise<{
     skipped: true,
   });
 
-  const [tmp, queue, chatFiles, ghost] = await Promise.all([
+  const [tmp, trash, queue, chatFiles, ghost] = await Promise.all([
     sweepTempDir().catch((err) => {
       console.warn("[sweepers] sweepTempDir threw:", err);
+      return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
+    }),
+    // PM #63 — chat-independent: purge soft-deleted chats past their TTL.
+    sweepChatTrash().catch((err) => {
+      console.warn("[sweepers] sweepChatTrash threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
     }),
     chatIds
@@ -318,10 +374,14 @@ export async function runAllSweepers(): Promise<{
       scanned: chatFiles.scanned,
       removed: chatFiles.removed,
       errors: chatFiles.errors,
+    })}, trash ${JSON.stringify({
+      scanned: trash.scanned,
+      removed: trash.removed,
+      errors: trash.errors,
     })}, ghost ${JSON.stringify(ghost)}`
   );
 
-  return { tmp, queue, chatFiles, ghost };
+  return { tmp, trash, queue, chatFiles, ghost };
 }
 
 /**

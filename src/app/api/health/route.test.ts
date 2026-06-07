@@ -166,6 +166,36 @@ describe("GET /api/health — happy path", () => {
   });
 });
 
+describe("GET /api/health — chat_index_integrity orphan detection (PM #62)", () => {
+  it("warns when the index references a chat file that is missing", async () => {
+    // The exact PM #62 signature: an index entry with no chat file on disk.
+    await fs.mkdir(path.join(tmpRoot, "data", "chats"), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "chat-index.json"),
+      JSON.stringify([{ id: "ghost-chat", title: "gone", updatedAt: "2026-01-01" }])
+    );
+
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "chat_index_integrity");
+    expect(check).toBeDefined();
+    expect(check?.status).toBe("warn");
+    expect(check?.detail).toMatch(/ghost-chat|missing chat file/i);
+  });
+
+  it("stays 'ok' when every index entry has a matching file", async () => {
+    await fs.mkdir(path.join(tmpRoot, "data", "chats"), { recursive: true });
+    await fs.writeFile(path.join(tmpRoot, "data", "chats", "real.json"), "{}");
+    await fs.writeFile(
+      path.join(tmpRoot, "data", "chat-index.json"),
+      JSON.stringify([{ id: "real", title: "here", updatedAt: "2026-01-01" }])
+    );
+
+    const body = await callHealth();
+    const check = body.subsystems.find((s) => s.name === "chat_index_integrity");
+    expect(check?.status).toBe("ok");
+  });
+});
+
 describe("GET /api/health — disk_space + embeddings_db (Sprint 5)", () => {
   it("disk_space reports 'ok' with usage percentage under 90%", async () => {
     const body = await callHealth();

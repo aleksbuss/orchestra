@@ -356,6 +356,8 @@ If you add another runtime-invariant escape hatch, document it here in the same 
 
 Orchestra has no traditional database — `data/` IS the database. Every directory is a separate concern; treat them as schemas.
 
+**Data root resolution (PM #62) — single source of truth.** The data root is **`getDataDir()` / `dataPath()` from [`src/lib/storage/data-dir.ts`](src/lib/storage/data-dir.ts)**, which honors the `ORCHESTRA_DATA_DIR` env var (absolute or cwd-relative; defaults to `<cwd>/data`). **Never write `path.join(process.cwd(), "data")` anywhere** — always go through the resolver; a fresh hardcoded literal is a defect (grep for `process.cwd(), "data"` in review — it must return only `data-dir.ts`). To isolate a test/dev/E2E run, set `ORCHESTRA_DATA_DIR` to a throwaway dir — **NEVER `mv`/`rm` the live `data/`** (PM #62 lost 34 real chats doing exactly that). Playwright is wired this way already: `playwright.config.ts` + `tests/e2e/global-setup.ts` run the whole suite against `.e2e-data`, leaving the real `data/` untouched.
+
 | Path | Owner module | Purpose | Retention (PM #32) |
 | --- | --- | --- | --- |
 | `data/chat-index.json` | `chat-store.ts` | Lightweight index of chat IDs + metadata for the sidebar. | Rebuilt on demand; not swept. |

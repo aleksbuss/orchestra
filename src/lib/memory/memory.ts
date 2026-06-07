@@ -4,8 +4,9 @@ import { embedTexts } from "@/lib/memory/embeddings";
 import type { VectorDocument, AppSettings } from "@/lib/types";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { withFileLock, safeWriteFile, assertPathInside } from "@/lib/storage/fs-utils";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const MEMORY_ROOT = path.join(DATA_DIR, "memory");
 
 interface MemoryDB {

@@ -2,8 +2,9 @@ import fs from "fs/promises";
 import path from "path";
 import type { ChatFile } from "@/lib/types";
 import { assertPathInside } from "./fs-utils";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const CHAT_FILES_DIR = path.join(DATA_DIR, "chat-files");
 
 /**

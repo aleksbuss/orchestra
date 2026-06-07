@@ -28,6 +28,7 @@ import path from "node:path";
 import type { AppSettings } from "@/lib/types";
 import type { ChatErrorPayload } from "@/lib/realtime/types";
 import { assertPathInside, safeWriteFile } from "@/lib/storage/fs-utils";
+import { dataPath } from "@/lib/storage/data-dir";
 import {
   filterLogEntries,
   getLogFilenamesInRange,
@@ -149,7 +150,7 @@ export function sanitizeSettingsForPostmortem(
 }
 
 function postmortemDir(): string {
-  return path.join(process.cwd(), "data", "postmortems");
+  return dataPath("postmortems");
 }
 
 function postmortemPath(traceId: string): string {
@@ -166,7 +167,7 @@ async function readChatSnapshot(
     return { snapshot: null, reason: "missing" };
   }
   try {
-    const chatPath = path.join(process.cwd(), "data", "chats", `${chatId}.json`);
+    const chatPath = dataPath("chats", `${chatId}.json`);
     const raw = await fs.readFile(chatPath, "utf-8");
     if (raw.length > MAX_CHAT_EMBED_BYTES) {
       return { snapshot: null, reason: "oversize" };
@@ -184,7 +185,7 @@ async function readTraceLogs(
   traceId: string,
   windowDays = 2
 ): Promise<LogEntry[]> {
-  const logsDir = path.join(process.cwd(), "data", "logs");
+  const logsDir = dataPath("logs");
   const until = new Date();
   const since = new Date(until.getTime() - windowDays * 24 * 60 * 60 * 1000);
   const filenames = getLogFilenamesInRange(since, until);

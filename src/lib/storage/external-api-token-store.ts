@@ -1,8 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
 import { randomBytes } from "node:crypto";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const SETTINGS_DIR = path.join(DATA_DIR, "settings");
 const TOKEN_FILE = path.join(SETTINGS_DIR, "external-api-token.json");
 

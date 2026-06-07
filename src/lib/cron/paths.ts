@@ -1,6 +1,7 @@
 import path from "path";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 
 export const GLOBAL_CRON_PROJECT_ID = "none";

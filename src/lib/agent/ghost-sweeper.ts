@@ -4,8 +4,9 @@ import { ensureGoalsDir, updateGoal } from "@/lib/storage/goal-store";
 import { isJobActive } from "@/lib/agent/daemon";
 import type { GoalTask } from "@/lib/types";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const GOALS_DIR = path.join(DATA_DIR, "goals");
 
 export async function sweepGhostTasks(): Promise<void> {

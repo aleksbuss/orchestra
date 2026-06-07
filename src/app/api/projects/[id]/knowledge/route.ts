@@ -7,6 +7,7 @@ import { deleteMemoryByMetadata, getChunkCountsByFilename } from "@/lib/memory/m
 import { getProject } from "@/lib/storage/project-store";
 import { getSettings } from "@/lib/storage/settings-store";
 import { assertPathInside, withFileLock } from "@/lib/storage/fs-utils";
+import { dataPath } from "@/lib/storage/data-dir";
 
 /**
  * Sanitize a user-supplied filename for use inside the project's knowledge
@@ -36,7 +37,7 @@ export async function GET(
     { params }: { params: Promise<{ id: string }> }
 ) {
     const { id } = await params;
-    const projectDir = path.join(process.cwd(), "data", "projects", id);
+    const projectDir = dataPath("projects", id);
     const knowledgeDir = path.join(projectDir, ".meta", "knowledge");
 
     try {
@@ -95,7 +96,7 @@ export async function POST(
         return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
     }
 
-    const projectDir = path.join(process.cwd(), "data", "projects", id);
+    const projectDir = dataPath("projects", id);
     const knowledgeDir = path.join(projectDir, ".meta", "knowledge");
 
     // Ensure knowledge directory exists
@@ -181,7 +182,7 @@ export async function DELETE(
             return NextResponse.json({ error: "Invalid filename" }, { status: 400 });
         }
 
-        const projectDir = path.join(process.cwd(), "data", "projects", id);
+        const projectDir = dataPath("projects", id);
         const knowledgeDir = path.join(projectDir, ".meta", "knowledge");
 
         let filePath: string;

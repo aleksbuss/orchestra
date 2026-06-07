@@ -44,6 +44,7 @@ import {
 import { saveGoal, updateGoal } from "@/lib/storage/goal-store";
 import { snapshotBeforeWrite } from "@/lib/storage/snapshots";
 import type { GoalTaskStatus } from "@/lib/types";
+import { dataPath } from "@/lib/storage/data-dir";
 import {
   inferLanguageFromPath,
   parseLocalMarkdownLinks,
@@ -161,7 +162,7 @@ async function resolveReadableFilePath(
 
   const chatId = context.chatId?.trim();
   if (chatId) {
-    const chatFilesDir = path.join(process.cwd(), "data", "chat-files", chatId);
+    const chatFilesDir = dataPath("chat-files", chatId);
     const sanitized = value.replace(/^\.\/+/, "");
 
     if (!path.isAbsolute(value) && !sanitized.includes("/") && !sanitized.includes("\\")) {
@@ -170,7 +171,7 @@ async function resolveReadableFilePath(
 
     if (!path.isAbsolute(value)) {
       if (normalizedInput.startsWith("chat-files/")) {
-        candidates.push(path.resolve(process.cwd(), "data", normalizedInput));
+        candidates.push(dataPath(normalizedInput));
       } else if (normalizedInput.startsWith("data/chat-files/")) {
         candidates.push(path.resolve(process.cwd(), normalizedInput));
       }

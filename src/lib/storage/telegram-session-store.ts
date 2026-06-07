@@ -1,8 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
 import { randomUUID } from "node:crypto";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const INTEGRATIONS_DIR = path.join(DATA_DIR, "integrations");
 const TELEGRAM_DIR = path.join(INTEGRATIONS_DIR, "telegram");
 const CHAT_SESSIONS_FILE = path.join(TELEGRAM_DIR, "chat-sessions.json");

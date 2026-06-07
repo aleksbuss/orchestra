@@ -32,8 +32,9 @@
  */
 import fs from "fs/promises";
 import path from "path";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const TMP_DIR = path.join(DATA_DIR, "tmp");
 const QUEUE_DIR = path.join(DATA_DIR, "queue");
 const CHAT_FILES_DIR = path.join(DATA_DIR, "chat-files");

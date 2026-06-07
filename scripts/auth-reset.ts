@@ -18,7 +18,14 @@ import fs from "fs/promises";
 import path from "path";
 
 const ROOT = process.cwd();
-const SETTINGS_FILE = path.join(ROOT, "data", "settings", "settings.json");
+// Honor ORCHESTRA_DATA_DIR (PM #62) so `ORCHESTRA_DATA_DIR=… npm run auth:reset`
+// targets an ISOLATED data dir and never the real `data/`. This is what lets
+// E2E reset credentials safely. Mirrors src/lib/storage/data-dir.ts (kept inline
+// — this is a standalone tsx script with no app imports).
+const DATA_DIR = process.env.ORCHESTRA_DATA_DIR?.trim()
+  ? path.resolve(process.env.ORCHESTRA_DATA_DIR.trim())
+  : path.join(ROOT, "data");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings", "settings.json");
 
 const DEFAULT_AUTH_USERNAME = "admin";
 const DEFAULT_AUTH_PASSWORD_HASH =

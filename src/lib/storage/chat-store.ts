@@ -2,13 +2,14 @@ import fs from "fs/promises";
 import path from "path";
 import { Chat, ChatListItem, ChatSchema } from "@/lib/types";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
+import { getDataDir } from "@/lib/storage/data-dir";
 import {
   assertPathInside,
   withFileLock,
   safeWriteFile,
 } from "@/lib/storage/fs-utils";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const CHATS_DIR = path.join(DATA_DIR, "chats");
 
 async function ensureDir(dir: string) {

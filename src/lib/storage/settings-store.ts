@@ -6,8 +6,9 @@ import {
   DEFAULT_AUTH_USERNAME,
 } from "@/lib/auth/password";
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
+import { getDataDir } from "@/lib/storage/data-dir";
 
-const DATA_DIR = path.join(process.cwd(), "data");
+const DATA_DIR = getDataDir();
 const SETTINGS_DIR = path.join(DATA_DIR, "settings");
 const SETTINGS_FILE = path.join(SETTINGS_DIR, "settings.json");
 

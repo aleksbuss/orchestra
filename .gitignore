@@ -50,3 +50,6 @@ __pycache__/
 
 # Build data-symlink guard manifest (crash-recovery breadcrumb)
 .next-data-symlink-guard.json
+
+# E2E isolated data dir (PM #62 — never the real data/)
+.e2e-data/

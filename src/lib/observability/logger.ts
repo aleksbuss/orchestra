@@ -36,6 +36,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
+import { dataPath } from "@/lib/storage/data-dir";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -212,7 +213,7 @@ function ensureFileStream(): fs.WriteStream | null {
   if (fileStream && fileStreamDate === today) return fileStream;
 
   try {
-    const dir = path.join(process.cwd(), "data", "logs");
+    const dir = dataPath("logs");
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, `orchestra-${today}.jsonl`);
     fileStream?.end();

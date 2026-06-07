@@ -83,6 +83,25 @@ interface PendingFlush {
 const pendingFlushes = new Map<string, PendingFlush>();
 
 /**
+ * PM #64 — bound the parse-cache so a long-lived daemon doesn't accumulate every
+ * chat it ever touched in RAM (a slow OOM path). LRU by Map insertion order:
+ * a cache hit in getChat is re-inserted (most-recently-used), and this drops the
+ * oldest entries once over the cap. It NEVER evicts a chat with a pending flush
+ * (that would silently lose an un-written mutation) and never touches
+ * pendingFlushes — it only frees the parse cache; the next read re-reads disk,
+ * which is authoritative once flushed.
+ */
+const MAX_CACHED_CHATS = 200;
+function boundChatCache(): void {
+  if (chatCache.size <= MAX_CACHED_CHATS) return;
+  for (const id of chatCache.keys()) {
+    if (chatCache.size <= MAX_CACHED_CHATS) break;
+    if (pendingFlushes.has(id)) continue; // dirty — keep until flushed
+    chatCache.delete(id);
+  }
+}
+
+/**
  * Sprint 11 security fix — `chatId` originates from request bodies in
  * `/api/chat`, `/api/external/message`, and other entry-points that
  * don't always validate the value as a UUID. A malicious `chatId =
@@ -132,6 +151,7 @@ async function flushNow(chatId: string): Promise<void> {
 
 function scheduleFlush(chat: Chat): Promise<void> {
   chatCache.set(chat.id, chat);
+  boundChatCache();
   const existing = pendingFlushes.get(chat.id);
   if (existing) {
     existing.chat = chat;
@@ -219,6 +239,9 @@ if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
 /** Test-only: expose the installer so the regression test can opt in. */
 export const __testInternals__ = {
   installChatStoreShutdownFlush,
+  getChatCacheSize: () => chatCache.size,
+  hasPendingFlush: (id: string) => pendingFlushes.has(id),
+  MAX_CACHED_CHATS,
 };
 
 /** Test helper / project deletion: drop cache + cancel pending flush for one chat. */
@@ -441,7 +464,12 @@ export async function getChat(chatId: string): Promise<Chat | null> {
   // unflushed mutations (the cache is updated synchronously by saveChat /
   // updateChat before the disk write completes).
   const cached = chatCache.get(chatId);
-  if (cached) return cached;
+  if (cached) {
+    // LRU: re-insert so this becomes the most-recently-used entry.
+    chatCache.delete(chatId);
+    chatCache.set(chatId, cached);
+    return cached;
+  }
 
   await ensureDir(CHATS_DIR);
   const filePath = chatFilePath(chatId);
@@ -460,6 +488,7 @@ export async function getChat(chatId: string): Promise<Chat | null> {
 
       const chat = parseResult.data as Chat;
       chatCache.set(chatId, chat);
+      boundChatCache();
       return chat;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT" && attempt === 0) {

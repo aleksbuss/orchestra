@@ -38,6 +38,24 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 64. Two unbounded in-memory Maps — slow OOM on a long-lived daemon
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (slow leak — needs long uptime + heavy use to bite; no fast crash)
+**Symptoms:** None observed, but two module-level `Map`s grew without bound for the process lifetime:
+  1. `chatCache` (`chat-store.ts`) — every chat ever read/written stayed cached (parse-cost optimization), evicted only on delete. A long-running daemon that touches many large chats slowly climbs toward `JavaScript heap out of memory`.
+  2. `terminalSessions` (`tools/code-execution.ts`) — per-agent terminal cwd state, keyed by sessionId. The 60s `pruneFinishedProcessSessions` sweeper pruned `finishedProcessSessions` but NOT this map, so every distinct sessionId leaked a (tiny) entry forever.
+**Detection:** Surfaced by an external architecture audit; confirmed by reading the cache/sweeper code (verified: severity was overstated — `chatCache` is real but slow; `terminalSessions` entries are a single cwd string each).
+**Root Cause:** Caches/state maps added for performance/UX without a retention bound or a prune hook.
+**Resolution:**
+  1. `chatCache` is now an LRU bounded at `MAX_CACHED_CHATS = 200`: a `getChat` hit re-inserts (most-recently-used) and `boundChatCache()` after each set drops the oldest entries over the cap. **Durability-safe:** it NEVER evicts a chat with a pending flush (that would silently drop an un-written mutation) and never cancels a flush — it only frees the parse cache; disk stays authoritative.
+  2. `terminalSessions` entries carry a `lastUsedAt`; `pruneFinishedProcessSessions` now also drops idle terminal contexts past `PROCESS_SESSION_TTL_MS` (30 min).
+**Regression Coverage:** `chat-store.cache.test.ts` — cache stays ≤ MAX after touching MAX+50 chats, AND a dirty (un-flushed) chat survives heavy cache pressure (its write still lands).
+**Doc Updates:** none (internal perf/lifecycle).
+**Rule:** Any module-level `Map`/cache that grows with usage MUST have a retention bound (LRU cap) or a prune hook in an existing sweeper — and an eviction that touches durability state (un-flushed writes) must skip dirty entries, never cancel a pending write.
+
+---
+
 ## 63. Chat deletion was an irreversible `fs.unlink` — no recovery from an accidental/in-app delete (defense-in-depth for PM #62)
 **Date:** 2026-06
 **Status:** RESOLVED

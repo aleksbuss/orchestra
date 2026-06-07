@@ -59,6 +59,8 @@ type ExecutionRuntime = "python" | "nodejs" | "terminal";
 
 type TerminalSessionState = {
   cwd: string;
+  /** PM #64 — last-touched timestamp so idle terminal contexts can be pruned. */
+  lastUsedAt: number;
 };
 
 type CommandResult = {
@@ -480,7 +482,11 @@ async function prepareExecution(params: {
   const shell = process.env.SHELL?.trim() || "sh";
   const normalizedSessionId =
     Number.isFinite(params.sessionId) && params.sessionId >= 0 ? Math.floor(params.sessionId) : 0;
-  const terminalState = terminalSessions.get(normalizedSessionId) ?? { cwd: params.cwd };
+  const terminalState = terminalSessions.get(normalizedSessionId) ?? {
+    cwd: params.cwd,
+    lastUsedAt: 0,
+  };
+  terminalState.lastUsedAt = Date.now();
   terminalSessions.set(normalizedSessionId, terminalState);
 
   const marker = `__ORCHESTRA_SESSION_RESULT_${Date.now().toString(36)}_${Math.random()
@@ -849,6 +855,14 @@ function pruneFinishedProcessSessions(): void {
   for (const [sessionId, session] of finishedProcessSessions.entries()) {
     if ((session.finishedAt ?? 0) < cutoff) {
       finishedProcessSessions.delete(sessionId);
+    }
+  }
+  // PM #64 — terminalSessions (per-agent cwd state) was never pruned: every
+  // distinct sessionId leaked an entry for the whole process lifetime. Drop
+  // idle terminal contexts past the same TTL (each is tiny, but unbounded).
+  for (const [sessionId, state] of terminalSessions.entries()) {
+    if (state.lastUsedAt < cutoff) {
+      terminalSessions.delete(sessionId);
     }
   }
 }

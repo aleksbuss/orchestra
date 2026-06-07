@@ -80,6 +80,7 @@ beforeEach(() => {
   mockedDispatch.mockResolvedValue(undefined as any);
   mockedRunAll.mockResolvedValue({
     tmp: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
+    trash: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
     queue: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
     chatFiles: { scanned: 0, removed: 0, errors: 0, removedSample: [] },
     ghost: { ok: true },

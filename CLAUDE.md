@@ -361,7 +361,8 @@ Orchestra has no traditional database — `data/` IS the database. Every directo
 | Path | Owner module | Purpose | Retention (PM #32) |
 | --- | --- | --- | --- |
 | `data/chat-index.json` | `chat-store.ts` | Lightweight index of chat IDs + metadata for the sidebar. | Rebuilt on demand; not swept. |
-| `data/chats/<chatId>.json` | `chat-store.ts` | Full message history for one chat. Canonical source for the UI. | Deleted with the chat (`deleteChat`). Never auto-swept — user data. |
+| `data/chats/<chatId>.json` | `chat-store.ts` | Full message history for one chat. Canonical source for the UI. | **Soft-deleted (PM #63)** — `deleteChat` MOVES the file to `data/.trash/chats/` instead of unlinking; never auto-swept from `data/chats/`. |
+| `data/.trash/chats/<id>.<ms>.json` | `chat-store.ts` | PM #63 — soft-deleted chats. `restoreChatFromTrash(id)` / `listTrashedChats()` recover them; an accidental or in-app deletion is reversible. | **Swept** — `sweepChatTrash` (boot + 6h) purges entries older than `CHAT_TRASH_MAX_AGE_MS = 30 days`. |
 | `data/projects/<projectId>/` | `project-store.ts` | Per-project workspace, including `.orchestra_blackboard.json`. | Deleted with the project. Never auto-swept. |
 | `data/goals/` | `goal-store` (in `storage/`) | `GoalTree` JSON files; ghost-sweeper resurrects orphaned tasks here. | Ghost-swept once per boot (`sweepGhostTasks`). |
 | `data/memory/` | `lib/memory/` | Vector embeddings for long-term memory. | **Not swept yet** (PM #32 — deferred; needs `deleteProject`-side atomic clear before any TTL is safe). |

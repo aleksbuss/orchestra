@@ -38,6 +38,23 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 63. Chat deletion was an irreversible `fs.unlink` — no recovery from an accidental/in-app delete (defense-in-depth for PM #62)
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (recoverability of user data)
+**Symptoms:** None observed in-app yet, but PM #62 exposed that the codebase had ZERO recovery path for a deleted chat: `deleteChat` and `deleteChatsByProjectId` did a hard `fs.unlink`, and with no Time Machine / APFS snapshots / git (data is gitignored), a delete — accidental click, prompt-injected tool, or crash mid-write — was gone forever. PM #62 fixed the *test-isolation* loss vector; this closes the *in-app deletion* vector it doesn't cover.
+**Detection:** Identified during the PM #62 post-incident review (a parallel audit flagged that PM #62 covers test isolation only).
+**Root Cause:** Deletion was modeled as `unlink`, not as a reversible state transition. There was also no health surface for index/file drift (an index entry whose chat file is missing — the exact PM #62 signature), so silent loss stayed silent.
+**Resolution:**
+  1. **Soft-delete** — `deleteChat` / `deleteChatsByProjectId` now MOVE the chat file to `data/.trash/chats/<id>.<deletedAtMs>.json` (atomic rename) instead of unlinking. `restoreChatFromTrash(id)` and `listTrashedChats()` recover it. The trash lives OUTSIDE `data/chats/` so `rebuildChatIndex` never re-surfaces deleted chats.
+  2. **Bounded retention** — `sweepChatTrash` (wired into `runAllSweepers`, boot + 6h) purges trash older than `CHAT_TRASH_MAX_AGE_MS = 30 days` — a generous recovery window without unbounded growth.
+  3. **Drift detection** — `getOrphanIndexEntries()` + the `/api/health` `chat_index_integrity` probe now `warn` when the index references a missing chat file (would have made the PM #62 loss loud immediately). Resolves paths at call-time so it's test-isolatable.
+**Regression Coverage:** `src/lib/storage/chat-store.softdelete.test.ts` (soft-delete moves to trash, restore round-trip, project-bulk soft-delete, orphan detector), `src/lib/cron/sweepers.test.ts` (trash TTL prune), `src/app/api/health/route.test.ts` (orphan → warn).
+**Doc Updates:** `CLAUDE.md` § Data Layout (`data/chats` soft-delete + `data/.trash/chats` rows).
+**Rule:** Deleting irreplaceable user data is a reversible state transition, not an `unlink`. Move-to-trash + TTL-pruned retention + a restore path is the floor for any user-data delete. And surface index/file drift as a health `warn` so silent loss can't stay silent.
+
+---
+
 ## 62. Data root was un-isolatable → test isolation moved the live `data/` → 34 user chats permanently lost
 **Date:** 2026-06
 **Status:** RESOLVED

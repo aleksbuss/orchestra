@@ -12,11 +12,40 @@ import {
 const DATA_DIR = getDataDir();
 const CHATS_DIR = path.join(DATA_DIR, "chats");
 
+/**
+ * PM #63 — soft-delete trash. Deleted chat files are moved here instead of
+ * being hard-unlinked, so an accidental or in-app deletion is recoverable.
+ * Lives OUTSIDE `data/chats/` so `rebuildChatIndex` (which readdirs CHATS_DIR)
+ * never re-surfaces trashed chats. TTL-pruned by the cron sweeper.
+ */
+const CHAT_TRASH_DIR = path.join(DATA_DIR, ".trash", "chats");
+
 async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
 }
 
 const CHAT_INDEX_FILE = path.join(DATA_DIR, "chat-index.json");
+
+/**
+ * Move a chat file into the trash instead of deleting it (PM #63). Atomic
+ * rename within the data dir; falls back to copy+unlink across devices.
+ * The `<id>.<deletedAtMs>.json` name preserves the id and the deletion time
+ * for listing/restore and TTL pruning.
+ */
+async function softDeleteChatFile(chatId: string, filePath: string): Promise<void> {
+  await ensureDir(CHAT_TRASH_DIR);
+  const dest = path.join(CHAT_TRASH_DIR, `${chatId}.${Date.now()}.json`);
+  try {
+    await fs.rename(filePath, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EXDEV") {
+      await fs.copyFile(filePath, dest);
+      await fs.unlink(filePath);
+    } else {
+      throw err;
+    }
+  }
+}
 
 /* ─── Hot-path optimization: read cache + debounced write coalescing ────────
  *
@@ -252,6 +281,48 @@ export function __resetBrokenChatFilesForTest(): void {
 }
 
 /**
+ * PM #62 follow-up — index entries whose backing `data/chats/<id>.json` no
+ * longer exists ("orphan" entries). `getAllChats` serves the index verbatim,
+ * so an orphan renders a ghost sidebar row that opens to nothing. Surfaced via
+ * `/api/health` so an index↔files drift (the signature of the PM #62 data
+ * loss) becomes a VISIBLE warn instead of a silent inconsistency that goes
+ * unnoticed for weeks.
+ *
+ * Read-only and non-destructive by design: it NEVER deletes index entries or
+ * files. Reconciliation (dropping orphans) is a deliberate, separate action —
+ * a health probe must observe, not mutate. Returns [] when the index is
+ * missing/corrupt (nothing to reconcile against; `getAllChats` rebuilds).
+ */
+export async function getOrphanIndexEntries(): Promise<string[]> {
+  // Resolve paths at CALL time (not module load) so this reads the CURRENT data
+  // dir — identical to the module consts in production, but lets tests that mock
+  // `process.cwd()` / set ORCHESTRA_DATA_DIR isolate it instead of scanning the
+  // real `data/`.
+  const dataDir = getDataDir();
+  const indexFile = path.join(dataDir, "chat-index.json");
+  const chatsDir = path.join(dataDir, "chats");
+  let entries: unknown;
+  try {
+    entries = JSON.parse(await fs.readFile(indexFile, "utf-8"));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(entries)) return [];
+
+  const orphans: string[] = [];
+  for (const entry of entries as ChatListItem[]) {
+    const id = entry?.id;
+    if (typeof id !== "string" || !id) continue;
+    try {
+      await fs.access(path.join(chatsDir, `${id}.json`));
+    } catch {
+      orphans.push(id);
+    }
+  }
+  return orphans;
+}
+
+/**
  * Scans all chat files to recreate the index.
  * Only called as fallback or after bulk operations.
  *
@@ -458,7 +529,7 @@ export async function deleteChat(chatId: string): Promise<boolean> {
   evictChatCache(chatId);
   const filePath = chatFilePath(chatId);
   try {
-    await fs.unlink(filePath);
+    await softDeleteChatFile(chatId, filePath);
     await removeIndexItem(chatId);
     publishUiSyncEvent({
       topic: "chat",
@@ -489,7 +560,7 @@ export async function deleteChatsByProjectId(projectId: string): Promise<number>
       const chat = parseResult.data;
       if (chat.projectId === projectId) {
         evictChatCache(chat.id);
-        await fs.unlink(path.join(CHATS_DIR, file));
+        await softDeleteChatFile(chat.id, path.join(CHATS_DIR, file));
         deleted++;
       }
     } catch {
@@ -505,6 +576,56 @@ export async function deleteChatsByProjectId(projectId: string): Promise<number>
     });
   }
   return deleted;
+}
+
+/** PM #63 — list soft-deleted chats currently in the trash (newest first). */
+export async function listTrashedChats(): Promise<
+  { id: string; deletedAt: number; fileName: string }[]
+> {
+  let files: string[];
+  try {
+    files = await fs.readdir(CHAT_TRASH_DIR);
+  } catch {
+    return [];
+  }
+  const items: { id: string; deletedAt: number; fileName: string }[] = [];
+  for (const fileName of files) {
+    if (!fileName.endsWith(".json")) continue;
+    // `<id>.<deletedAtMs>.json` — the id itself may contain dots, so peel off
+    // only the trailing `.<ms>` segment.
+    const base = fileName.slice(0, -".json".length);
+    const lastDot = base.lastIndexOf(".");
+    const id = lastDot > 0 ? base.slice(0, lastDot) : base;
+    const ts = lastDot > 0 ? Number(base.slice(lastDot + 1)) : 0;
+    items.push({ id, deletedAt: Number.isFinite(ts) ? ts : 0, fileName });
+  }
+  return items.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/**
+ * PM #63 — restore a soft-deleted chat (its most-recent trashed copy) back into
+ * `data/chats/`. Returns true if a trashed copy was found and restored.
+ */
+export async function restoreChatFromTrash(chatId: string): Promise<boolean> {
+  const newest = (await listTrashedChats()).find((t) => t.id === chatId);
+  if (!newest) return false;
+  const src = path.join(CHAT_TRASH_DIR, newest.fileName);
+  const dest = chatFilePath(chatId);
+  await ensureDir(CHATS_DIR);
+  try {
+    await fs.rename(src, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EXDEV") {
+      await fs.copyFile(src, dest);
+      await fs.unlink(src);
+    } else {
+      return false;
+    }
+  }
+  evictChatCache(chatId);
+  await rebuildChatIndex();
+  publishUiSyncEvent({ topic: "chat", chatId, reason: "chat_restored" });
+  return true;
 }
 
 export async function createChat(

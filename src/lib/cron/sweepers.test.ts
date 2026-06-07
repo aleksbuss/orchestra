@@ -90,6 +90,31 @@ describe("PM #32 — sweepTempDir", () => {
   });
 });
 
+describe("PM #63 — sweepChatTrash", () => {
+  it("returns zero-result if data/.trash/chats does not exist", async () => {
+    const out = await sweepers.sweepChatTrash();
+    expect(out).toEqual({ scanned: 0, removed: 0, errors: 0, removedSample: [] });
+  });
+
+  it("purges trashed chats older than maxAge, keeps recent ones", async () => {
+    const trash = path.join(tmpDir, "data", ".trash", "chats");
+    const now = Date.now();
+    const ancient = now - 40 * 24 * 60 * 60 * 1000; // 40 days ago
+    const recent = now - 60 * 60 * 1000; // 1 hour ago
+
+    await writeWithMtime(path.join(trash, "c-old.111.json"), "{}", ancient);
+    await writeWithMtime(path.join(trash, "c-recent.222.json"), "{}", recent);
+
+    const out = await sweepers.sweepChatTrash(30 * 24 * 60 * 60 * 1000); // 30d
+    expect(out.scanned).toBe(2);
+    expect(out.removed).toBe(1);
+    expect(out.removedSample).toEqual(["c-old.111.json"]);
+
+    const remaining = await fs.readdir(trash);
+    expect(remaining).toEqual(["c-recent.222.json"]);
+  });
+});
+
 describe("PM #32 — sweepOrphanQueueEntries", () => {
   it("returns zero-result if data/queue does not exist", async () => {
     const out = await sweepers.sweepOrphanQueueEntries(new Set());

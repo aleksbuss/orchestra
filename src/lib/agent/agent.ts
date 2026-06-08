@@ -41,6 +41,25 @@ import { runMoAEnsemble } from "@/lib/agent/moa";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
 import { resolveWorkDirForProject } from "@/lib/storage/project-store";
 
+// §10 phase 1 — message/response helpers live in agent-response.ts.
+import {
+  asRecord,
+  stripThinkingTags,
+  unwrapSerializedResponseCall,
+  getLastAssistantText,
+  getLastResponseToolText,
+  turnHasDeliverableAnswer,
+  resolveTurnContinuation,
+} from "@/lib/agent/agent-response";
+import type { TurnContinuationResult } from "@/lib/agent/agent-response";
+// Re-export the public surface so existing importers keep resolving from "./agent".
+export {
+  unwrapSerializedResponseCall,
+  turnHasDeliverableAnswer,
+  resolveTurnContinuation,
+};
+export type { TurnContinuationResult };
+
 const LLM_LOG_BORDER = "═".repeat(60);
 const MAX_TOOL_STEPS_PER_TURN = 30;
 const MAX_TOOL_STEPS_SUBORDINATE = 15;
@@ -194,12 +213,6 @@ async function attemptModelFallback(
   }
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (value == null || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  return value as Record<string, unknown>;
-}
 
 function toStableValue(value: unknown): unknown {
   if (Array.isArray(value)) {
@@ -658,56 +671,7 @@ function convertChatMessagesToModelMessages(messages: ChatMessage[]): ModelMessa
   return result;
 }
 
-/**
- * Strip thinking block from text to prevent leaking it to the user UI
- */
-function stripThinkingTags(text: string): string {
-  if (!text) return text;
-  return text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "").trim();
-}
 
-/**
- * Convert AI SDK ModelMessage to our ChatMessage format for storage.
- * Tool messages can contain multiple tool results, so this returns an array.
- */
-/**
- * PM #61 — Models frequently emit the final `response` tool call as TEXT (a
- * JSON code block like `{"call":"response","arguments":{"message":"..."}}`)
- * instead of a native tool call — especially under heavy context (MoA) or on
- * mid-tier models. Orchestra has no parser for that, so the real answer gets
- * persisted as a raw JSON blob and the UI renders "no answer". This unwraps
- * that shape and returns the inner message; non-matching text passes through
- * unchanged (conservative — only unwraps when the WHOLE text is the call).
- */
-export function unwrapSerializedResponseCall(text: string): string {
-  if (!text || !text.includes("response")) return text;
-  let body = text.trim();
-  // Strip a single surrounding ```json ... ``` (or bare ```) fence.
-  const fence = body.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?```$/);
-  if (fence) body = fence[1].trim();
-  if (!body.startsWith("{") || !body.endsWith("}")) return text;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return text;
-  }
-  const rec = asRecord(parsed);
-  if (!rec) return text;
-  const toolName = rec.call ?? rec.name ?? rec.tool ?? rec.function;
-  if (toolName !== "response") return text;
-  const args =
-    asRecord(rec.arguments) ?? asRecord(rec.input) ?? asRecord(rec.parameters) ?? rec;
-  const message =
-    typeof args.message === "string"
-      ? args.message
-      : typeof args.text === "string"
-        ? args.text
-        : typeof args.answer === "string"
-          ? args.answer
-          : null;
-  return message && message.trim() ? message : text;
-}
 
 function convertModelMessageToChatMessages(msg: ModelMessage, now: string): ChatMessage[] {
   if (msg.role === "tool") {
@@ -838,274 +802,13 @@ function logLLMRequest(options: {
   console.log(`\n${LLM_LOG_BORDER}\n`);
 }
 
-function extractAssistantText(msg: ModelMessage): string {
-  if (msg.role !== "assistant") return "";
-  const content = msg.content;
-  if (typeof content === "string") {
-    return content;
-  }
-  if (!Array.isArray(content)) {
-    return "";
-  }
-  let text = "";
-  for (const part of content) {
-    if (
-      typeof part === "object" &&
-      part !== null &&
-      "type" in part &&
-      part.type === "text" &&
-      "text" in part &&
-      typeof (part as { text?: unknown }).text === "string"
-    ) {
-      text += (part as { text: string }).text;
-    }
-  }
-  return text;
-}
 
-function getLastAssistantText(messages: ModelMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (msg.role !== "assistant") continue;
-    const text = extractAssistantText(msg).trim();
-    if (text) return text;
-  }
-  return "";
-}
 
-function extractToolResultOutputText(output: unknown): string {
-  if (typeof output === "string") {
-    return output;
-  }
-  const record = asRecord(output);
-  if (!record) {
-    if (output === null || output === undefined) {
-      return "";
-    }
-    try {
-      return JSON.stringify(output);
-    } catch {
-      return String(output);
-    }
-  }
 
-  const value = "value" in record ? record.value : undefined;
-  if (typeof value === "string") {
-    return value;
-  }
-  if (value !== undefined) {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return String(value);
-    }
-  }
 
-  if (typeof record.message === "string") {
-    return record.message;
-  }
 
-  try {
-    return JSON.stringify(record);
-  } catch {
-    return String(record);
-  }
-}
 
-function getLastResponseToolText(messages: ModelMessage[]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
 
-    if (msg.role === "tool" && Array.isArray(msg.content)) {
-      for (let j = msg.content.length - 1; j >= 0; j -= 1) {
-        const part = msg.content[j];
-        if (!(typeof part === "object" && part !== null)) continue;
-        if (!("type" in part) || part.type !== "tool-result") continue;
-        const toolName =
-          "toolName" in part && typeof (part as { toolName?: unknown }).toolName === "string"
-            ? ((part as { toolName: string }).toolName as string)
-            : "";
-        if (toolName !== "response") continue;
-
-        const output =
-          "output" in part ? (part as { output?: unknown }).output : (part as { result?: unknown }).result;
-        const text = extractToolResultOutputText(output).trim();
-        if (text) return text;
-      }
-    }
-
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      for (let j = msg.content.length - 1; j >= 0; j -= 1) {
-        const part = msg.content[j];
-        if (!(typeof part === "object" && part !== null)) continue;
-        if (!("type" in part) || part.type !== "tool-call") continue;
-        const toolName =
-          "toolName" in part && typeof (part as { toolName?: unknown }).toolName === "string"
-            ? ((part as { toolName: string }).toolName as string)
-            : "";
-        if (toolName !== "response") continue;
-        const input =
-          "input" in part ? (part as { input?: unknown }).input : undefined;
-        const inputRecord = asRecord(input);
-        const message = typeof inputRecord?.message === "string" ? inputRecord.message.trim() : "";
-        if (message) return message;
-      }
-    }
-  }
-  return "";
-}
-
-function shouldAutoContinueAssistant(
-  text: string,
-  finishReason?: string
-): boolean {
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-
-  const reason = (finishReason || "").toLowerCase();
-  if (reason === "length" || reason === "max_tokens") {
-    return true;
-  }
-
-  // Common abrupt cutoff pattern from prompt-generation turns.
-  if (/(?:here is (?:the )?prompt|вот (?:твой )?(?:промпт|prompt))[:：]?\s*$/i.test(trimmed)) {
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * PM #69 — did this turn actually deliver an answer to the user? An answer
- * arrives either as a `response` tool call (the primary mechanism) or as plain
- * assistant text. A turn that ends with only tool calls + results — e.g. the
- * model called `search_web` and the loop stopped on a flaky
- * `finishReason: "other"` without a follow-up answer — delivered NOTHING, and
- * the caller must force a final-answer generation so the user always gets a
- * reply. Assistant text is checked AFTER `stripThinkingTags`: a turn whose only
- * text was a `<thinking>` block is persisted as empty, so it is not deliverable.
- */
-export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
-  if (getLastResponseToolText(messages).trim()) return true;
-  return Boolean(stripThinkingTags(getLastAssistantText(messages)).trim());
-}
-
-export interface TurnContinuationResult {
-  /** Extra assistant text to append (continuation tail or forced answer); "" when none needed. */
-  text: string;
-  usage?: import("@/lib/cost/accumulator").RawUsage;
-  /** Non-fatal operator notice (a continuation/force attempt failed); caller publishes it. */
-  uiNotice?: string;
-}
-
-/**
- * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
- * finished turn, decide whether an EXTRA generation is needed and produce its
- * text + usage:
- *   - the reply was truncated (`shouldAutoContinueAssistant`) → continue from
- *     where it stopped (capped at 1200 tokens);
- *   - NO answer was delivered at all (`turnHasDeliverableAnswer` === false, the
- *     PM #69 failure) → force ONE tool-less final answer so the user always gets
- *     a reply. Tool-less ⇒ it can only emit text, never another tool call ⇒ no
- *     loop.
- * Returns `{ text: "" }` when the turn already delivered a complete answer.
- * Self-contained (only `generateText` + pure helpers) so it is unit-testable
- * with a mock model — see `final-answer-guard.test.ts`.
- */
-export async function resolveTurnContinuation(args: {
-  responseMessages: ModelMessage[];
-  finishReason: string | undefined;
-  model: Parameters<typeof generateText>[0]["model"];
-  systemPrompt: string;
-  baseMessages: ModelMessage[];
-  providerOptions: Parameters<typeof generateText>[0]["providerOptions"];
-  settings: AppSettings;
-  abortSignal?: AbortSignal;
-}): Promise<TurnContinuationResult> {
-  const {
-    responseMessages,
-    finishReason,
-    model,
-    systemPrompt,
-    baseMessages,
-    providerOptions,
-    settings,
-    abortSignal,
-  } = args;
-  const lastAssistantText = getLastAssistantText(responseMessages);
-  const readUsage = (r: unknown) =>
-    (r as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage ?? undefined;
-
-  if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
-    try {
-      const continuation = await generateText({
-        model,
-        system: systemPrompt,
-        messages: mergeConsecutiveSameRole([
-          ...baseMessages,
-          ...responseMessages,
-          {
-            role: "user",
-            content:
-              "Continue your previous answer from exactly where it stopped. " +
-              "Output only the continuation text, without repeating earlier content.",
-          },
-        ]),
-        providerOptions,
-        temperature: settings.chatModel.temperature ?? 0.7,
-        maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
-        abortSignal,
-      });
-      return { text: (continuation.text || "").trim(), usage: readUsage(continuation) };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.warn("Auto-continuation failed:", error);
-      return {
-        text: "",
-        uiNotice: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,
-      };
-    }
-  }
-
-  if (!turnHasDeliverableAnswer(responseMessages)) {
-    try {
-      const forced = await generateText({
-        model,
-        system: systemPrompt,
-        messages: mergeConsecutiveSameRole([
-          ...baseMessages,
-          ...responseMessages,
-          {
-            role: "user",
-            content:
-              "You have everything you need from the steps above. Write your " +
-              "final answer to the user now, in plain prose. Do not call any tools.",
-          },
-        ]),
-        providerOptions,
-        temperature: settings.chatModel.temperature ?? 0.7,
-        maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
-        abortSignal,
-      });
-      const text = unwrapSerializedResponseCall((forced.text || "").trim());
-      if (text) {
-        console.log(
-          `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
-        );
-      }
-      return { text, usage: readUsage(forced) };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.warn("[Agent] PM #69 forced final answer failed:", error);
-      return {
-        text: "",
-        uiNotice: `[Agent] Could not produce a final answer for this turn: ${errMsg}`,
-      };
-    }
-  }
-
-  return { text: "" };
-}
 
 /**
  * Executes a subsidiary agent with a specialized role (Swarm).

@@ -57,7 +57,16 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
+        {/* Pre-paint theme bootstrap. suppressHydrationWarning is required on
+            the <script> itself (not just <html>/<body>, which don't cover
+            nested elements): the inline script runs before hydration, and
+            browser extensions (e.g. a geolocation spoofer) commonly rewrite
+            inline <head> scripts to point at their own content script, which
+            would otherwise surface a scary hydration mismatch. */}
+        <script
+          suppressHydrationWarning
+          dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }}
+        />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}

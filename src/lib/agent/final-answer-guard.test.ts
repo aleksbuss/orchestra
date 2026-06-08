@@ -11,7 +11,10 @@
  */
 import { describe, it, expect } from "vitest";
 import type { ModelMessage } from "ai";
-import { turnHasDeliverableAnswer } from "./agent";
+import { MockLanguageModelV3 } from "ai/test";
+import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
+import type { AppSettings } from "@/lib/types";
+import { turnHasDeliverableAnswer, resolveTurnContinuation } from "./agent";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -81,5 +84,92 @@ describe("PM #69 — turnHasDeliverableAnswer", () => {
         responseToolCall("React 19.2.7, per the search."),
       ])
     ).toBe(true);
+  });
+});
+
+// ── Integration: resolveTurnContinuation drives the REAL generateText with a
+// MockLanguageModelV3, so it exercises the actual force-final-answer code path
+// (detector → tool-less generateText → unwrap), not just the decision. ────────
+function genResult(text: string): LanguageModelV3GenerateResult {
+  return {
+    content: [{ type: "text", text }],
+    finishReason: "stop",
+    usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
+    warnings: [],
+  } as unknown as LanguageModelV3GenerateResult;
+}
+const modelReturning = (text: string) =>
+  new MockLanguageModelV3({ doGenerate: async () => genResult(text) });
+const modelThrowing = () =>
+  new MockLanguageModelV3({
+    doGenerate: async () => {
+      throw new Error("upstream down");
+    },
+  });
+
+const settings = {
+  chatModel: { provider: "openai", model: "gpt-4o", apiKey: "k" },
+} as unknown as AppSettings;
+const base = {
+  systemPrompt: "sys",
+  baseMessages: [{ role: "user", content: "q" }] as ModelMessage[],
+  providerOptions: undefined,
+  settings,
+};
+
+describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", () => {
+  it("FORCES a final answer when the turn delivered nothing (the fix, end-to-end)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      // A valid ModelMessage that delivers nothing (thinking strips to empty) —
+      // the detector tests above cover the tool-call/result detection; this
+      // drives the FORCE generation through the real generateText.
+      responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+      finishReason: "other",
+      model: modelReturning("FORCED FINAL ANSWER") as never,
+    });
+    expect(res.text).toBe("FORCED FINAL ANSWER");
+    expect(res.uiNotice).toBeUndefined();
+  });
+
+  it("does NOT force when a `response` tool already delivered the answer", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [responseToolCall("already delivered")],
+      finishReason: "stop",
+      model: modelReturning("SHOULD-NOT-BE-USED") as never,
+    });
+    expect(res.text).toBe("");
+  });
+
+  it("does NOT force when plain assistant text already delivered the answer", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("Here is the answer.")],
+      finishReason: "stop",
+      model: modelReturning("SHOULD-NOT-BE-USED") as never,
+    });
+    expect(res.text).toBe("");
+  });
+
+  it("continues a truncated reply (finishReason length)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("A partial answer that got cut off")],
+      finishReason: "length",
+      model: modelReturning("and the rest of it.") as never,
+    });
+    expect(res.text).toBe("and the rest of it.");
+  });
+
+  it("on forced-generation failure: empty text + a uiNotice (never throws)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+      finishReason: "other",
+      model: modelThrowing() as never,
+    });
+    expect(res.text).toBe("");
+    expect(res.uiNotice).toMatch(/Could not produce a final answer/i);
   });
 });

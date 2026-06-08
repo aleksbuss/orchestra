@@ -387,6 +387,32 @@ describe("GET /api/models — API key waterfall", () => {
     expect((init as any).headers.Authorization).toBe("Bearer sk-from-vault");
   });
 
+  it("masked '****' key NOT in the vault still resolves via embeddingsModel — never forwarded verbatim (regression)", async () => {
+    // Bug: a masked key is truthy, so the `!apiKey`-gated chatModel/
+    // utilityModel/embeddingsModel/env branches never fired when the provider
+    // was absent from the vault. The masked placeholder was then forwarded
+    // upstream → provider 400 → route 500. This broke the Settings embeddings
+    // dropdown (google key, not in vault, lives in embeddingsModel).
+    mockedSettings.mockResolvedValue({
+      providerApiKeys: {}, // NOT in vault → must fall through to embeddingsModel
+      chatModel: { provider: "x", model: "x", apiKey: "" },
+      utilityModel: { provider: "x", model: "x", apiKey: "" },
+      embeddingsModel: {
+        provider: "google",
+        model: "text-embedding-004",
+        apiKey: "goog-real-key",
+      },
+    } as any);
+    fetchSpy.mockResolvedValue(fakeResponse({ models: [] }));
+    const res = await GET(
+      buildReq("?provider=google&type=embedding&apiKey=AIza****h_yE")
+    );
+    expect(res.status).toBe(200);
+    const [url] = fetchSpy.mock.calls[0];
+    expect(String(url)).toContain("key=goog-real-key");
+    expect(String(url)).not.toContain("****");
+  });
+
   it("falls through providerApiKeys → chatModel.apiKey when vault missing", async () => {
     mockedSettings.mockResolvedValue({
       providerApiKeys: {},

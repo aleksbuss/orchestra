@@ -15,8 +15,19 @@ export async function GET(req: NextRequest) {
     let apiKey = searchParams.get("apiKey") || "";
     const type = searchParams.get("type") || "chat"; // "chat" | "embedding"
 
-    // If apiKey is masked or missing, try to get it from server-side settings
-    if (!apiKey || apiKey.includes("****")) {
+    // A masked key (the UI's display placeholder containing "****") is NOT a
+    // real credential. Treat it as absent so the resolution below restores the
+    // real key from settings — otherwise the masked string was forwarded
+    // upstream verbatim, the provider returned 400, and the route 500'd. This
+    // is exactly what broke the Settings → embeddings model dropdown: the inner
+    // resolution branches all gate on `!apiKey`, which a truthy masked string
+    // never satisfies, so the key was never resolved.
+    if (apiKey.includes("****")) {
+        apiKey = "";
+    }
+
+    // If apiKey is missing, try to get it from server-side settings
+    if (!apiKey) {
         try {
             const settings = await getSettings();
             

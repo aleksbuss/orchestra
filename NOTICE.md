@@ -10,12 +10,18 @@ licensing and are redistributed here under their own terms.
 
 Orchestra is a **hard fork of [Eggent](https://github.com/eggent-ai/eggent)**
 (© 2026 Eggent contributors), used here under its MIT License. The original
-Eggent codebase was imported as the starting point and then substantially
-extended (new data-isolation layer, soft-delete + index-integrity recovery,
-observability/post-mortem tooling, an expanded test suite, a bilingual
-RU/EN surface, and numerous fixes). The majority of the foundational
-architecture (the Mixture-of-Agents pipeline, the JSON-on-disk storage model,
-the agent/tooling layout) originates from Eggent.
+Eggent codebase was imported as the starting point: Orchestra inherits Eggent's
+**workspace scaffold** — the JSON-on-disk storage model, the projects / memory /
+knowledge / MCP / cron / Telegram subsystems, the Next.js application shell, and
+the base single-agent loop.
+
+Built on top of that scaffold, and **original to Orchestra (not present in
+Eggent)**, is the **Mixture-of-Agents (MoA) ensemble** — parallel proposers,
+a code-guaranteed Skeptic, tournament aggregation, reflection/disagreement
+detection, and trace-memory — which is Orchestra's defining capability, plus a
+data-isolation layer, soft-delete + index-integrity recovery, observability /
+post-mortem tooling, an expanded test suite, a bilingual RU/EN surface, and
+numerous security and reliability fixes.
 
 In accordance with the MIT License, Eggent's copyright notice is retained in
 [`LICENSE`](./LICENSE). This attribution is provided in good faith and with

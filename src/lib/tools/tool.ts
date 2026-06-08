@@ -828,12 +828,12 @@ export function createAgentTools(
 
     tools.install_packages = tool({
       description:
-        "Install dependencies with installer fallback logic. Supports node (npm/pnpm/yarn/bun), python (pip/uv), go, uv, and apt. Use this when package installation via code_execution is flaky.",
+        "Install dependencies with installer fallback logic. Supports node (npm/pnpm/yarn/bun), python (pip/uv), go, uv, apt (Linux), and brew (macOS/Linuxbrew — use this for system CLIs like nmap/ffmpeg on macOS, where apt is unavailable). Use this when package installation via code_execution is flaky or a command is `not found`.",
       inputSchema: z.object({
         kind: z
-          .enum(["auto", "node", "python", "go", "uv", "apt"])
+          .enum(["auto", "node", "python", "go", "uv", "apt", "brew"])
           .default("auto")
-          .describe("Dependency ecosystem to install for."),
+          .describe("Dependency ecosystem to install for. Use `brew` for system CLIs on macOS, `apt` on Debian/Ubuntu."),
         packages: z
           .array(z.string())
           .min(1)

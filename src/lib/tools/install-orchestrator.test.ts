@@ -181,6 +181,27 @@ describe("installPackages — kind: 'auto' resolution", () => {
     expect(result.resolvedKind).toBe("apt");
   });
 
+  it("auto + preferManager='brew' → resolvedKind='brew' (macOS system CLIs)", async () => {
+    spawnMock.mockImplementation(() => fakeProcess({ exitCode: 0, stdout: "ok" }));
+    const result = await installPackages({
+      kind: "auto",
+      preferManager: "brew",
+      packages: ["nmap"],
+      cwd: "/tmp",
+    });
+    expect(result.resolvedKind).toBe("brew");
+  });
+
+  it("explicit kind='brew' is honored", async () => {
+    spawnMock.mockImplementation(() => fakeProcess({ exitCode: 0, stdout: "ok" }));
+    const result = await installPackages({
+      kind: "brew",
+      packages: ["ffmpeg"],
+      cwd: "/tmp",
+    });
+    expect(result.resolvedKind).toBe("brew");
+  });
+
   it("auto with no preferManager → defaults to node (most common case)", async () => {
     spawnMock.mockImplementation(() =>
       fakeProcess({ exitCode: 0, stdout: "ok" })

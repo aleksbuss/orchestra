@@ -579,13 +579,25 @@ describe("PM #40 — aggregator prompt adapted from togethercomputer/MoA", () =>
   }, 30_000);
 });
 
-describe("PM #45 — proposer maxSteps gates on tool availability (not searchEnabled)", () => {
-  // Audit finding: PM #42 switched proposer dispatch from `maxSteps:
-  // searchEnabled ? 3 : 1` to `maxSteps: proposerTools ? 3 : 1`. The
-  // change is correct (a coder persona without tools shouldn't pay for
-  // 2 unused tool-call rounds) but was not directly asserted in tests.
-  // These cases pin the new contract so a future "quick refactor" can't
-  // silently regress to the searchEnabled-only gating.
+// PM #65 — probe a stepCountIs() StopCondition: it reports "stop" once the step
+// count reaches its bound. A tool-using proposer must NOT stop at step 1 (it has
+// to continue past the tool call to produce a final answer); a tool-less
+// proposer stops at 1 (single generation).
+async function stopsAtStep(stopWhen: unknown, stepCount: number): Promise<boolean> {
+  const cond = (Array.isArray(stopWhen) ? stopWhen[0] : stopWhen) as
+    | ((o: { steps: unknown[] }) => boolean | PromiseLike<boolean>)
+    | undefined;
+  if (typeof cond !== "function") return false;
+  return Boolean(await cond({ steps: Array.from({ length: stepCount }, () => ({})) }));
+}
+
+describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-ignored no-op)", () => {
+  // AI SDK v5+ removed `maxSteps` from generateText, so the prior
+  // `maxSteps: proposerTools ? 3 : 1` was IGNORED and tool proposers stopped
+  // right after the tool call (empty draft → dropped by isSuccessfulDraft). The
+  // contract is now expressed via `stopWhen: stepCountIs(...)`. These cases pin
+  // it: tool proposers may run multiple steps; tool-less proposers run exactly
+  // one; the dead `maxSteps` field is gone.
   function basePersonas() {
     return [
       // analyst → researcher (gets search_web → maxSteps 3)
@@ -597,7 +609,7 @@ describe("PM #45 — proposer maxSteps gates on tool availability (not searchEna
     ];
   }
 
-  it("with search enabled: researcher + reviewer proposers get maxSteps:3, coder gets maxSteps:1", async () => {
+  it("with search enabled: tool proposers (researcher/reviewer) keep stepping past the tool call; coder stops at 1", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: true, personas: basePersonas() },
     } as never);
@@ -618,26 +630,29 @@ describe("PM #45 — proposer maxSteps gates on tool availability (not searchEna
       settings,
     });
 
-    // Collect maxSteps per proposer call (calls 1-3 are proposers; the
-    // last is aggregator which doesn't use maxSteps).
+    // Calls 1-3 are proposers; the last is the aggregator.
     const proposerCalls = mockedGenerateText.mock.calls.slice(0, 3) as Array<
-      [{ system: string; maxSteps?: number }]
+      [{ system: string; maxSteps?: number; stopWhen?: unknown }]
     >;
 
-    // analyst (researcher) → 3
+    // analyst (researcher, has search_web) → must continue past the tool call.
     const analystCall = proposerCalls.find((c) => c[0].system.includes("analyze"));
-    expect(analystCall?.[0].maxSteps).toBe(3);
+    expect(analystCall?.[0].maxSteps).toBeUndefined(); // dead option is gone
+    expect(await stopsAtStep(analystCall?.[0].stopWhen, 1)).toBe(false); // not after 1 step
+    expect(await stopsAtStep(analystCall?.[0].stopWhen, 3)).toBe(true); // stops by step 3
 
-    // creative (coder) → 1 (NEW behavior; old code would have been 3)
+    // creative (coder, no tools) → single generation (stops at step 1).
     const creativeCall = proposerCalls.find((c) => c[0].system.includes("ideate"));
-    expect(creativeCall?.[0].maxSteps).toBe(1);
+    expect(creativeCall?.[0].maxSteps).toBeUndefined();
+    expect(await stopsAtStep(creativeCall?.[0].stopWhen, 1)).toBe(true);
 
-    // critic (reviewer) → 3
+    // critic (reviewer, has search_web) → must continue past the tool call.
     const criticCall = proposerCalls.find((c) => c[0].system.includes("doubt"));
-    expect(criticCall?.[0].maxSteps).toBe(3);
+    expect(await stopsAtStep(criticCall?.[0].stopWhen, 1)).toBe(false);
+    expect(await stopsAtStep(criticCall?.[0].stopWhen, 3)).toBe(true);
   }, 30_000);
 
-  it("with search disabled: every proposer gets maxSteps:1 (no tools assigned to anyone)", async () => {
+  it("with search disabled: every proposer stops at step 1 (no tools assigned to anyone)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: true, personas: basePersonas() },
     } as never);
@@ -654,11 +669,13 @@ describe("PM #45 — proposer maxSteps gates on tool availability (not searchEna
     });
 
     const proposerCalls = mockedGenerateText.mock.calls.slice(0, 3) as Array<
-      [{ system: string; maxSteps?: number; tools?: object }]
+      [{ system: string; maxSteps?: number; stopWhen?: unknown; tools?: object }]
     >;
     for (const call of proposerCalls) {
-      expect(call[0].maxSteps).toBe(1);
+      expect(call[0].maxSteps).toBeUndefined();
       expect(call[0].tools).toBeUndefined();
+      // No tools → single generation (stop at step 1).
+      expect(await stopsAtStep(call[0].stopWhen, 1)).toBe(true);
     }
   }, 30_000);
 });

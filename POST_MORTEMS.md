@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 65. MoA proposers passed the dead `maxSteps` option → tool-using proposers (the Skeptic) silently dropped
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (silent degradation of the headline feature — the fact-checking Skeptic vanished whenever it used its tool)
+**Symptoms:** None thrown, but under Swarm + search enabled, proposers assigned `search_web` (reviewer / researcher / the guaranteed Skeptic) often produced no draft: the ensemble silently ran with N−1 proposers and the fact-check arm was missing. No error, no log signature beyond `X/Y succeeded` showing fewer than expected.
+**Detection:** MoA deep-audit (sprint 2). Verified against the installed SDK: `maxSteps` appears **zero** times in `node_modules/ai/dist/index.d.ts` (ai v6), whose `generateText` accepts `stopWhen` and defaults to `@default stepCountIs(1)`.
+**Root Cause:** `moa.ts` proposer dispatch passed `maxSteps: proposerTools ? 3 : 1` behind a `@ts-expect-error`. AI SDK v5+ **removed** `maxSteps` from `generateText`; the value landed in the ignored `...settings` rest and did nothing. With the default `stepCountIs(1)`, a tool-using proposer ran exactly one step — it emitted the tool call, the loop stopped before the follow-up generation, `result.text` was empty → coerced to `"(empty draft)"` → filtered out by `isSuccessfulDraft`. Tool-LESS proposers were unaffected (one generation is correct for them), which is why the bug hid: the swarm still produced an answer, just without its critic. The misleading regression test (`PM #45`) asserted the value of `maxSteps` — i.e. it pinned a no-op, giving false confidence.
+**Resolution:** Replaced with `stopWhen: stepCountIs(proposerTools ? 3 : 1)` (the same primitive `agent.ts` already uses). Tool proposers now run up to 3 steps (call → result → answer); tool-less proposers stop at 1.
+**Regression Coverage:** `moa.test.ts` "PM #65 …" — probes the `stopWhen` StopCondition: a tool proposer must NOT stop at step 1 (continues past the tool call) and stops by step 3; a tool-less proposer stops at step 1; `maxSteps` must be absent.
+**Doc Updates:** CLAUDE.md §4 (Loop Guard) — note that multi-step tool loops use `stopWhen: stepCountIs(...)`, never the removed `maxSteps`.
+**Rule:** In AI SDK v5+, `maxSteps` is gone — a tool loop that must take >1 step REQUIRES `stopWhen: stepCountIs(n)` (default is 1 step). Never assert the value of a `@ts-expect-error`'d option in a test: you're pinning a no-op. If an option needs `@ts-expect-error`, first confirm it still exists in the installed SDK.
+
+---
+
 ## 64. Two unbounded in-memory Maps — slow OOM on a long-lived daemon
 **Date:** 2026-06
 **Status:** RESOLVED

@@ -11,7 +11,7 @@
  *                ──▶ [Proposer₃ (Minimalist)]
  */
 
-import { generateText, type ModelMessage } from "ai";
+import { generateText, stepCountIs, type ModelMessage } from "ai";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
@@ -508,11 +508,17 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
           maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 2048),
           tools: proposerTools,
-          // PM #42 — maxSteps gates on whether THIS proposer has tools.
-          // Previously `searchEnabled ? 3 : 1`, but a coder persona without
-          // tools wasting two tool-call rounds was paying for nothing.
-          // @ts-expect-error maxSteps is supported in newer versions but might not be in the local types for generateText
-          maxSteps: proposerTools ? 3 : 1,
+          // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
+          // from generateText; the old `maxSteps: …` here was silently ignored
+          // (it is not a CallSettings field), so generateText fell back to its
+          // default `stepCountIs(1)`. A tool-using proposer (the Skeptic /
+          // researcher with `search_web`) therefore stopped right after emitting
+          // the tool call — no follow-up generation, empty `text`, "(empty
+          // draft)" → dropped by `isSuccessfulDraft`. Use `stopWhen` like the
+          // agent path: tool proposers get up to 3 steps (call → result →
+          // answer); tool-less proposers do a single generation (was the
+          // PM #42 intent — a coder without tools shouldn't pay for tool rounds).
+          stopWhen: stepCountIs(proposerTools ? 3 : 1),
           abortSignal: proposerSignal,
         });
 

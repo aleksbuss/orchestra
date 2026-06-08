@@ -38,6 +38,29 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 66. MoA quality/latency tuning — proposer token hard-cap, oversized stagger, un-shuffled judge order
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (quality/latency degradation, not a crash)
+**Symptoms:** Three independent MoA inefficiencies surfaced by a focused audit (sprint 3):
+  1. Proposer drafts were silently truncated at 2048 tokens on long code/analysis tasks even when the operator configured a larger `maxTokens`.
+  2. Every Swarm turn paid up to ~4s of fixed startup latency for a 5-proposer ensemble.
+  3. Tournament rankings were systematically skewed by draft presentation position.
+**Detection:** Manual deep-read of `moa.ts` proposer dispatch + `tournament-aggregator.ts`.
+**Root Cause:**
+  1. **Hard-cap:** `moa.ts` proposer dispatch used `maxOutputTokens: Math.min(cfg.maxTokens ?? 2048, 2048)` — the only path that capped BELOW the operator's config (the bypass path and the aggregator both respect `cfg.maxTokens`).
+  2. **Stagger:** proposer `index` start delay was `index * 1000` ms. Redundant with the `agentSemaphore` (which already bounds concurrent in-flight requests) and the AI SDK's `maxRetries` 429 backoff; the linear pile-up just added latency.
+  3. **Judge order:** all K tournament judges received the SAME draft order (`buildJudgePrompt` was built once and shared). LLM judges carry a position bias; with identical ordering the bias is correlated across judges and Borda cannot average it out — so multi-judge only mitigated *model* variance, not *position* bias.
+**Resolution:**
+  1. `maxOutputTokens: proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048` (respect config; default 2048), matching the aggregator/bypass paths.
+  2. `PROPOSER_STAGGER_MS = 250` with a small jitter (was 1000); the semaphore + SDK retries remain the real 429 defense.
+  3. `shuffle(drafts)` (Fisher-Yates, injectable RNG) per judge — each judge sees an independent permutation. Borda is id-based, so scoring is invariant to presentation order; the shuffle only decorrelates position bias.
+**Regression Coverage:** `moa.test.ts` "PM #66 …" (proposer `maxOutputTokens` honours a high configured value); `tournament-aggregator.test.ts` "PM #66 …" (shuffle permutation + determinism; each judge gets its own complete prompt; Borda winner unchanged).
+**Doc Updates:** none (internal tuning; the proposer-token contract now matches the rest of the file).
+**Rule:** A proposer/judge "fan-out" stage must (a) respect the operator's per-model `maxTokens` rather than re-capping it, (b) keep request-spacing cheap and lean on the semaphore + SDK 429 backoff rather than long fixed sleeps, and (c) randomise candidate presentation order per LLM judge — correlated position bias is invisible to multi-judge aggregation otherwise.
+
+---
+
 ## 65. MoA proposers passed the dead `maxSteps` option → tool-using proposers (the Skeptic) silently dropped
 **Date:** 2026-06
 **Status:** RESOLVED

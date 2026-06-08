@@ -145,7 +145,15 @@ export async function sweepChatTrash(
     try {
       const stat = await fs.lstat(filePath);
       if (!stat.isFile()) continue;
-      if (stat.mtimeMs > cutoffMs) continue;
+      // PM #67 — prune by the DELETION timestamp encoded in the filename
+      // (`<id>.<deletedAtMs>.json`), NOT mtime. `fs.rename` (the soft-delete)
+      // preserves the chat's original mtime, so an old chat (last edited >
+      // maxAge ago) deleted today would otherwise be purged on the very next
+      // sweep instead of after maxAge — breaking the recovery window for the
+      // stale chats most likely to be deleted by mistake. Fall back to mtime
+      // only when the filename carries no parseable timestamp.
+      const deletedAtMs = parseTrashDeletedAt(file) ?? stat.mtimeMs;
+      if (deletedAtMs > cutoffMs) continue;
       await fs.unlink(filePath);
       result.removed += 1;
       if (result.removedSample.length < 20) result.removedSample.push(file);
@@ -158,6 +166,20 @@ export async function sweepChatTrash(
     }
   }
   return result;
+}
+
+/**
+ * PM #67 — extract the deletion epoch-ms from a `<id>.<deletedAtMs>.json` trash
+ * filename (the id itself may contain dots, so peel off only the trailing
+ * segment). Returns null when there is no parseable trailing timestamp, so the
+ * caller can fall back to mtime.
+ */
+function parseTrashDeletedAt(fileName: string): number | null {
+  const base = fileName.slice(0, -".json".length);
+  const lastDot = base.lastIndexOf(".");
+  if (lastDot <= 0) return null;
+  const ts = Number(base.slice(lastDot + 1));
+  return Number.isFinite(ts) && ts > 0 ? ts : null;
 }
 
 /**

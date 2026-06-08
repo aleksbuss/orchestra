@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 67. Chat-trash sweeper pruned by mtime, not deletion time → the soft-delete recovery window was broken for stale chats
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (silent data loss — defeats the PM #63 recovery guarantee for exactly the chats most likely to be deleted by mistake)
+**Symptoms:** None observed (the feature is new), but a chat last edited more than `CHAT_TRASH_MAX_AGE_MS` (30 days) ago and then soft-deleted would be permanently purged from `data/.trash/chats/` on the **next** sweep (boot or 6h) instead of after the promised 30-day window.
+**Detection:** Adversarial re-audit of earlier fixes. Verified empirically: `fs.rename` (the soft-delete move) PRESERVES the file's mtime, and `sweepChatTrash` gated purge on `stat.mtimeMs`. So the trash file inherited the chat's *content* age, not its *deletion* age.
+**Root Cause:** `sweepChatTrash` used `if (stat.mtimeMs > cutoffMs) continue;`. Soft-delete moves the file via `fs.rename`, which does not touch mtime — an old, rarely-edited chat keeps a months-old mtime even though it was just deleted. The deletion time was available all along (encoded in the trash filename `<id>.<deletedAtMs>.json` by `softDeleteChatFile`) but was ignored.
+**Resolution:** Prune by the deletion timestamp parsed from the filename (`parseTrashDeletedAt`), falling back to mtime only when the name carries no parseable timestamp. Now the 30-day window counts from the actual deletion, regardless of how old the chat's content was.
+**Regression Coverage:** `sweepers.test.ts` "PM #67 …" — a stale-mtime/just-deleted file is KEPT; a fresh-mtime/long-deleted file is PURGED; malformed names fall back to mtime. The pre-existing "purges older than maxAge" test was also corrected (it used placeholder filename timestamps `111`/`222` and silently relied on mtime).
+**Doc Updates:** none (internal; the Data Layout retention note for `data/.trash/chats` already said "older than 30 days" — now actually true).
+**Rule:** When you sort/expire files that were placed by `fs.rename`/move, mtime reflects the CONTENT age, not the move/placement age. Encode the event time you actually care about (deletion, archival) in the name or a sidecar, and expire by that — never assume mtime == "when it landed here".
+
+---
+
 ## 66. MoA quality/latency tuning — proposer token hard-cap, oversized stagger, un-shuffled judge order
 **Date:** 2026-06
 **Status:** RESOLVED

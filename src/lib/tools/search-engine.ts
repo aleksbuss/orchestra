@@ -12,6 +12,29 @@ interface SearchResult {
 const SEARCH_FETCH_TIMEOUT_MS = 15_000;
 
 /**
+ * PM #68 — single source of truth for "is web search actually USABLE right now".
+ * True only when search is enabled, has a real provider, AND (for key-requiring
+ * providers) a key is present in the environment or settings. Callers gate the
+ * `search_web` tool registration (`tool.ts`) and the MoA proposer tool-assignment
+ * (`moa.ts`) on this, NOT on the looser `enabled && provider !== "none"`. The old
+ * check handed the agent a `search_web` tool that could only ever return "key not
+ * configured" — wasting a turn step and, on tool-using turns, risking a derailed
+ * answer. SearXNG needs no key; Tavily does (env `TAVILY_API_KEY` wins over the
+ * cleartext settings value, matching `searchTavily`).
+ */
+export function isSearchUsable(search: AppSettings["search"]): boolean {
+  if (!search?.enabled || search.provider === "none") return false;
+  switch (search.provider) {
+    case "searxng":
+      return true;
+    case "tavily":
+      return Boolean(process.env.TAVILY_API_KEY || search.apiKey);
+    default:
+      return false;
+  }
+}
+
+/**
  * Search the web using configured provider.
  *
  * @param signal Optional AbortSignal from the caller (typically `abortSignal`

@@ -38,6 +38,34 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 69. Intermittent: main agent stops after a tool call without delivering the final answer (deepseek/OpenRouter `finishReason: "other"`)
+**Date:** 2026-06
+**Status:** OPEN (diagnosed; fix pending)
+**Severity:** P1 (intermittent — user occasionally gets no answer on a tool-using Swarm turn)
+**Symptoms:** On a Swarm turn where the main agent uses a tool (e.g. `search_web`), it sometimes stops right after the tool result WITHOUT calling the `response` tool — the chat ends `user → assistant(tool-call) → tool(result)` with no final answer. Intermittent: in an end-to-end smoke test, an identical-shape search prompt failed once (`finishReason: "other"`, no `response`) and succeeded on a later run (`… → assistant(response-call) → tool(response)` with the answer). The MoA ensemble itself completed both times (proposers + aggregation + consensus); the failure is in the OUTER agent's tool-continuation, not the swarm.
+**Detection:** Real end-to-end smoke run (not caught by unit/integration tests, which mock the model). Reproduced ~1-in-N with `deepseek/deepseek-chat` via OpenRouter + `search_web`.
+**Root Cause (hypothesized):** DeepSeek-via-OpenRouter appears to occasionally return `finishReason: "other"` for a step that emitted reasoning text + a tool call. The AI SDK's tool loop continues on tool-call CONTENT, but when the model then doesn't proceed to a `response` call, the turn ends with the tool result as the last message. PM #61's `unwrapSerializedResponseCall` handles "response emitted as text"; it does NOT cover "no response emitted at all". Not caused by the PM #65/66 MoA changes (the ensemble path is independent and verified working).
+**Resolution (planned):** Options to evaluate — (a) detect "turn ended with a tool result and no assistant answer" and auto-continue one step forcing the `response` tool; (b) treat `finishReason: "other"` after a tool call as "keep going"; (c) a final-answer watchdog. Needs a focused investigation + a MockLanguageModelV3 integration test that scripts the `other`-after-tool case.
+**Regression Coverage:** none yet — TODO with the fix.
+**Doc Updates:** none yet.
+**Rule:** A tool-using agent turn must GUARANTEE a final answer. "The model usually calls `response`" is not a guarantee — add a deterministic fallback (force the response / re-prompt) when a turn ends on a tool result with no delivered answer.
+
+---
+
+## 68. Web search offered to the agent even when unusable (enabled without a key) → wasted step / derailed turns
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (robustness — `search_web` that can only return "key not configured")
+**Symptoms:** `search.enabled = true` with a key-requiring provider (Tavily) but no key still registered the `search_web` tool for the main agent AND assigned it to MoA proposers (Skeptic/researcher). The tool could only ever return "Tavily API key not configured", wasting a turn step and adding a failure surface on tool-using turns.
+**Detection:** End-to-end smoke test of the MoA pipeline (the user's settings had `enabled: true`, no settings key).
+**Root Cause:** Two gating sites (`tool.ts` search-tool registration, `moa.ts` `searchEnabled`) checked only `search.enabled && provider !== "none"` — never whether a key was present for a key-requiring provider.
+**Resolution:** Added `isSearchUsable(search)` (single source of truth in `search-engine.ts`): enabled + real provider + (SearXNG needs no key | Tavily needs an env or settings key). Both gating sites now use it.
+**Regression Coverage:** `search-engine.test.ts` — disabled/none → false; searxng → true keyless; tavily → true with settings or env key, false with neither.
+**Doc Updates:** none (internal).
+**Rule:** Gate a capability's availability on whether it can actually WORK (key present, dependency reachable), not merely on an `enabled` flag. An enabled-but-unusable tool is worse than an absent one — it burns steps and can derail the agent.
+
+---
+
 ## 67. Chat-trash sweeper pruned by mtime, not deletion time → the soft-delete recovery window was broken for stale chats
 **Date:** 2026-06
 **Status:** RESOLVED

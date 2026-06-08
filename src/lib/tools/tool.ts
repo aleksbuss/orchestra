@@ -17,7 +17,7 @@ import {
 } from "@/lib/tools/code-execution";
 import { memorySave, memoryLoad, memoryDelete } from "@/lib/tools/memory-tools";
 import { knowledgeQuery } from "@/lib/tools/knowledge-query";
-import { searchWeb } from "@/lib/tools/search-engine";
+import { searchWeb, isSearchUsable } from "@/lib/tools/search-engine";
 import { createWebTaskTool } from "@/lib/tools/web-task";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
@@ -1291,8 +1291,10 @@ export function createAgentTools(
     },
   });
 
-  // Search engine tool
-  if (settings.search.enabled && settings.search.provider !== "none") {
+  // Search engine tool — PM #68: only register it when search is actually
+  // usable (a key-requiring provider with no key offers a tool that can only
+  // return "not configured").
+  if (isSearchUsable(settings.search)) {
     tools.search_web = tool({
       description:
         "Search the internet for current information. Use this when you need up-to-date information, facts you're unsure about, or any web-based research.",

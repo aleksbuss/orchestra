@@ -20,14 +20,20 @@
 import { describe, it, expect } from "vitest";
 import { generateText, stepCountIs, tool } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
+import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import { z } from "zod";
 
-function usage() {
-  return {
+// The V3 generate-result shape (finishReason is an object union, usage is
+// deeply nested) is richer than this behavioural test needs — and the tool
+// LOOP is driven by tool-call CONTENT, not by finishReason. Build a minimal
+// result and contain the single cast here.
+function gen(content: unknown[], finishReason: string): LanguageModelV3GenerateResult {
+  const usage = {
     inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: 10, text: 10, reasoning: 0 },
     totalTokens: 20,
-  } as never;
+  };
+  return { content, finishReason, usage, warnings: [] } as unknown as LanguageModelV3GenerateResult;
 }
 
 /**
@@ -41,8 +47,8 @@ function makeToolUsingModel(answer: string): MockLanguageModelV3 {
         (m) => m.role === "tool"
       );
       if (!sawToolResult) {
-        return {
-          content: [
+        return gen(
+          [
             {
               type: "tool-call",
               toolCallId: "tc-1",
@@ -50,17 +56,10 @@ function makeToolUsingModel(answer: string): MockLanguageModelV3 {
               input: JSON.stringify({ query: "anything" }),
             },
           ],
-          finishReason: "tool-calls",
-          usage: usage(),
-          warnings: [],
-        };
+          "tool-calls"
+        );
       }
-      return {
-        content: [{ type: "text", text: answer }],
-        finishReason: "stop",
-        usage: usage(),
-        warnings: [],
-      };
+      return gen([{ type: "text", text: answer }], "stop");
     },
   });
 }
@@ -103,12 +102,7 @@ describe("PM #65 — proposer tool-loop contract (real generateText + MockLangua
 
   it("a tool-LESS proposer returns its text in a single step (stepCountIs(1) is correct there)", async () => {
     const model = new MockLanguageModelV3({
-      doGenerate: async () => ({
-        content: [{ type: "text", text: "DIRECT-DRAFT" }],
-        finishReason: "stop",
-        usage: usage(),
-        warnings: [],
-      }),
+      doGenerate: async () => gen([{ type: "text", text: "DIRECT-DRAFT" }], "stop"),
     });
     const result = await generateText({
       model,

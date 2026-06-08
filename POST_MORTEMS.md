@@ -40,14 +40,14 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ## 69. Intermittent: main agent stops after a tool call without delivering the final answer (deepseek/OpenRouter `finishReason: "other"`)
 **Date:** 2026-06
-**Status:** OPEN (diagnosed; fix pending)
+**Status:** RESOLVED
 **Severity:** P1 (intermittent — user occasionally gets no answer on a tool-using Swarm turn)
 **Symptoms:** On a Swarm turn where the main agent uses a tool (e.g. `search_web`), it sometimes stops right after the tool result WITHOUT calling the `response` tool — the chat ends `user → assistant(tool-call) → tool(result)` with no final answer. Intermittent: in an end-to-end smoke test, an identical-shape search prompt failed once (`finishReason: "other"`, no `response`) and succeeded on a later run (`… → assistant(response-call) → tool(response)` with the answer). The MoA ensemble itself completed both times (proposers + aggregation + consensus); the failure is in the OUTER agent's tool-continuation, not the swarm.
 **Detection:** Real end-to-end smoke run (not caught by unit/integration tests, which mock the model). Reproduced ~1-in-N with `deepseek/deepseek-chat` via OpenRouter + `search_web`.
 **Root Cause (hypothesized):** DeepSeek-via-OpenRouter appears to occasionally return `finishReason: "other"` for a step that emitted reasoning text + a tool call. The AI SDK's tool loop continues on tool-call CONTENT, but when the model then doesn't proceed to a `response` call, the turn ends with the tool result as the last message. PM #61's `unwrapSerializedResponseCall` handles "response emitted as text"; it does NOT cover "no response emitted at all". Not caused by the PM #65/66 MoA changes (the ensemble path is independent and verified working).
-**Resolution (planned):** Options to evaluate — (a) detect "turn ended with a tool result and no assistant answer" and auto-continue one step forcing the `response` tool; (b) treat `finishReason: "other"` after a tool call as "keep going"; (c) a final-answer watchdog. Needs a focused investigation + a MockLanguageModelV3 integration test that scripts the `other`-after-tool case.
-**Regression Coverage:** none yet — TODO with the fix.
-**Doc Updates:** none yet.
+**Resolution:** `runAgent`'s `onFinish` now detects a no-delivery turn via `turnHasDeliverableAnswer(responseMessages)` — true only when a `response` tool call/result OR real assistant text (checked AFTER `stripThinkingTags`, so a `<thinking>`-only turn counts as empty) is present. When the turn auto-continue branch does NOT fire and nothing was delivered, it forces ONE **tool-less** `generateText` ("write your final answer now, no tools") and ships its text as the assistant message (reusing the existing `continuationText` path, so usage is billed and persistence is unchanged). Tool-less ⇒ it can only emit text, never another tool call ⇒ no loop.
+**Regression Coverage:** `final-answer-guard.test.ts` pins the decision (`turnHasDeliverableAnswer`): response tool call/result and plain text → delivered; non-response tool call+result, `<thinking>`-only, and empty → NOT delivered (forces the fallback). The forced generation itself reuses the truncation-continuation path already exercised by the chat-store/usage tests.
+**Doc Updates:** none (internal agent-loop hardening).
 **Rule:** A tool-using agent turn must GUARANTEE a final answer. "The model usually calls `response`" is not a guarantee — add a deterministic fallback (force the response / re-prompt) when a turn ends on a tool result with no delivered answer.
 
 ---

@@ -31,7 +31,7 @@ It is a personal exploration, not a production product. The [`POST_MORTEMS.md`](
 
 ### Origins
 
-Orchestra is a hard-fork of [Eggent](https://github.com/eggent-ai/eggent), substantially extended (~50% net new code, new architecture layers, full Russian/English bilingual surface, project sandbox export, multi-provider waterfall, etc.). The upstream's MIT license is preserved; see [`NOTICE.md`](../NOTICE.md) for full attribution.
+Orchestra is a hard-fork of [Eggent](https://github.com/eggent-ai/eggent). The Eggent codebase was imported as the starting point, then extended on top of it: a data-isolation layer (`ORCHESTRA_DATA_DIR`), chat soft-delete + index-integrity recovery, observability/post-mortem tooling, an expanded test suite, a Russian/English bilingual surface, project sandbox export, the multi-provider key waterfall, and numerous fixes (~30k net lines added across 100+ new files). The **foundational architecture — the Mixture-of-Agents pipeline, the JSON-on-disk storage model, and the agent/tooling layout — originates from Eggent**, and the majority of the imported source files remain substantially intact. The upstream's MIT license is preserved; see [`NOTICE.md`](../NOTICE.md) for full attribution.
 
 ---
 

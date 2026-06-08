@@ -70,6 +70,7 @@ export {
 } from "@/lib/agent/moa-router";
 
 import { generateDynamicSwarm } from "@/lib/agent/moa-router";
+import { isSearchUsable } from "@/lib/tools/search-engine";
 
 
 /**
@@ -271,7 +272,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     : settings.chatModel;
   const routerConfig = resolveWorkerKey(routingModelConfig, settings);
   
-  const searchEnabled = settings.search?.enabled && settings.search.provider !== "none";
+  // PM #68 — gate proposer search tools on search being USABLE (key present),
+  // not merely enabled, so the Skeptic/researcher aren't handed a search_web
+  // that can only return "key not configured".
+  const searchEnabled = isSearchUsable(settings.search);
 
   // PM #51 — fetch past successful traces similar to this prompt and
   // render them as few-shots for the Router. When trace memory is off

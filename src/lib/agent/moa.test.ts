@@ -57,6 +57,11 @@ vi.mock("./semaphore", () => ({
 
 vi.mock("@/lib/tools/search-engine", () => ({
   searchWeb: vi.fn(),
+  // PM #68 — moa.ts now gates proposer tools on isSearchUsable. Mirror the
+  // intent (enabled + real provider) so the existing "search enabled/disabled"
+  // cases keep exercising the tool-assignment path.
+  isSearchUsable: (s: { enabled?: boolean; provider?: string } | undefined) =>
+    !!(s?.enabled && s.provider !== "none"),
 }));
 
 import { runMoAEnsemble, MOA_PROPOSERS, AGGREGATOR_SYSTEM_PROMPT } from "./moa";

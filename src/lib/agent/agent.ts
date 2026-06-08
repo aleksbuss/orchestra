@@ -7,6 +7,7 @@ import {
   type ToolExecutionOptions,
   type ToolSet,
 } from "ai";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
@@ -714,7 +715,7 @@ async function runSubAgent(
       maxRetries: 3,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
-      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal,
     });
     // PM #61 — unwrap a serialized `response` call if the model emitted it as
@@ -1258,7 +1259,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         }
       : {}),
     temperature: settings.chatModel.temperature ?? 0.7,
-    maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+    maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
     abortSignal: options.abortSignal,
     onFinish: async (event) => {
       // ── Guaranteed DAG completion — even if this callback itself throws ──
@@ -1617,7 +1618,7 @@ export async function runAgentText(options: {
       maxRetries: 3,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
-      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal: options.abortSignal,
     });
 
@@ -1822,7 +1823,7 @@ export async function runSubordinateAgent(options: {
       maxRetries: 3,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
-      maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+      maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal: options.abortSignal,
     });
     const responseMessages = (

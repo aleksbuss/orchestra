@@ -446,8 +446,10 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 
 Five files cross the §8 1500-line "MUST decompose next substantive PR" line. None can be split in a single PR without a comprehensive integration test scaffold — each touches a critical contract (PM #1 abortSignal, PM #5 SSE, PM #17 tool-capability detection, PM #29 flush, PM #50 code-execution). The seam analysis below is the contract to honor when the next focused PR lands.
 
-**`src/lib/agent/agent.ts` (~2040 LOC, 9 hot edits in 90d)** — orchestration core, every chat turn flows through it.
-- **Phase 1 DONE:** the message/response helpers (`stripThinkingTags`, `unwrapSerializedResponseCall` PM #61, `getLast*`/`extract*` text helpers, `shouldAutoContinueAssistant`, `turnHasDeliverableAnswer` + `resolveTurnContinuation` PM #36/#69) were extracted verbatim to [`agent-response.ts`](src/lib/agent/agent-response.ts) (behavior-preserving — full suite green; re-exported from `agent.ts` so importers are unaffected). Remaining seams below.
+**`src/lib/agent/agent.ts` (~1860 LOC, 9 hot edits in 90d)** — orchestration core, every chat turn flows through it.
+- **Phase 1 DONE:** message/response helpers (`stripThinkingTags`, `unwrapSerializedResponseCall` PM #61, `getLast*`/`extract*` text helpers, `shouldAutoContinueAssistant`, `turnHasDeliverableAnswer` + `resolveTurnContinuation` PM #36/#69) → [`agent-response.ts`](src/lib/agent/agent-response.ts).
+- **Phase 2 DONE:** `ChatMessage`↔`ModelMessage` conversion + the per-turn LLM request logger → [`agent-messages.ts`](src/lib/agent/agent-messages.ts).
+- Both extractions are behavior-preserving (full suite green) and re-exported / re-imported so callers are unaffected. The remaining seams below are higher-risk — they restructure `runAgent`'s control flow, not pure helpers.
 - Natural seams:
   - `agent-stream.ts` (~500): the `streamText` + SSE plumbing block at L1540, including the `pendingChatErrorClassification` writeback path.
   - `agent-fallback.ts` (~400): the model-fallback retry chain. Touches PM #17 (`modelSupportsTools`) — keep both branches honest.

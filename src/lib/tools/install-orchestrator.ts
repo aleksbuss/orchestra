@@ -5,7 +5,7 @@ import { spawn } from "child_process";
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const OUTPUT_CAP = 120_000;
 
-export type InstallKind = "auto" | "node" | "python" | "go" | "uv" | "apt";
+export type InstallKind = "auto" | "node" | "python" | "go" | "uv" | "apt" | "brew";
 
 export type InstallAttempt = {
   command: string;
@@ -143,7 +143,28 @@ async function buildInstallPlans(params: {
       return buildGoPlans(params);
     case "apt":
       return await buildAptPlans(params);
+    case "brew":
+      return buildBrewPlans(params);
   }
+}
+
+/**
+ * Homebrew install plan (macOS / Linuxbrew). No sudo — brew installs into a
+ * user-writable prefix. Returns [] when brew isn't on PATH (caller surfaces a
+ * clear "no installer available" error).
+ */
+function buildBrewPlans(params: { packages: string[]; cwd: string }): InstallPlan[] {
+  if (!commandExists("brew")) {
+    return [];
+  }
+  return [
+    {
+      manager: "brew",
+      steps: [
+        { manager: "brew", argv: ["brew", "install", ...params.packages], cwd: params.cwd },
+      ],
+    },
+  ];
 }
 
 function buildNodePlans(params: {
@@ -531,6 +552,7 @@ function resolveAutoKind(kind: InstallKind, preferManager?: string): Exclude<Ins
   if (manager === "uv") return "uv";
   if (manager === "pip" || manager === "python") return "python";
   if (manager === "apt" || manager === "apt-get") return "apt";
+  if (manager === "brew" || manager === "homebrew") return "brew";
   return "node";
 }
 

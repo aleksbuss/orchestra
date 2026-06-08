@@ -520,12 +520,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // (proposerConfig), not workerConfig. A tier slot can override
           // both alongside the model id.
           temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
-          // PM #66 — respect the operator's configured proposer maxTokens
-          // (matches the bypass path at the top and the aggregator below);
-          // default to 2048 when unset. The prior `Math.min(…, 2048)` hard-
-          // capped EVERY proposer at 2048 regardless of config, truncating long
-          // code/analysis drafts — the exact tasks where MoA helps most.
-          maxOutputTokens: proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048,
+          // PM #66 — proposers are INTERMEDIATE "draft" outputs that feed the
+          // aggregator and run N-way PARALLEL, so they keep a bounded ceiling
+          // (like the codebase's other intermediate calls — critic=256,
+          // title-gen=Math.min(…,1200)). A re-audit found that removing the cap
+          // entirely risked an ~Nx cost blow-up when an operator sets a high
+          // utility maxTokens. We respect a configured maxTokens UP TO a ceiling
+          // (raised 2048 → 4096 so genuinely long drafts aren't truncated),
+          // defaulting to 2048 when unset. The final-answer paths (aggregator,
+          // bypass, revisor) are uncapped — they're 1×, not N×.
+          maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 4096),
           tools: proposerTools,
           // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
           // from generateText; the old `maxSteps: …` here was silently ignored

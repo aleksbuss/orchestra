@@ -680,6 +680,42 @@ describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-i
   }, 30_000);
 });
 
+describe("PM #66 — proposer maxOutputTokens respects configured maxTokens (no hard 2048 cap)", () => {
+  it("does NOT cap proposers at 2048 when the operator configured a higher maxTokens", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Analyst", systemPrompt: "[GOAL] analyze [RULES] x [FORMAT] md", color: "blue" },
+          { id: "creative", role: "Creative", systemPrompt: "[GOAL] ideate [RULES] x [FORMAT] md", color: "green" },
+        ],
+      },
+    } as never);
+    mockedGenerateText.mockResolvedValue({
+      text: "draft text long enough to skip reflection short-circuit logic.",
+      usage: { inputTokens: 10, outputTokens: 10 },
+    } as never);
+
+    const base = fakeSettings();
+    const settings: AppSettings = {
+      ...base,
+      // Proposers resolve to the utilityModel when no preset/tiers are set.
+      utilityModel: { ...base.utilityModel, maxTokens: 8000 },
+    };
+
+    await runMoAEnsemble({ chatId: "c1", userMessage: "test", history: [], settings });
+
+    // Calls 0-1 are the two proposers (call 2 is the aggregator).
+    const proposerCalls = mockedGenerateText.mock.calls.slice(0, 2) as Array<
+      [{ maxOutputTokens?: number }]
+    >;
+    for (const call of proposerCalls) {
+      // Pre-fix this was Math.min(8000, 2048) = 2048.
+      expect(call[0].maxOutputTokens).toBe(8000);
+    }
+  }, 30_000);
+});
+
 describe("PM #45 — unified skeptic detection (no double-injection on 'qa_engineer'-shape ids)", () => {
   // Audit finding: PM #37 used its own SKEPTIC_PATTERN regex; PM #42
   // used detectProposerRole's reviewer regex. They diverged on "qa",

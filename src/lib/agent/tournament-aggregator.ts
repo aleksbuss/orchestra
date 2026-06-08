@@ -79,6 +79,24 @@ export interface BordaResult {
  * contribution (no negative points). This handles judges that fail to
  * list every draft (mis-counted ID, dropped ID, etc.).
  */
+/**
+ * PM #66 — Fisher-Yates shuffle (returns a NEW array; input untouched). Used to
+ * present drafts in an independent random order to each tournament judge. LLM
+ * judges carry a position bias (they over-favour the first / last candidate);
+ * with every judge seeing the same order that bias is correlated and the K-judge
+ * Borda count cannot average it out. Borda is id-based (see `bordaCount`), so
+ * permuting the presentation order is invisible to scoring — it only
+ * decorrelates the bias. `rng` is injectable so tests can be deterministic.
+ */
+export function shuffle<T>(arr: readonly T[], rng: () => number = Math.random): T[] {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 export function bordaCount(
   rankings: TournamentJudgeRanking[],
   allDraftIds: string[]
@@ -206,7 +224,6 @@ export async function runTournamentAggregation(
   const k = Math.max(1, Math.floor(judgeCount));
 
   const draftIds = drafts.map((d) => d.proposerId);
-  const prompt = buildJudgePrompt(userMessage, drafts);
   const judgeModel = createModel(judgeConfig, {});
 
   // Same `AbortSignal.any()` graceful fallback pattern used by proposer
@@ -219,16 +236,20 @@ export async function runTournamentAggregation(
     judgeSignal = AbortSignal.timeout(JUDGE_TIMEOUT_MS);
   }
 
-  const judgePromises = Array.from({ length: k }, (_, idx) =>
-    runSingleJudge({
+  const judgePromises = Array.from({ length: k }, (_, idx) => {
+    // PM #66 — present drafts in an INDEPENDENT random order to each judge so
+    // LLM position bias decorrelates across judges. Borda is id-based, so the
+    // permutation is invisible to scoring (see bordaCount).
+    const presented = shuffle(drafts);
+    return runSingleJudge({
       idx,
-      prompt,
+      prompt: buildJudgePrompt(userMessage, presented),
       judgeModel,
       judgeConfig,
-      draftIds,
+      draftIds: presented.map((d) => d.proposerId),
       abortSignal: judgeSignal,
-    })
-  );
+    });
+  });
   const results = await Promise.all(judgePromises);
 
   let cumulativeUsage: ChatUsage | undefined;

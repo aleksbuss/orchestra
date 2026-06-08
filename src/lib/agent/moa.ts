@@ -72,6 +72,14 @@ export {
 import { generateDynamicSwarm } from "@/lib/agent/moa-router";
 
 
+/**
+ * PM #66 — per-proposer start stagger (ms × proposer index). Small by design:
+ * just enough to break the simultaneous request burst on rate-limited free
+ * tiers. The semaphore + the SDK's 429 backoff do the heavy lifting; this only
+ * avoids the initial thundering herd.
+ */
+const PROPOSER_STAGGER_MS = 250;
+
 // ── Local cosine similarity (PM #46 convergence check) ─────────────────
 // Same algorithm as in `disagreement.ts` and `blackboard.ts`. Inlined here
 // to keep the import surface tight; if a fourth caller materialises,
@@ -413,9 +421,15 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       },
     });
 
-    // 2. Stagger starts to prevent 429 Too Many Requests on free/cheap tiers (e.g. OpenRouter)
+    // 2. Small staggered start to break the simultaneous request burst on
+    // free/cheap tiers (e.g. OpenRouter). PM #66 — was `index * 1000` (up to
+    // ~4s of added latency for 5 proposers). The `agentSemaphore` already
+    // bounds concurrent in-flight requests and the AI SDK's `maxRetries` (=2)
+    // already backs off on 429, so a much smaller jittered stagger suffices to
+    // avoid the initial thundering herd without the linear latency pile-up.
     if (index > 0) {
-      await new Promise((resolve) => setTimeout(resolve, index * 1000));
+      const stagger = index * PROPOSER_STAGGER_MS + Math.floor(Math.random() * 150);
+      await new Promise((resolve) => setTimeout(resolve, stagger));
     }
 
     return agentSemaphore.run(async () => {
@@ -506,7 +520,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // (proposerConfig), not workerConfig. A tier slot can override
           // both alongside the model id.
           temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
-          maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 2048),
+          // PM #66 — respect the operator's configured proposer maxTokens
+          // (matches the bypass path at the top and the aggregator below);
+          // default to 2048 when unset. The prior `Math.min(…, 2048)` hard-
+          // capped EVERY proposer at 2048 regardless of config, truncating long
+          // code/analysis drafts — the exact tasks where MoA helps most.
+          maxOutputTokens: proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048,
           tools: proposerTools,
           // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
           // from generateText; the old `maxSteps: …` here was silently ignored

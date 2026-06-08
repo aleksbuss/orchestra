@@ -28,6 +28,7 @@ vi.mock("@/lib/providers/llm-provider", () => ({
 import {
   bordaCount,
   runTournamentAggregation,
+  shuffle,
   type TournamentDraft,
   type TournamentJudgeRanking,
 } from "./tournament-aggregator";
@@ -294,5 +295,52 @@ describe("PM #52 — runTournamentAggregation", () => {
     });
     expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
     expect(result.successfulJudgeCount).toBe(1);
+  });
+});
+
+describe("PM #66 — per-judge draft-order shuffle (position-bias decorrelation)", () => {
+  it("shuffle returns a permutation: same elements, no loss/dup, input untouched", () => {
+    const input = ["a", "b", "c", "d", "e"];
+    const out = shuffle(input, () => 0.5);
+    expect([...out].sort()).toEqual([...input].sort());
+    expect(out).toHaveLength(input.length);
+    expect(input).toEqual(["a", "b", "c", "d", "e"]); // input not mutated
+  });
+
+  it("shuffle is deterministic under an injected rng", () => {
+    // rng=0 → Fisher-Yates always swaps with index 0.
+    // [a,b,c]: i=2 swap(2,0)→[c,b,a]; i=1 swap(1,0)→[b,c,a]
+    expect(shuffle(["a", "b", "c"], () => 0)).toEqual(["b", "c", "a"]);
+  });
+
+  it("each judge gets its own prompt that still contains every draft; Borda (id-based) is unaffected", async () => {
+    const drafts: TournamentDraft[] = [
+      { proposerId: "p1", role: "Coder", text: "ALPHA-DRAFT-UNIQUE" },
+      { proposerId: "p2", role: "Coder", text: "BETA-DRAFT-UNIQUE" },
+      { proposerId: "p3", role: "Coder", text: "GAMMA-DRAFT-UNIQUE" },
+    ];
+    mockedGenerateObject.mockResolvedValue({
+      object: { rankedProposerIds: ["p1", "p2", "p3"] },
+      usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+    } as any);
+
+    const result = await runTournamentAggregation({
+      drafts,
+      userMessage: "test",
+      judgeConfig,
+      judgeCount: 2,
+    });
+
+    // One independently-built prompt per judge (not a single shared prompt).
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    for (const call of mockedGenerateObject.mock.calls) {
+      const prompt = (call[0] as { prompt: string }).prompt;
+      // The per-judge shuffle must never drop or duplicate a draft.
+      expect(prompt).toContain("ALPHA-DRAFT-UNIQUE");
+      expect(prompt).toContain("BETA-DRAFT-UNIQUE");
+      expect(prompt).toContain("GAMMA-DRAFT-UNIQUE");
+    }
+    // Borda scores by id, so the winner is independent of presentation order.
+    expect(result.winnerProposerId).toBe("p1");
   });
 });

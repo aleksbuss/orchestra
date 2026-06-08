@@ -12,6 +12,7 @@
  */
 
 import { generateText, stepCountIs, type ModelMessage } from "ai";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
 import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
@@ -348,7 +349,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           { role: "user", content: userMessage },
         ],
         temperature: brainConfig.temperature ?? 0.5,
-        maxOutputTokens: brainConfig.maxTokens ?? 2048,
+        maxOutputTokens: resolveMaxOutputTokens(brainConfig),
         abortSignal,
       });
       // PM #36 — fold Router + direct-answer usage into the per-chat banner.
@@ -853,7 +854,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         { role: "user", content: aggregatorPrompt },
       ],
       temperature: 0.3,
-      maxOutputTokens: Math.max(brainConfig.maxTokens ?? 4096, 2048),
+      maxOutputTokens: resolveMaxOutputTokens(brainConfig),
       abortSignal,
     });
 

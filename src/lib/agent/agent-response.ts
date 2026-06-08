@@ -8,6 +8,7 @@
  * (final-answer-guard.test.ts) and shrinks the agent.ts hot file.
  */
 import { generateText, type ModelMessage } from "ai";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import type { AppSettings } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 
@@ -315,7 +316,7 @@ export async function resolveTurnContinuation(args: {
         ]),
         providerOptions,
         temperature: settings.chatModel.temperature ?? 0.7,
-        maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+        maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
         abortSignal,
       });
       const text = unwrapSerializedResponseCall((forced.text || "").trim());

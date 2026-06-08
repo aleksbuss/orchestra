@@ -1,4 +1,5 @@
 import { generateText } from "ai";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import type { RawUsage } from "@/lib/cost/accumulator";
@@ -186,7 +187,7 @@ export async function reviseWithCritique(params: {
         },
       ],
       temperature: 0.3,
-      maxOutputTokens: Math.max(modelConfig.maxTokens ?? 4096, 2048),
+      maxOutputTokens: resolveMaxOutputTokens(modelConfig),
       abortSignal,
     });
 

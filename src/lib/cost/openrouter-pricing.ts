@@ -45,6 +45,7 @@ import path from "path";
 import { safeWriteFile } from "@/lib/storage/fs-utils";
 import type { ModelPricing } from "./pricing-types";
 import { getDataDir } from "@/lib/storage/data-dir";
+import { registerOpenRouterMaxOutputLookup } from "@/lib/providers/model-output-limits";
 
 /**
  * OpenRouter `/api/v1/models` response shape (subset we use).
@@ -56,6 +57,11 @@ interface OpenRouterModelEntry {
   pricing?: {
     prompt?: string;
     completion?: string;
+  };
+  // OpenRouter exposes the per-model output ceiling here. Used to auto-size
+  // `maxOutputTokens` per selected model (see model-output-limits.ts).
+  top_provider?: {
+    max_completion_tokens?: number | null;
   };
 }
 
@@ -75,6 +81,11 @@ const CACHE_FILENAME = "openrouter-pricing.json";
 
 let inMemoryPricing: Map<string, ModelPricing> = new Map();
 let inMemoryFetchedAt: number | null = null;
+// Per-model max output tokens (`top_provider.max_completion_tokens`), keyed by
+// lowercased model id. Best-effort: populated by the same `/models` fetch that
+// builds pricing; until the first fetch lands, model-output-limits falls back
+// to its static family registry. Not persisted (re-derived each boot fetch).
+let inMemoryMaxOutput: Map<string, number> = new Map();
 
 function dataDir(): string {
   // Mirrors the convention used by chat-store / project-store — `data/`
@@ -120,16 +131,23 @@ export async function fetchOpenRouterPricing(options: {
   const json = (await res.json()) as OpenRouterListing;
   const entries = Array.isArray(json?.data) ? json.data : [];
   const map = new Map<string, ModelPricing>();
+  const maxOut = new Map<string, number>();
   for (const entry of entries) {
     if (!entry?.id) continue;
+    const id = entry.id.toLowerCase();
+    // Capture the output ceiling BEFORE the pricing guard so free models
+    // (no pricing) still contribute their max_completion_tokens.
+    const mo = entry.top_provider?.max_completion_tokens;
+    if (typeof mo === "number" && mo > 0) maxOut.set(id, mo);
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
-    map.set(entry.id.toLowerCase(), {
+    map.set(id, {
       inputUsdPerMillion: promptPerToken * 1_000_000,
       outputUsdPerMillion: completionPerToken * 1_000_000,
     });
   }
+  inMemoryMaxOutput = maxOut;
   return map;
 }
 
@@ -312,3 +330,23 @@ export function __seedOpenRouterPricingForTests(
   inMemoryPricing = new Map(entries.map(([k, v]) => [k.toLowerCase(), v]));
   inMemoryFetchedAt = fetchedAt;
 }
+
+/**
+ * Per-model max output tokens from the live OpenRouter `/models` cache
+ * (`top_provider.max_completion_tokens`). Undefined until the first fetch lands
+ * — `model-output-limits` falls back to its static family registry meanwhile.
+ */
+export function getOpenRouterMaxOutput(modelId: string): number | undefined {
+  return inMemoryMaxOutput.get(modelId.toLowerCase());
+}
+
+/** Test-only: seed the OpenRouter max-output map without a network fetch. */
+export function __setOpenRouterMaxOutputForTest(map: Map<string, number>): void {
+  inMemoryMaxOutput = new Map(
+    Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
+  );
+}
+
+// Wire the OpenRouter dynamic source into the model-output-limits resolver.
+// One-directional dependency (resolver imports only types) → no cycle.
+registerOpenRouterMaxOutputLookup(getOpenRouterMaxOutput);

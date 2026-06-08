@@ -13,6 +13,8 @@
 
 A team of specialized agents, not just one model. Self-hosted, BYOK, MIT-licensed.
 
+Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, substantially extended. See [`NOTICE.md`](./NOTICE.md).
+
 [Quick Start](#-quick-start) · [Architecture](#-the-moa-pipeline) · [Features](#-features) · [Docs](#-documentation)
 
 </div>

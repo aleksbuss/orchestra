@@ -6,10 +6,28 @@ with a bundled-skills collection in [`bundled-skills/`](./bundled-skills/) for
 out-of-the-box experience; some of those skills retain their original
 licensing and are redistributed here under their own terms.
 
+## Origin — upstream attribution (Eggent)
+
+Orchestra is a **hard fork of [Eggent](https://github.com/eggent-ai/eggent)**
+(© 2026 Eggent contributors), used here under its MIT License. The original
+Eggent codebase was imported as the starting point and then substantially
+extended (new data-isolation layer, soft-delete + index-integrity recovery,
+observability/post-mortem tooling, an expanded test suite, a bilingual
+RU/EN surface, and numerous fixes). The majority of the foundational
+architecture (the Mixture-of-Agents pipeline, the JSON-on-disk storage model,
+the agent/tooling layout) originates from Eggent.
+
+In accordance with the MIT License, Eggent's copyright notice is retained in
+[`LICENSE`](./LICENSE). This attribution is provided in good faith and with
+gratitude to the Eggent authors. Orchestra is an independent fork and is not
+endorsed by or affiliated with the Eggent project.
+
 ## Top-level license
 
 The Orchestra source code (everything outside the exceptions listed below) is
-released under the MIT License — see [`LICENSE`](./LICENSE).
+released under the MIT License — see [`LICENSE`](./LICENSE). Code inherited from
+Eggent remains under Eggent's MIT grant (see "Origin" above); the two MIT grants
+are compatible and both copyright lines are preserved in `LICENSE`.
 
 ## Bundled-skills licensing
 

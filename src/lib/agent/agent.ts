@@ -990,6 +990,123 @@ export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
   return Boolean(stripThinkingTags(getLastAssistantText(messages)).trim());
 }
 
+export interface TurnContinuationResult {
+  /** Extra assistant text to append (continuation tail or forced answer); "" when none needed. */
+  text: string;
+  usage?: import("@/lib/cost/accumulator").RawUsage;
+  /** Non-fatal operator notice (a continuation/force attempt failed); caller publishes it. */
+  uiNotice?: string;
+}
+
+/**
+ * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
+ * finished turn, decide whether an EXTRA generation is needed and produce its
+ * text + usage:
+ *   - the reply was truncated (`shouldAutoContinueAssistant`) → continue from
+ *     where it stopped (capped at 1200 tokens);
+ *   - NO answer was delivered at all (`turnHasDeliverableAnswer` === false, the
+ *     PM #69 failure) → force ONE tool-less final answer so the user always gets
+ *     a reply. Tool-less ⇒ it can only emit text, never another tool call ⇒ no
+ *     loop.
+ * Returns `{ text: "" }` when the turn already delivered a complete answer.
+ * Self-contained (only `generateText` + pure helpers) so it is unit-testable
+ * with a mock model — see `final-answer-guard.test.ts`.
+ */
+export async function resolveTurnContinuation(args: {
+  responseMessages: ModelMessage[];
+  finishReason: string | undefined;
+  model: Parameters<typeof generateText>[0]["model"];
+  systemPrompt: string;
+  baseMessages: ModelMessage[];
+  providerOptions: Parameters<typeof generateText>[0]["providerOptions"];
+  settings: AppSettings;
+  abortSignal?: AbortSignal;
+}): Promise<TurnContinuationResult> {
+  const {
+    responseMessages,
+    finishReason,
+    model,
+    systemPrompt,
+    baseMessages,
+    providerOptions,
+    settings,
+    abortSignal,
+  } = args;
+  const lastAssistantText = getLastAssistantText(responseMessages);
+  const readUsage = (r: unknown) =>
+    (r as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage ?? undefined;
+
+  if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
+    try {
+      const continuation = await generateText({
+        model,
+        system: systemPrompt,
+        messages: mergeConsecutiveSameRole([
+          ...baseMessages,
+          ...responseMessages,
+          {
+            role: "user",
+            content:
+              "Continue your previous answer from exactly where it stopped. " +
+              "Output only the continuation text, without repeating earlier content.",
+          },
+        ]),
+        providerOptions,
+        temperature: settings.chatModel.temperature ?? 0.7,
+        maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
+        abortSignal,
+      });
+      return { text: (continuation.text || "").trim(), usage: readUsage(continuation) };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.warn("Auto-continuation failed:", error);
+      return {
+        text: "",
+        uiNotice: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,
+      };
+    }
+  }
+
+  if (!turnHasDeliverableAnswer(responseMessages)) {
+    try {
+      const forced = await generateText({
+        model,
+        system: systemPrompt,
+        messages: mergeConsecutiveSameRole([
+          ...baseMessages,
+          ...responseMessages,
+          {
+            role: "user",
+            content:
+              "You have everything you need from the steps above. Write your " +
+              "final answer to the user now, in plain prose. Do not call any tools.",
+          },
+        ]),
+        providerOptions,
+        temperature: settings.chatModel.temperature ?? 0.7,
+        maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+        abortSignal,
+      });
+      const text = unwrapSerializedResponseCall((forced.text || "").trim());
+      if (text) {
+        console.log(
+          `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
+        );
+      }
+      return { text, usage: readUsage(forced) };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.warn("[Agent] PM #69 forced final answer failed:", error);
+      return {
+        text: "",
+        uiNotice: `[Agent] Could not produce a final answer for this turn: ${errMsg}`,
+      };
+    }
+  }
+
+  return { text: "" };
+}
+
 /**
  * Executes a subsidiary agent with a specialized role (Swarm).
  */
@@ -1648,103 +1765,29 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             : undefined;
 
         const responseMessages = event.response.messages;
-        const lastAssistantText = getLastAssistantText(responseMessages);
-        let continuationText = "";
-        // PM #36 — auto-continuation is a real billing call (full context
-        // re-sent + up to 1200 output tokens). Capture its usage so it folds
-        // into chat.cumulativeUsage alongside streamUsage; dropping it
-        // under-reports the cost banner AND the per-chat USD cap.
-        let continuationUsage:
-          | import("@/lib/cost/accumulator").RawUsage
-          | undefined;
-
-        if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
-          try {
-            const continuation = await generateText({
-              model,
-              system: systemPrompt,
-              messages: mergeConsecutiveSameRole([
-                ...messages,
-                ...responseMessages,
-                {
-                  role: "user",
-                  content:
-                    "Continue your previous answer from exactly where it stopped. " +
-                    "Output only the continuation text, without repeating earlier content.",
-                },
-              ]),
-              providerOptions,
-              temperature: settings.chatModel.temperature ?? 0.7,
-              maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
-              abortSignal: options.abortSignal,
-            });
-            continuationText = (continuation.text || "").trim();
-            continuationUsage =
-              (continuation as unknown as {
-                usage?: import("@/lib/cost/accumulator").RawUsage;
-              }).usage ?? undefined;
-          } catch (error) {
-            // Auto-continuation is an enhancement (it extends a truncated
-            // reply); silent console.warn meant the user never learned a
-            // continuation was even attempted. Surface a UI event so the
-            // operator sees what's happening — primary response still ships,
-            // continuation gap is annotated.
-            const errMsg = error instanceof Error ? error.message : String(error);
-            console.warn("Auto-continuation failed:", error);
-            publishUiSyncEvent({
-              topic: "chat",
-              chatId: options.chatId,
-              projectId: options.projectId ?? null,
-              reason: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,
-            });
-          }
-        } else if (!turnHasDeliverableAnswer(responseMessages)) {
-          // PM #69 — the turn ended with tool calls/results but NO delivered
-          // answer (e.g. deepseek/OpenRouter returns `finishReason: "other"`
-          // after a tool call and never proceeds to a `response`). Force ONE
-          // tool-less final-answer generation so the user always gets a reply.
-          // Tool-less ⇒ it can only emit text, never another tool call ⇒ no
-          // loop. Reuses the `continuationText` path, so the forced answer is
-          // appended as the assistant message and its usage is billed.
-          try {
-            const forced = await generateText({
-              model,
-              system: systemPrompt,
-              messages: mergeConsecutiveSameRole([
-                ...messages,
-                ...responseMessages,
-                {
-                  role: "user",
-                  content:
-                    "You have everything you need from the steps above. Write your " +
-                    "final answer to the user now, in plain prose. Do not call any tools.",
-                },
-              ]),
-              providerOptions,
-              temperature: settings.chatModel.temperature ?? 0.7,
-              maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
-              abortSignal: options.abortSignal,
-            });
-            continuationText = unwrapSerializedResponseCall((forced.text || "").trim());
-            continuationUsage =
-              (forced as unknown as {
-                usage?: import("@/lib/cost/accumulator").RawUsage;
-              }).usage ?? undefined;
-            if (continuationText) {
-              console.log(
-                `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
-              );
-            }
-          } catch (error) {
-            const errMsg = error instanceof Error ? error.message : String(error);
-            console.warn("[Agent] PM #69 forced final answer failed:", error);
-            publishUiSyncEvent({
-              topic: "chat",
-              chatId: options.chatId,
-              projectId: options.projectId ?? null,
-              reason: `[Agent] Could not produce a final answer for this turn: ${errMsg}`,
-            });
-          }
+        // PM #36 (truncation continuation) + PM #69 (forced final answer) are
+        // both decided by resolveTurnContinuation — self-contained and
+        // unit-tested (final-answer-guard.test.ts). We publish any non-fatal
+        // operator notice it returns and bill its usage alongside streamUsage.
+        const turnExtra = await resolveTurnContinuation({
+          responseMessages,
+          finishReason,
+          model,
+          systemPrompt,
+          baseMessages: messages,
+          providerOptions,
+          settings,
+          abortSignal: options.abortSignal,
+        });
+        const continuationText = turnExtra.text;
+        const continuationUsage = turnExtra.usage;
+        if (turnExtra.uiNotice) {
+          publishUiSyncEvent({
+            topic: "chat",
+            chatId: options.chatId,
+            projectId: options.projectId ?? null,
+            reason: turnExtra.uiNotice,
+          });
         }
 
         if (mcpCleanup) {

@@ -96,22 +96,55 @@ describe("PM #63 — sweepChatTrash", () => {
     expect(out).toEqual({ scanned: 0, removed: 0, errors: 0, removedSample: [] });
   });
 
-  it("purges trashed chats older than maxAge, keeps recent ones", async () => {
+  it("purges trashed chats whose DELETION timestamp (in the filename) is older than maxAge", async () => {
     const trash = path.join(tmpDir, "data", ".trash", "chats");
     const now = Date.now();
-    const ancient = now - 40 * 24 * 60 * 60 * 1000; // 40 days ago
-    const recent = now - 60 * 60 * 1000; // 1 hour ago
+    const ancient = now - 40 * 24 * 60 * 60 * 1000; // deleted 40 days ago
+    const recent = now - 60 * 60 * 1000; // deleted 1 hour ago
 
-    await writeWithMtime(path.join(trash, "c-old.111.json"), "{}", ancient);
-    await writeWithMtime(path.join(trash, "c-recent.222.json"), "{}", recent);
+    await writeWithMtime(path.join(trash, `c-old.${ancient}.json`), "{}", ancient);
+    await writeWithMtime(path.join(trash, `c-recent.${recent}.json`), "{}", recent);
 
     const out = await sweepers.sweepChatTrash(30 * 24 * 60 * 60 * 1000); // 30d
     expect(out.scanned).toBe(2);
     expect(out.removed).toBe(1);
-    expect(out.removedSample).toEqual(["c-old.111.json"]);
+    expect(out.removedSample).toEqual([`c-old.${ancient}.json`]);
 
     const remaining = await fs.readdir(trash);
-    expect(remaining).toEqual(["c-recent.222.json"]);
+    expect(remaining).toEqual([`c-recent.${recent}.json`]);
+  });
+
+  it("PM #67 — prunes by the deletion timestamp, NOT mtime (an old chat deleted today is KEPT)", async () => {
+    const trash = path.join(tmpDir, "data", ".trash", "chats");
+    const now = Date.now();
+    const fortyDaysAgo = now - 40 * 24 * 60 * 60 * 1000;
+
+    // The bug case: a chat last EDITED 40 days ago (old mtime, as fs.rename
+    // preserves it) but DELETED just now (filename carries `now`). It must be
+    // KEPT — it's within the 30-day recovery window.
+    await writeWithMtime(
+      path.join(trash, `stale-but-just-deleted.${now}.json`),
+      "{}",
+      fortyDaysAgo
+    );
+    // Inverse: edited recently (fresh mtime) but DELETED 40 days ago → purge.
+    await writeWithMtime(
+      path.join(trash, `fresh-but-long-deleted.${fortyDaysAgo}.json`),
+      "{}",
+      now
+    );
+
+    const out = await sweepers.sweepChatTrash(30 * 24 * 60 * 60 * 1000);
+    expect(out.removed).toBe(1);
+    expect(await fs.readdir(trash)).toEqual([`stale-but-just-deleted.${now}.json`]);
+  });
+
+  it("PM #67 — falls back to mtime when the filename has no parseable timestamp", async () => {
+    const trash = path.join(tmpDir, "data", ".trash", "chats");
+    const ancient = Date.now() - 40 * 24 * 60 * 60 * 1000;
+    await writeWithMtime(path.join(trash, "no-timestamp.json"), "{}", ancient);
+    const out = await sweepers.sweepChatTrash(30 * 24 * 60 * 60 * 1000);
+    expect(out.removed).toBe(1); // fell back to (ancient) mtime → purged
   });
 });
 

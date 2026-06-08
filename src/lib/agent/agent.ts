@@ -976,6 +976,21 @@ function shouldAutoContinueAssistant(
 }
 
 /**
+ * PM #69 — did this turn actually deliver an answer to the user? An answer
+ * arrives either as a `response` tool call (the primary mechanism) or as plain
+ * assistant text. A turn that ends with only tool calls + results — e.g. the
+ * model called `search_web` and the loop stopped on a flaky
+ * `finishReason: "other"` without a follow-up answer — delivered NOTHING, and
+ * the caller must force a final-answer generation so the user always gets a
+ * reply. Assistant text is checked AFTER `stripThinkingTags`: a turn whose only
+ * text was a `<thinking>` block is persisted as empty, so it is not deliverable.
+ */
+export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
+  if (getLastResponseToolText(messages).trim()) return true;
+  return Boolean(stripThinkingTags(getLastAssistantText(messages)).trim());
+}
+
+/**
  * Executes a subsidiary agent with a specialized role (Swarm).
  */
 async function runSubAgent(
@@ -1681,6 +1696,53 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               chatId: options.chatId,
               projectId: options.projectId ?? null,
               reason: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,
+            });
+          }
+        } else if (!turnHasDeliverableAnswer(responseMessages)) {
+          // PM #69 — the turn ended with tool calls/results but NO delivered
+          // answer (e.g. deepseek/OpenRouter returns `finishReason: "other"`
+          // after a tool call and never proceeds to a `response`). Force ONE
+          // tool-less final-answer generation so the user always gets a reply.
+          // Tool-less ⇒ it can only emit text, never another tool call ⇒ no
+          // loop. Reuses the `continuationText` path, so the forced answer is
+          // appended as the assistant message and its usage is billed.
+          try {
+            const forced = await generateText({
+              model,
+              system: systemPrompt,
+              messages: mergeConsecutiveSameRole([
+                ...messages,
+                ...responseMessages,
+                {
+                  role: "user",
+                  content:
+                    "You have everything you need from the steps above. Write your " +
+                    "final answer to the user now, in plain prose. Do not call any tools.",
+                },
+              ]),
+              providerOptions,
+              temperature: settings.chatModel.temperature ?? 0.7,
+              maxOutputTokens: settings.chatModel.maxTokens ?? 4096,
+              abortSignal: options.abortSignal,
+            });
+            continuationText = unwrapSerializedResponseCall((forced.text || "").trim());
+            continuationUsage =
+              (forced as unknown as {
+                usage?: import("@/lib/cost/accumulator").RawUsage;
+              }).usage ?? undefined;
+            if (continuationText) {
+              console.log(
+                `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
+              );
+            }
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error);
+            console.warn("[Agent] PM #69 forced final answer failed:", error);
+            publishUiSyncEvent({
+              topic: "chat",
+              chatId: options.chatId,
+              projectId: options.projectId ?? null,
+              reason: `[Agent] Could not produce a final answer for this turn: ${errMsg}`,
             });
           }
         }

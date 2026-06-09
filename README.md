@@ -5,8 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-1930%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-40%20documented-purple)](./POST_MORTEMS.md)
+[![Tests](https://img.shields.io/badge/tests-2585%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-70%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -25,7 +25,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 
 Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The aggregator then synthesizes — and if the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the aggregator's output and applies a revisor pass when issues are flagged.
 
-If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (40 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
+If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (70 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
 
@@ -77,11 +77,13 @@ Each stage maps to a [`POST_MORTEMS.md`](./POST_MORTEMS.md) entry that documents
 ### Local install (recommended for development)
 
 ```bash
-git clone <repo-url> && cd orchestra
+git clone https://github.com/aleksbuss/orchestra.git && cd orchestra
 npm install
 cp .env.example .env.local       # add at least one provider key
 npm run dev
 ```
+
+> Prefer a guided setup? `npm run setup:local` (runs `scripts/install-local.sh`) installs dependencies, creates `data/`, and sets up your `.env` (provider keys + session secret). Next.js reads both `.env` and `.env.local`, so either file works.
 
 Open [http://localhost:3000](http://localhost:3000) → complete onboarding (default credentials are `admin`/`admin`, you'll be required to change them on first login).
 
@@ -150,7 +152,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 
 ### Observability
 - **`/api/_debug/chat/<id>`** — single-shot diagnostic endpoint
-- **`POST_MORTEMS.md`** — 40 architectural failure modes documented with regression-test pointers
+- **`POST_MORTEMS.md`** — 70 architectural failure modes documented with regression-test pointers
 - **Structured JSONL logs** with `traceId` propagation
 
 ### Local-first design
@@ -165,7 +167,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ## 🧪 Tests
 
 ```bash
-npm test                  # full suite — currently 1930 tests across 134 files
+npm test                  # full suite — currently 2,585 tests across 168 files
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
@@ -185,7 +187,7 @@ Key contracts (all enforced by code, with regression tests):
 - **SSRF guard** — `assertSafeOutboundUrl` on every server-side `fetch` from user/model-derived URLs (PM #8, #11, #27)
 - **Path traversal guard** — `assertPathInside` on every user-supplied filesystem path (PM #6, #16, #21)
 - **`<UNTRUSTED_*>` markers** — every byte from external sources (MCP, web_task) is wrapped before reaching the LLM prompt (PM #26, #27)
-- **Process env scrub** — code-execution tool drops `*_KEY`/`*_SECRET`/`*_TOKEN` before `spawn` (PM #28)
+- **Process env scrub** — every agent-spawned child process (code-execution, `install_packages`, the codex/gemini CLIs) builds its env via `scrubProcessEnv` / `cliProviderEnv`, dropping `*_KEY`/`*_SECRET`/`*_TOKEN` + the app auth secret before `spawn` (PM #28, #70)
 - **Login rate-limiter** — sliding-window per-IP, with reverse-proxy configuration documented (PM #13)
 - **Session-secret production guard** — refuses to boot with default secret in `NODE_ENV=production` (PM #12)
 
@@ -391,7 +393,7 @@ The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size,
 
 ## Status
 
-**Alpha quality.** Architecture is end-to-end functional and exercised across 1930 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
+**Alpha quality.** Architecture is end-to-end functional and exercised across 2,585 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
 
 Solo developer project. PRs welcome; review on a best-effort basis.
 

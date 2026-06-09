@@ -13,6 +13,11 @@
 
 A team of specialized agents, not just one model. Self-hosted, BYOK, MIT-licensed.
 
+![Orchestra answering a systems-design question — a panel of experts ran in parallel, then synthesized this answer; the token counter is live](docs/assets/orchestra-hero.png)
+
+<sub>A real Swarm run: the prompt fans out to a Router-generated panel of experts (with a code-guaranteed Skeptic), an aggregator synthesizes the drafts, and every chat shows live token usage.</sub>
+<!-- TODO(visual): swap the static hero for a short demo GIF of a live run when you record one. -->
+
 Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, substantially extended. See [`NOTICE.md`](./NOTICE.md).
 
 [Quick Start](#-quick-start) · [Architecture](#-the-moa-pipeline) · [Features](#-features) · [Docs](#-documentation)
@@ -28,6 +33,8 @@ Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specia
 If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (70 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
+
+**Who it's for:** developers who want a self-hosted assistant that thinks harder than a single model — debugging gnarly systems problems, research that needs fact-checking before it's trusted, or private work on local models where nothing leaves your machine.
 
 ---
 
@@ -57,6 +64,8 @@ flowchart LR
     D --> OUT
     OUT --> CB[Cost banner<br/>tokens + USD]
 ```
+
+![The Swarm running live — staged progress while the Router, parallel proposers, and aggregator work through the request](docs/assets/orchestra-swarm-progress.png)
 
 Each stage maps to a [`POST_MORTEMS.md`](./POST_MORTEMS.md) entry that documents *why* it works that way:
 

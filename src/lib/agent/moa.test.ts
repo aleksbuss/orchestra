@@ -732,6 +732,23 @@ describe("PM #66 — proposer maxOutputTokens: respects config up to a bounded c
     });
     for (const t of proposerMaxTokens()) expect(t).toBe(4096); // bounded, not 8000
   }, 30_000);
+
+  it("the AGGREGATOR auto-sizes maxOutputTokens to the model (resolver, not the old hardcoded 4096)", async () => {
+    setupTwoProposers();
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "test",
+      history: [],
+      settings: fakeSettings(), // chatModel = openai/gpt-4o
+    });
+    // The aggregator is the LAST generateText call. resolveMaxOutputTokens for
+    // gpt-4o = 16384 — proof the final-answer path is wired to the per-model
+    // resolver, not the old `?? 4096`.
+    const aggregatorCall = mockedGenerateText.mock.calls.at(-1)?.[0] as {
+      maxOutputTokens?: number;
+    };
+    expect(aggregatorCall.maxOutputTokens).toBe(16_384);
+  }, 30_000);
 });
 
 describe("PM #45 — unified skeptic detection (no double-injection on 'qa_engineer'-shape ids)", () => {

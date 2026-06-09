@@ -207,3 +207,30 @@ describe("PM #49 — getModelPricing consults OpenRouter live cache first", () =
     expect(p?.inputUsdPerMillion).toBe(2.5);
   });
 });
+
+describe("getModelPricing — direct-key entries added for gpt-4.1 / o3·o4 / gemini-2.5-flash", () => {
+  it("gpt-4.1 beats the generic gpt-4 catch-all (NOT the legacy $30/$60)", () => {
+    expect(getModelPricing("openai", "gpt-4.1")?.inputUsdPerMillion).toBe(2);
+    expect(getModelPricing("openai", "gpt-4.1-2025-04-14")?.outputUsdPerMillion).toBe(8);
+    expect(getModelPricing("openai", "gpt-4.1-mini")?.inputUsdPerMillion).toBe(0.4);
+    expect(getModelPricing("openai", "gpt-4.1-nano")?.inputUsdPerMillion).toBe(0.1);
+    // and the legacy gpt-4 still resolves to its own (old) rate
+    expect(getModelPricing("openai", "gpt-4-0613")?.inputUsdPerMillion).toBe(30);
+  });
+
+  it("o3 / o3-mini / o4-mini resolve (were 'cost unknown' before)", () => {
+    expect(getModelPricing("openai", "o3")?.inputUsdPerMillion).toBe(2);
+    expect(getModelPricing("openai", "o3-mini")?.inputUsdPerMillion).toBe(1.1); // mini before bare o3
+    expect(getModelPricing("openai", "o4-mini")?.inputUsdPerMillion).toBe(1.1);
+    // o1 family unaffected
+    expect(getModelPricing("openai", "o1-mini")?.inputUsdPerMillion).toBe(3);
+  });
+
+  it("gemini-2.5-flash beats the gemini-2.5 catch-all (NOT the Pro $1.25/$10)", () => {
+    expect(getModelPricing("google", "gemini-2.5-flash")?.inputUsdPerMillion).toBe(0.3);
+    expect(getModelPricing("google", "gemini-2.5-flash")?.outputUsdPerMillion).toBe(2.5);
+    expect(getModelPricing("google", "gemini-2.5-flash-lite")?.inputUsdPerMillion).toBe(0.1);
+    // Pro still resolves to Pro pricing
+    expect(getModelPricing("google", "gemini-2.5-pro")?.inputUsdPerMillion).toBe(1.25);
+  });
+});

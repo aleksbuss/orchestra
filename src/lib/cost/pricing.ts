@@ -60,9 +60,19 @@ const PRICING_TABLE: Array<{
   // ── OpenAI ────────────────────────────────────────────────────────────
   { provider: "openai", matchModel: (m) => m.includes("gpt-4o-mini"), pricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.6 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-4o"), pricing: { inputUsdPerMillion: 2.5, outputUsdPerMillion: 10 } },
+  // gpt-4.1 family — MUST precede the generic `gpt-4` catch-all below, else
+  // "gpt-4.1" matches `gpt-4` and is billed at the legacy $30/$60 (~15x too high).
+  { provider: "openai", matchModel: (m) => m.includes("gpt-4.1-nano"), pricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 } },
+  { provider: "openai", matchModel: (m) => m.includes("gpt-4.1-mini"), pricing: { inputUsdPerMillion: 0.4, outputUsdPerMillion: 1.6 } },
+  { provider: "openai", matchModel: (m) => m.includes("gpt-4.1"), pricing: { inputUsdPerMillion: 2, outputUsdPerMillion: 8 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-4-turbo"), pricing: { inputUsdPerMillion: 10, outputUsdPerMillion: 30 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-4"), pricing: { inputUsdPerMillion: 30, outputUsdPerMillion: 60 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-3.5"), pricing: { inputUsdPerMillion: 0.5, outputUsdPerMillion: 1.5 } },
+  // o-series reasoning. `*-mini` variants precede the bare family ("o3-mini"
+  // includes "o3"). Prices are post-2025-cut (o3 dropped ~80% to $2/$8).
+  { provider: "openai", matchModel: (m) => m.includes("o4-mini"), pricing: { inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 } },
+  { provider: "openai", matchModel: (m) => m.includes("o3-mini"), pricing: { inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 } },
+  { provider: "openai", matchModel: (m) => m.includes("o3"), pricing: { inputUsdPerMillion: 2, outputUsdPerMillion: 8 } },
   { provider: "openai", matchModel: (m) => m.includes("o1-mini"), pricing: { inputUsdPerMillion: 3, outputUsdPerMillion: 12 } },
   { provider: "openai", matchModel: (m) => m.includes("o1"), pricing: { inputUsdPerMillion: 15, outputUsdPerMillion: 60 } },
 
@@ -77,6 +87,10 @@ const PRICING_TABLE: Array<{
   { provider: "anthropic", matchModel: (m) => m.includes("claude-3-sonnet"), pricing: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 } },
 
   // ── Google ────────────────────────────────────────────────────────────
+  // 2.5 Flash/Flash-Lite MUST precede the `gemini-2.5` catch-all, else they
+  // match it and get the Pro rate ($1.25/$10) — ~4x too high for Flash.
+  { provider: "google", matchModel: (m) => m.includes("gemini-2.5-flash-lite"), pricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 } },
+  { provider: "google", matchModel: (m) => m.includes("gemini-2.5-flash"), pricing: { inputUsdPerMillion: 0.3, outputUsdPerMillion: 2.5 } },
   { provider: "google", matchModel: (m) => m.includes("gemini-2.5-pro") || m.includes("gemini-2.5"), pricing: { inputUsdPerMillion: 1.25, outputUsdPerMillion: 10 } },
   { provider: "google", matchModel: (m) => m.includes("gemini-2.0-flash") || m.includes("gemini-2.0"), pricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.4 } },
   { provider: "google", matchModel: (m) => m.includes("gemini-1.5-flash-8b"), pricing: { inputUsdPerMillion: 0.0375, outputUsdPerMillion: 0.15 } },

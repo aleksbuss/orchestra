@@ -490,7 +490,7 @@ Five files cross the §8 1500-line "MUST decompose next substantive PR" line. No
 
 **`src/lib/tools/code-execution.ts` (1207 LOC, 3 hot edits in 90d)** — security-critical surface.
 - Natural seams:
-  - `scrubProcessEnv` + the PM #28 always-scrub list already extracted to [`src/lib/security/scrub-env.ts`](src/lib/security/scrub-env.ts) (DONE, PM #70 — moved out of `tools/` to break the `providers/`→`tools/` layer cycle). THIS IS THE FILE TO TEST HARDEST.
+  - `scrubProcessEnv` + the PM #28 always-scrub list already extracted to [`src/lib/security/scrub-env.ts`](src/lib/security/scrub-env.ts) (DONE, PM #70). It's a zero-import leaf placed under `security/` for cohesion (sibling to `url-guard`) — NOT a cycle fix; there was no real import cycle (a leaf can't be in one). THIS IS THE FILE TO TEST HARDEST.
   - `code-execution/runners/{python,node,shell}.ts` (~200 each): per-runtime spawn logic + arg normalization.
   - `code-execution/sandbox.ts` (~200): the Docker vs local branch.
   - `code-execution/index.ts` (~250): the public `code_execution` tool entry, composes the above.

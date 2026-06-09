@@ -23,6 +23,7 @@ import {
   loadProjectMcpServers,
 } from "@/lib/storage/project-store";
 import { resolveCliOAuthCredentialSync } from "@/lib/providers/provider-auth";
+import { cliProviderEnv, scrubProcessEnv } from "@/lib/tools/scrub-env";
 import { MODEL_PROVIDERS } from "@/lib/providers/model-config";
 
 type OpenAICompatibleSettings = {
@@ -179,7 +180,7 @@ function collectPromptText(options: LanguageModelV3CallOptions): string {
 function runCliCommand(
   command: string,
   args: string[],
-  options?: { stdinText?: string; timeoutMs?: number; cwd?: string }
+  options?: { stdinText?: string; timeoutMs?: number; cwd?: string; provider?: CliProviderName }
 ): Promise<CliCommandResult> {
   const timeoutMs = options?.timeoutMs ?? 180000;
 
@@ -193,7 +194,9 @@ function runCliCommand(
     try {
       child = spawn(command, args, {
         stdio: ["pipe", "pipe", "pipe"],
-        env: process.env,
+        // PM #70 — drop the app auth secret + unrelated providers' keys; the
+        // CLI keeps only its own auth (and OAuth files via HOME).
+        env: options?.provider ? cliProviderEnv(options.provider) : scrubProcessEnv(),
         cwd: options?.cwd,
       });
     } catch (error) {
@@ -515,6 +518,7 @@ async function runCliModel(
       stdinText: `${prompt}\n`,
       timeoutMs: 240000,
       cwd,
+      provider: "codex-cli",
     });
 
     if (result.timedOut) {
@@ -529,7 +533,11 @@ async function runCliModel(
 
   const command = process.env.GEMINI_CLI_COMMAND || "gemini";
   const args = ["-m", model, "-p", prompt, "--output-format", "stream-json", "--yolo"];
-  const result = await runCliCommand(command, args, { timeoutMs: 240000, cwd });
+  const result = await runCliCommand(command, args, {
+    timeoutMs: 240000,
+    cwd,
+    provider: "gemini-cli",
+  });
 
   if (result.timedOut) {
     throw new Error("Gemini CLI timed out.");

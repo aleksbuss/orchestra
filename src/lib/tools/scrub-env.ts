@@ -44,3 +44,32 @@ export function scrubProcessEnv(overrides: EnvBag = {}): NodeJS.ProcessEnv {
   // augmented @types/node ProcessEnv interface in this codebase.
   return { ...safe, ...overrides } as NodeJS.ProcessEnv;
 }
+
+type CliProviderName = "codex-cli" | "gemini-cli";
+
+/**
+ * The secret-shaped auth vars each CLI provider legitimately needs in its
+ * spawned subprocess. Everything else secret (ORCHESTRA_AUTH_SECRET, OTHER
+ * providers' keys) is scrubbed; non-secret vars the CLI needs (PATH, HOME and
+ * thus its OAuth files, *_BASE_URL, GOOGLE_CLOUD_PROJECT) pass through
+ * `scrubProcessEnv` untouched and don't need listing here.
+ */
+const CLI_ENV_PASSTHROUGH: Record<CliProviderName, string[]> = {
+  "codex-cli": ["OPENAI_API_KEY"],
+  "gemini-cli": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"],
+};
+
+/**
+ * Scrubbed env for a spawned CLI model provider (PM #70). The CLI is a trusted
+ * operator tool but it's agentic (codex runs code) and agent-reachable, so it
+ * must not inherit the app auth secret or unrelated providers' keys — only its
+ * OWN auth vars survive, alongside the non-secret base env.
+ */
+export function cliProviderEnv(provider: CliProviderName): NodeJS.ProcessEnv {
+  const overrides: EnvBag = {};
+  for (const name of CLI_ENV_PASSTHROUGH[provider]) {
+    const value = process.env[name];
+    if (value !== undefined) overrides[name] = value;
+  }
+  return scrubProcessEnv(overrides);
+}

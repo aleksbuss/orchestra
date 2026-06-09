@@ -459,7 +459,7 @@ Five files cross the §8 1500-line "MUST decompose next substantive PR" line. No
   - `agent.ts` itself shrinks to a re-export facade ≤200 LOC.
 - Pre-extraction guard: run `grep -n applyGlobalToolLoopGuard src/lib/agent/agent.ts` BEFORE and AFTER — same callsite count, all routed through `agent-tools.ts`.
 - Pre-extraction guard 2: PM #23 audit grep must report `missing=0` across every new file (see "AbortSignal Propagation Contract" above).
-- Test scaffolding: add `agent.integration.test.ts` that mocks `generateText`/`streamText` and asserts the end-to-end shape of (chatId → runAgent → message persisted) so a regression in any extracted file blows up the test before merge.
+- Test scaffolding: [`agent.integration.test.ts`](src/lib/agent/agent.integration.test.ts) **EXISTS (generateText path)** — it mocks `createModel` → `MockLanguageModelV3` and drives `runAgentText` end-to-end against an isolated `ORCHESTRA_DATA_DIR`, asserting settings → tools+loop-guard → generateText → agent-response unwrap returns the answer. A regression in agent-messages/agent-tools/agent-response/createModel blows it up. **Still TODO before the agent-stream cut:** a streamText variant (interactive `runAgent` → `onFinish` → message persisted) — build it alongside the agent-stream extraction.
 
 **`src/lib/tools/tool.ts` (1919 LOC, 4 hot edits in 90d)** — every tool registration.
 - Natural seams: one file per tool family.

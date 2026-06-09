@@ -65,7 +65,9 @@ flowchart LR
     OUT --> CB[Cost banner<br/>tokens + USD]
 ```
 
-![The Swarm running live — staged progress while the Router, parallel proposers, and aggregator work through the request](docs/assets/orchestra-swarm-progress.png)
+![The Swarm Activity panel, live — for a locking question the Router spun up a Database Architect, Concurrency Engineer, Performance Optimizer, and a code-guaranteed QA Auditor / Skeptic, then synthesized their drafts](docs/assets/orchestra-swarm-activity.png)
+
+<sub>Open the **Swarm Activity** panel (top-right of any chat) to watch the run: the Router auto-generates a panel of experts tuned to the prompt, the Skeptic is always there, and the orchestrator synthesizes the drafts.</sub>
 
 Each stage maps to a [`POST_MORTEMS.md`](./POST_MORTEMS.md) entry that documents *why* it works that way:
 

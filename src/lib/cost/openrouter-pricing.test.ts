@@ -412,3 +412,23 @@ describe("PM #49 — getCachedOpenRouterPricing sync lookup", () => {
     expect(getCachedOpenRouterPricing("")).toBeNull();
   });
 });
+
+describe("PM #71 — pricing state lives on globalThis (survives Next.js dual module instance)", () => {
+  it("seeded pricing is reachable via getCachedOpenRouterPricing AND on the global store", () => {
+    __seedOpenRouterPricingForTests([
+      ["vendor/probe-model", { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }],
+    ]);
+    // The synchronous consumer (the cost path) resolves it…
+    expect(getCachedOpenRouterPricing("vendor/probe-model")).toEqual({
+      inputUsdPerMillion: 1,
+      outputUsdPerMillion: 2,
+    });
+    // …and the state is on globalThis, so a SECOND module instance (Next.js
+    // bundles instrumentation + routes separately) reads the same warmed map
+    // instead of an empty module-level `let` (the PM #71 bug).
+    const store = (globalThis as Record<symbol, { pricing: Map<string, unknown> } | undefined>)[
+      Symbol.for("orchestra.openrouter-pricing.store")
+    ];
+    expect(store?.pricing.get("vendor/probe-model")).toBeDefined();
+  });
+});

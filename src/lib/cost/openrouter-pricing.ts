@@ -83,13 +83,26 @@ const FETCH_TIMEOUT_MS = 8_000;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const CACHE_FILENAME = "openrouter-pricing.json";
 
-let inMemoryPricing: Map<string, ModelPricing> = new Map();
-let inMemoryFetchedAt: number | null = null;
-// Per-model max output tokens (`top_provider.max_completion_tokens`), keyed by
-// lowercased model id. Best-effort: populated by the same `/models` fetch that
-// builds pricing; until the first fetch lands, model-output-limits falls back
-// to its static family registry. Not persisted (re-derived each boot fetch).
-let inMemoryMaxOutput: Map<string, number> = new Map();
+/**
+ * PM #71 — pricing state lives on `globalThis`, NOT module scope. Next.js
+ * bundles instrumentation and route handlers into SEPARATE module graphs, so a
+ * module-level `let` warmed by `refreshOpenRouterPricingCache()` (called from
+ * instrumentation-node) is NOT the same instance the agent's cost path reads —
+ * its map stayed empty, so every OpenRouter chat showed "cost unknown". A
+ * process-global symbol is shared across all module instances in the process.
+ *
+ * `maxOutput` (per-model `max_completion_tokens`) rides along for the same reason.
+ */
+interface PricingStore {
+  pricing: Map<string, ModelPricing>;
+  fetchedAt: number | null;
+  maxOutput: Map<string, number>;
+}
+const PRICING_STORE_KEY = Symbol.for("orchestra.openrouter-pricing.store");
+function store(): PricingStore {
+  const g = globalThis as unknown as Record<symbol, PricingStore | undefined>;
+  return (g[PRICING_STORE_KEY] ??= { pricing: new Map(), fetchedAt: null, maxOutput: new Map() });
+}
 
 function dataDir(): string {
   // Mirrors the convention used by chat-store / project-store — `data/`
@@ -151,7 +164,7 @@ export async function fetchOpenRouterPricing(options: {
       outputUsdPerMillion: completionPerToken * 1_000_000,
     });
   }
-  inMemoryMaxOutput = maxOut;
+  store().maxOutput = maxOut;
   return map;
 }
 
@@ -207,7 +220,7 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     for (const [id, v] of Object.entries(parsed.maxOutput)) {
       if (typeof v === "number" && v > 0) mo.set(id.toLowerCase(), v);
     }
-    if (mo.size > 0) inMemoryMaxOutput = mo;
+    if (mo.size > 0) store().maxOutput = mo;
   }
   return { pricing: map, fetchedAt };
 }
@@ -231,7 +244,7 @@ export async function saveCachedOpenRouterPricing(
     })),
     // Persist the per-model output ceilings so a warm-cache boot keeps the
     // dynamic source populated (free models too — they aren't in `pricing`).
-    maxOutput: Object.fromEntries(inMemoryMaxOutput),
+    maxOutput: Object.fromEntries(store().maxOutput),
   };
   await safeWriteFile(cachePath, JSON.stringify(payload, null, 2));
 }
@@ -257,21 +270,22 @@ export async function refreshOpenRouterPricingCache(options: {
   const { signal, forceFetch = false } = options;
 
   // Step 1: warm in-memory from disk if we don't have it yet.
-  if (inMemoryPricing.size === 0) {
+  if (store().pricing.size === 0) {
     const cached = await loadCachedOpenRouterPricing().catch(() => null);
     if (cached) {
-      inMemoryPricing = cached.pricing;
-      inMemoryFetchedAt = cached.fetchedAt;
+      store().pricing = cached.pricing;
+      store().fetchedAt = cached.fetchedAt;
     }
   }
 
   // Step 2: decide whether to network-refresh.
-  const ageMs = inMemoryFetchedAt
-    ? Date.now() - inMemoryFetchedAt
+  const lastFetchedAt = store().fetchedAt;
+  const ageMs = lastFetchedAt
+    ? Date.now() - lastFetchedAt
     : Number.POSITIVE_INFINITY;
   const stale = ageMs > CACHE_TTL_MS;
-  if (!forceFetch && !stale && inMemoryPricing.size > 0) {
-    return { source: "memory", entryCount: inMemoryPricing.size };
+  if (!forceFetch && !stale && store().pricing.size > 0) {
+    return { source: "memory", entryCount: store().pricing.size };
   }
 
   // Step 3: network refresh. On failure, fall back to whatever's in
@@ -280,13 +294,13 @@ export async function refreshOpenRouterPricingCache(options: {
     const fresh = await fetchOpenRouterPricing({ signal });
     if (fresh.size === 0) {
       // Empty response is suspicious — keep the existing map.
-      if (inMemoryPricing.size > 0) {
-        return { source: "disk", entryCount: inMemoryPricing.size };
+      if (store().pricing.size > 0) {
+        return { source: "disk", entryCount: store().pricing.size };
       }
       return { source: "unavailable", entryCount: 0 };
     }
-    inMemoryPricing = fresh;
-    inMemoryFetchedAt = Date.now();
+    store().pricing = fresh;
+    store().fetchedAt = Date.now();
     // Best-effort persist. A failure here doesn't void the run.
     await saveCachedOpenRouterPricing(fresh).catch((err) => {
       console.warn(
@@ -296,12 +310,12 @@ export async function refreshOpenRouterPricingCache(options: {
     });
     return { source: "fetched", entryCount: fresh.size };
   } catch (err) {
-    if (inMemoryPricing.size > 0) {
+    if (store().pricing.size > 0) {
       console.warn(
         "[OpenRouterPricing] network refresh failed; using cached map:",
         err instanceof Error ? err.message : err
       );
-      return { source: "disk", entryCount: inMemoryPricing.size };
+      return { source: "disk", entryCount: store().pricing.size };
     }
     console.warn(
       "[OpenRouterPricing] network refresh failed and no cache available:",
@@ -322,7 +336,7 @@ export function getCachedOpenRouterPricing(
   openRouterModelId: string
 ): ModelPricing | null {
   if (!openRouterModelId) return null;
-  const hit = inMemoryPricing.get(openRouterModelId.toLowerCase());
+  const hit = store().pricing.get(openRouterModelId.toLowerCase());
   return hit ?? null;
 }
 
@@ -331,8 +345,8 @@ export function getCachedOpenRouterPricing(
  * exporting the mutable map. Production code never calls this.
  */
 export function __resetOpenRouterPricingForTests(): void {
-  inMemoryPricing = new Map();
-  inMemoryFetchedAt = null;
+  store().pricing = new Map();
+  store().fetchedAt = null;
 }
 
 /**
@@ -343,8 +357,8 @@ export function __seedOpenRouterPricingForTests(
   entries: Array<[string, ModelPricing]>,
   fetchedAt: number = Date.now()
 ): void {
-  inMemoryPricing = new Map(entries.map(([k, v]) => [k.toLowerCase(), v]));
-  inMemoryFetchedAt = fetchedAt;
+  store().pricing = new Map(entries.map(([k, v]) => [k.toLowerCase(), v]));
+  store().fetchedAt = fetchedAt;
 }
 
 /**
@@ -353,12 +367,12 @@ export function __seedOpenRouterPricingForTests(
  * — `model-output-limits` falls back to its static family registry meanwhile.
  */
 export function getOpenRouterMaxOutput(modelId: string): number | undefined {
-  return inMemoryMaxOutput.get(modelId.toLowerCase());
+  return store().maxOutput.get(modelId.toLowerCase());
 }
 
 /** Test-only: seed the OpenRouter max-output map without a network fetch. */
 export function __setOpenRouterMaxOutputForTest(map: Map<string, number>): void {
-  inMemoryMaxOutput = new Map(
+  store().maxOutput = new Map(
     Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
   );
 }

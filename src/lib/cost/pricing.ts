@@ -68,11 +68,15 @@ const PRICING_TABLE: Array<{
   { provider: "openai", matchModel: (m) => m.includes("gpt-4-turbo"), pricing: { inputUsdPerMillion: 10, outputUsdPerMillion: 30 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-4"), pricing: { inputUsdPerMillion: 30, outputUsdPerMillion: 60 } },
   { provider: "openai", matchModel: (m) => m.includes("gpt-3.5"), pricing: { inputUsdPerMillion: 0.5, outputUsdPerMillion: 1.5 } },
-  // o-series reasoning. `*-mini` variants precede the bare family ("o3-mini"
-  // includes "o3"). Prices are post-2025-cut (o3 dropped ~80% to $2/$8).
+  // o-series reasoning. The expensive `-pro` AND the cheap `-mini` variants
+  // BOTH precede the bare family, else "o3-pro"/"o3-mini" match bare "o3" — and
+  // for `-pro` that UNDER-reports ~10x ($2 vs o3-pro's $20/$80), which is worse
+  // than "cost unknown". Prices reflect the 2025 cuts.
   { provider: "openai", matchModel: (m) => m.includes("o4-mini"), pricing: { inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 } },
+  { provider: "openai", matchModel: (m) => m.includes("o3-pro"), pricing: { inputUsdPerMillion: 20, outputUsdPerMillion: 80 } },
   { provider: "openai", matchModel: (m) => m.includes("o3-mini"), pricing: { inputUsdPerMillion: 1.1, outputUsdPerMillion: 4.4 } },
   { provider: "openai", matchModel: (m) => m.includes("o3"), pricing: { inputUsdPerMillion: 2, outputUsdPerMillion: 8 } },
+  { provider: "openai", matchModel: (m) => m.includes("o1-pro"), pricing: { inputUsdPerMillion: 150, outputUsdPerMillion: 600 } },
   { provider: "openai", matchModel: (m) => m.includes("o1-mini"), pricing: { inputUsdPerMillion: 3, outputUsdPerMillion: 12 } },
   { provider: "openai", matchModel: (m) => m.includes("o1"), pricing: { inputUsdPerMillion: 15, outputUsdPerMillion: 60 } },
 

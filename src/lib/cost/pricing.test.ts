@@ -234,3 +234,14 @@ describe("getModelPricing — direct-key entries added for gpt-4.1 / o3·o4 / ge
     expect(getModelPricing("google", "gemini-2.5-pro")?.inputUsdPerMillion).toBe(1.25);
   });
 });
+
+describe("getModelPricing — expensive -pro reasoning variants must NOT be shadowed by the bare family", () => {
+  it("o3-pro / o1-pro get their own (high) rate, not the cheap bare o3/o1", () => {
+    expect(getModelPricing("openai", "o3-pro")?.inputUsdPerMillion).toBe(20); // not 2
+    expect(getModelPricing("openai", "o3-pro")?.outputUsdPerMillion).toBe(80);
+    expect(getModelPricing("openai", "o1-pro")?.inputUsdPerMillion).toBe(150); // not 15
+    // bare families unchanged
+    expect(getModelPricing("openai", "o3")?.inputUsdPerMillion).toBe(2);
+    expect(getModelPricing("openai", "o1")?.inputUsdPerMillion).toBe(15);
+  });
+});

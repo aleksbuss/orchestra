@@ -19,6 +19,7 @@ import {
   Wrench,
 } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { FileTree } from "@/components/file-tree";
 import { useBackgroundSync } from "@/hooks/use-background-sync";
 
@@ -39,17 +40,9 @@ import { Button } from "@/components/ui/button";
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const router = useRouter();
   const pathname = usePathname();
-  const {
-    chats,
-    setChats,
-    activeChatId,
-    setActiveChatId,
-    removeChat,
-    projects,
-    setProjects,
-    activeProjectId,
-    setActiveProjectId,
-  } = useAppStore();
+  const { chats, setChats, activeChatId, setActiveChatId, removeChat, projects, setProjects, activeProjectId, setActiveProjectId } = useAppStore(
+    useShallow((s) => ({ chats: s.chats, setChats: s.setChats, activeChatId: s.activeChatId, setActiveChatId: s.setActiveChatId, removeChat: s.removeChat, projects: s.projects, setProjects: s.setProjects, activeProjectId: s.activeProjectId, setActiveProjectId: s.setActiveProjectId }))
+  );
   const projectsTick = useBackgroundSync({
     topics: ["projects", "global"],
   });

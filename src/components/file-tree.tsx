@@ -14,6 +14,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { cn } from "@/lib/utils";
 import { useBackgroundSync } from "@/hooks/use-background-sync";
 
@@ -62,7 +63,9 @@ function TreeNode({
   depth,
   refreshToken,
 }: TreeNodeProps) {
-  const { currentPath, setCurrentPath } = useAppStore();
+  const { currentPath, setCurrentPath } = useAppStore(
+    useShallow((s) => ({ currentPath: s.currentPath, setCurrentPath: s.setCurrentPath }))
+  );
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState<FileEntry[] | null>(null);
   const childrenRef = useRef<FileEntry[] | null>(null);
@@ -232,7 +235,9 @@ interface FileTreeProps {
 }
 
 export function FileTree({ projectId }: FileTreeProps) {
-  const { currentPath, setCurrentPath } = useAppStore();
+  const { currentPath, setCurrentPath } = useAppStore(
+    useShallow((s) => ({ currentPath: s.currentPath, setCurrentPath: s.setCurrentPath }))
+  );
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [exporting, setExporting] = useState(false);
   const refreshToken = useBackgroundSync({

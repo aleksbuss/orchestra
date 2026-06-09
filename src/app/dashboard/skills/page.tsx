@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Loader2, PackagePlus, Puzzle, BookText } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import {
   Sheet,
   SheetContent,
@@ -76,7 +77,9 @@ const InstalledSkillRow = memo(function InstalledSkillRow({
 });
 
 export default function SkillsPage() {
-  const { projects, setProjects, activeProjectId } = useAppStore();
+  const { projects, setProjects, activeProjectId } = useAppStore(
+    useShallow((s) => ({ projects: s.projects, setProjects: s.setProjects, activeProjectId: s.activeProjectId }))
+  );
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [bundledSkills, setBundledSkills] = useState<BundledSkillItem[]>([]);
   const [installedSkills, setInstalledSkills] = useState<InstalledSkillItem[]>([]);

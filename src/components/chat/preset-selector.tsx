@@ -2,6 +2,7 @@
 
 import React from "react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { PRESETS, PRESET_ORDER, type PresetTier } from "@/lib/agent/presets";
 import { Crown, Zap, Leaf, Settings, Cpu } from "lucide-react";
 import { useState } from "react";
@@ -43,7 +44,9 @@ const ACCENT_STYLES: Record<string, { bg: string; border: string; text: string; 
 };
 
 export function PresetSelector() {
-  const { activePreset, setActivePreset } = useAppStore();
+  const { activePreset, setActivePreset } = useAppStore(
+    useShallow((s) => ({ activePreset: s.activePreset, setActivePreset: s.setActivePreset }))
+  );
   const [sheetOpen, setSheetOpen] = useState(false);
 
   return (

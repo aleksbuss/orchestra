@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 
 type OnboardingStep = -1 | 0 | 1 | 2 | 3 | 4;
 
@@ -76,7 +77,9 @@ function OnboardingStepIndicator({
 function ProjectsPageClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { projects, setProjects, setActiveProjectId } = useAppStore();
+  const { projects, setProjects, setActiveProjectId } = useAppStore(
+    useShallow((s) => ({ projects: s.projects, setProjects: s.setProjects, setActiveProjectId: s.setActiveProjectId }))
+  );
 
   const isOnboardingQuery = searchParams.get("onboarding") === "1";
   const shouldOpenCreate = searchParams.get("create") === "1" || isOnboardingQuery;

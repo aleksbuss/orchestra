@@ -37,11 +37,14 @@ const FAMILY_LIMITS: Array<[pattern: string, maxOutput: number]> = [
   ["gpt-4-turbo", 4_096],
   ["gpt-4", 8_192],
   ["gpt-3.5", 4_096],
-  // Anthropic.
-  ["claude-opus-4", 32_000],
-  ["claude-sonnet-4", 64_000],
-  ["claude-3-7", 64_000],
-  ["claude-3.7", 64_000],
+  // Anthropic — DEFAULT (no-beta) output caps only. Anthropic gates higher
+  // limits (64k/128k on Sonnet, 32k on Opus) behind `anthropic-beta` headers
+  // Orchestra does NOT send, so requesting >8192 on those models 400s. Keep
+  // every Claude family at its safe default; revisit if the beta header is wired.
+  ["claude-opus-4", 8_192],
+  ["claude-sonnet-4", 8_192],
+  ["claude-3-7", 8_192],
+  ["claude-3.7", 8_192],
   ["claude-3-5", 8_192],
   ["claude-3.5", 8_192],
   ["claude-3", 4_096],

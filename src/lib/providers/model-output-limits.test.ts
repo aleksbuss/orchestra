@@ -27,6 +27,14 @@ describe("getModelMaxOutput — static family registry", () => {
     expect(getModelMaxOutput("google", "gemini-2.5-pro")).toBe(65_536);
   });
 
+  it("keeps beta-gated Claude families at the SAFE default (8192), never the 64k/128k beta limit", () => {
+    // Anthropic 400s on max_tokens > 8192 without an `anthropic-beta` header,
+    // which Orchestra does not send. These MUST resolve to 8192.
+    expect(getModelMaxOutput("anthropic", "claude-sonnet-4-20250514")).toBe(8_192);
+    expect(getModelMaxOutput("anthropic", "claude-3-7-sonnet")).toBe(8_192);
+    expect(getModelMaxOutput("anthropic", "claude-opus-4")).toBe(8_192);
+  });
+
   it("returns undefined for unknown models and empty ids", () => {
     expect(getModelMaxOutput("ollama", "some-obscure-local-model")).toBeUndefined();
     expect(getModelMaxOutput("openai", undefined)).toBeUndefined();

@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { cliProviderEnv } from "@/lib/tools/scrub-env";
+import { cliProviderEnv } from "@/lib/security/scrub-env";
 
 export type CliProviderName = "codex-cli" | "gemini-cli";
 

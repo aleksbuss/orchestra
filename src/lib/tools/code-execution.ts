@@ -3,7 +3,7 @@ import path from "path";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
 import type { AppSettings } from "@/lib/types";
 import { inspectCommand } from "@/lib/security/dangerous-command-guard";
-import { scrubProcessEnv } from "@/lib/tools/scrub-env";
+import { scrubProcessEnv } from "@/lib/security/scrub-env";
 
 // PM #28/#70 — the env scrubber moved to scrub-env.ts so the install_packages
 // orchestrator shares it (a malicious package's post-install script runs

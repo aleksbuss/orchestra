@@ -13,9 +13,9 @@
 
 A team of specialized agents, not just one model. Self-hosted, BYOK, MIT-licensed.
 
-![Orchestra answering a systems-design question — a panel of experts ran in parallel, then synthesized this answer; the token counter is live](docs/assets/orchestra-hero.png)
+![Orchestra answering a question — note the live cost banner at the top showing tokens AND the real USD estimate (~$0.0026), plus an inline web-search fact-check](docs/assets/orchestra-hero.png)
 
-<sub>A real Swarm run: the prompt fans out to a Router-generated panel of experts (with a code-guaranteed Skeptic), an aggregator synthesizes the drafts, and every chat shows live token usage.</sub>
+<sub>Every chat shows live token + USD cost (top bar) and the agent fact-checks with web search before answering. Flip on Swarm mode to fan the prompt out to a panel of experts — see [the pipeline below](#-the-moa-pipeline).</sub>
 <!-- TODO(visual): swap the static hero for a short demo GIF of a live run when you record one. -->
 
 Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, substantially extended. See [`NOTICE.md`](./NOTICE.md).

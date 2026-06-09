@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
-import { scrubProcessEnv } from "@/lib/tools/scrub-env";
+import { scrubProcessEnv } from "@/lib/security/scrub-env";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const OUTPUT_CAP = 120_000;

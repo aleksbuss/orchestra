@@ -23,7 +23,7 @@ import {
   loadProjectMcpServers,
 } from "@/lib/storage/project-store";
 import { resolveCliOAuthCredentialSync } from "@/lib/providers/provider-auth";
-import { cliProviderEnv, scrubProcessEnv } from "@/lib/tools/scrub-env";
+import { cliProviderEnv, scrubProcessEnv } from "@/lib/security/scrub-env";
 import { MODEL_PROVIDERS } from "@/lib/providers/model-config";
 
 type OpenAICompatibleSettings = {

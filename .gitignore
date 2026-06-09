@@ -56,3 +56,6 @@ __pycache__/
 scratch.ts
 /scratch/
 playwright-report/
+
+# Claude Code local settings
+.claude/

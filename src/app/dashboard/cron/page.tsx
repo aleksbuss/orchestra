@@ -2,10 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { CronSection } from "@/components/cron-section";
 
 export default function CronPage() {
-  const { projects, setProjects, activeProjectId } = useAppStore();
+  const { projects, setProjects, activeProjectId } = useAppStore(
+    useShallow((s) => ({ projects: s.projects, setProjects: s.setProjects, activeProjectId: s.activeProjectId }))
+  );
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [projectsLoading, setProjectsLoading] = useState(false);
 

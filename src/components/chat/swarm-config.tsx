@@ -1,18 +1,14 @@
 "use client";
 
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { Users, Plane, Zap } from "lucide-react";
 import { PresetSelector } from "./preset-selector";
 
 export function SwarmConfig() {
-  const {
-    swarmEnabled,
-    daemonMode,
-    forceSwarm,
-    setSwarmEnabled,
-    setDaemonMode,
-    setForceSwarm,
-  } = useAppStore();
+  const { swarmEnabled, daemonMode, forceSwarm, setSwarmEnabled, setDaemonMode, setForceSwarm } = useAppStore(
+    useShallow((s) => ({ swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, setSwarmEnabled: s.setSwarmEnabled, setDaemonMode: s.setDaemonMode, setForceSwarm: s.setForceSwarm }))
+  );
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">

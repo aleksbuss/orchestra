@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Globe, Loader2, Terminal, Wrench } from "lucide-react";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 
 interface McpServerItem {
   id: string;
@@ -151,7 +152,9 @@ function normalizeServers(input: unknown): McpServerItem[] {
 const EMPTY_MCP_JSON = JSON.stringify({ mcpServers: {} }, null, 2);
 
 export default function McpPage() {
-  const { projects, setProjects, activeProjectId } = useAppStore();
+  const { projects, setProjects, activeProjectId } = useAppStore(
+    useShallow((s) => ({ projects: s.projects, setProjects: s.setProjects, activeProjectId: s.activeProjectId }))
+  );
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [servers, setServers] = useState<McpServerItem[]>([]);
   const [rawContent, setRawContent] = useState<string | null>(null);

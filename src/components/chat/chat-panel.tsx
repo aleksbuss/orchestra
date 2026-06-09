@@ -6,6 +6,7 @@ import type { UIMessage } from "ai";
 import { ChatMessages } from "./chat-messages";
 import { ChatInput } from "./chat-input";
 import { useAppStore } from "@/store/app-store";
+import { useShallow } from "zustand/react/shallow";
 import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import type { ChatMessage } from "@/lib/types";
 import { useBackgroundSync } from "@/hooks/use-background-sync";
@@ -219,20 +220,9 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 export function ChatPanel() {
-  const {
-    activeChatId,
-    setActiveChatId,
-    activeProjectId,
-    currentPath,
-    setCurrentPath,
-    setActiveProjectId,
-    setProjects,
-    addChat,
-    swarmEnabled,
-    daemonMode,
-    forceSwarm,
-    activePreset,
-  } = useAppStore();
+  const { activeChatId, setActiveChatId, activeProjectId, currentPath, setCurrentPath, setActiveProjectId, setProjects, addChat, swarmEnabled, daemonMode, forceSwarm, activePreset } = useAppStore(
+    useShallow((s) => ({ activeChatId: s.activeChatId, setActiveChatId: s.setActiveChatId, activeProjectId: s.activeProjectId, currentPath: s.currentPath, setCurrentPath: s.setCurrentPath, setActiveProjectId: s.setActiveProjectId, setProjects: s.setProjects, addChat: s.addChat, swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, activePreset: s.activePreset }))
+  );
   
   // Internal chatId that stays stable during a message send.
   // Pre-generate a UUID so useChat always has a consistent id.

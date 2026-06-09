@@ -3,57 +3,13 @@ import path from "path";
 import { execFileSync, spawn, type ChildProcess } from "child_process";
 import type { AppSettings } from "@/lib/types";
 import { inspectCommand } from "@/lib/security/dangerous-command-guard";
+import { scrubProcessEnv } from "@/lib/tools/scrub-env";
 
-/**
- * Drop secret-shaped env vars before passing process.env to a child process
- * (PM #28). In LOCAL-mode installs the Orchestra Node process inherits the
- * operator's full environment — including `ORCHESTRA_AUTH_SECRET`,
- * `*_API_KEY`, `*_TOKEN`, `*_PASSWORD`, etc. Without scrubbing, a Python or
- * shell snippet the agent runs can read those via `os.environ` / `printenv`
- * and exfiltrate them. Docker installs already isolate via the container,
- * but LOCAL is the documented primary path.
- *
- * Filter shape: a name is dropped if any underscore-bounded token matches
- * one of the secret keywords below. Underscore-bounded so legit names like
- * `KEYBOARD_LAYOUT`, `HASHTABLE_SIZE`, `AUTHORIZATION_HEADER` (token but
- * with prefix `AUTHORIZATION` ≠ `AUTH`) stay through.
- *
- * Test coverage in `code-execution-env.test.ts`.
- */
-const SECRET_ENV_RE =
-  /(?:^|_)(?:KEY|KEYS|SECRET|SECRETS|TOKEN|TOKENS|PASSWORD|PASSWORDS|PASSWD|CREDENTIAL|CREDENTIALS|PRIVATE)(?:$|_)/i;
-const ALWAYS_SCRUB_NAMES = new Set([
-  "ORCHESTRA_AUTH_SECRET",
-  "ORCHESTRA_SESSION_SECRET",
-  "AUTH",
-  "AUTHORIZATION",
-]);
-
-/**
- * Override shape on purpose: `NodeJS.ProcessEnv` in this project's typings
- * marks `NODE_ENV` as required, which makes constructing override literals
- * awkward. We accept the looser shape (matches the actual runtime contract
- * of `process.env`), then cast the return back to `NodeJS.ProcessEnv` so
- * callsites that pass into `spawn({ env })` don't need their own casts.
- */
-type EnvBag = Record<string, string | undefined>;
-
-export function scrubProcessEnv(overrides: EnvBag = {}): NodeJS.ProcessEnv {
-  const safe: EnvBag = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined) continue;
-    const upper = name.toUpperCase();
-    if (ALWAYS_SCRUB_NAMES.has(upper)) continue;
-    if (SECRET_ENV_RE.test(upper)) continue;
-    safe[name] = value;
-  }
-  // Caller-supplied overrides are NOT subject to the filter: a caller that
-  // explicitly passes `{ VIRTUAL_ENV: "..." }` knows it's not a secret.
-  // The cast is safe — at runtime `process.env` is exactly this shape; the
-  // typing mismatch is purely about NODE_ENV being marked required by the
-  // augmented @types/node ProcessEnv interface in this codebase.
-  return { ...safe, ...overrides } as NodeJS.ProcessEnv;
-}
+// PM #28/#70 — the env scrubber moved to scrub-env.ts so the install_packages
+// orchestrator shares it (a malicious package's post-install script runs
+// arbitrary code too, so it must not inherit `.env` secrets either). Re-exported
+// here for existing importers (logger.ts, code-execution-env.test.ts).
+export { scrubProcessEnv };
 
 type ExecutionRuntime = "python" | "nodejs" | "terminal";
 

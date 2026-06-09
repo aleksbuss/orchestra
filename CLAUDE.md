@@ -420,7 +420,7 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 ### 6. Security (Code Execution Tool)
 - The `code-execution` tool runs via `child_process.spawn`.
 - **Docker Privilege:** In the official Docker environment, the `node` user has passwordless `sudo` (`NOPASSWD: ALL`) to allow the agent to install `apt` dependencies on the fly. 
-- **Environment scrubbing (PM #28):** ALL agent-spawned processes (Python, Node.js, terminal, login-shell PATH probes) construct their env via `scrubProcessEnv()` from [`src/lib/tools/code-execution.ts`](src/lib/tools/code-execution.ts), NOT by spreading `process.env`. The scrubber drops underscore-bounded `KEY/SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL(S)/PRIVATE` names and a small explicit always-scrub list (`ORCHESTRA_AUTH_SECRET`, `ORCHESTRA_SESSION_SECRET`, `AUTH`, `AUTHORIZATION`). LOCAL-mode installs no longer leak the operator's `.env` to agent-run snippets. Docker installs were already isolated; the helper is now the same posture in both modes by construction.
+- **Environment scrubbing (PM #28, PM #70):** ALL agent-spawned processes (Python, Node.js, terminal, login-shell PATH probes, **and the `install_packages` orchestrator** — npm/brew/pip post-install hooks run arbitrary code too) construct their env via `scrubProcessEnv()` from [`src/lib/tools/scrub-env.ts`](src/lib/tools/scrub-env.ts) (re-exported from `code-execution.ts` for back-compat), NOT by spreading `process.env`. The scrubber drops underscore-bounded `KEY/SECRET/TOKEN/PASSWORD/PASSWD/CREDENTIAL(S)/PRIVATE` names and a small explicit always-scrub list (`ORCHESTRA_AUTH_SECRET`, `ORCHESTRA_SESSION_SECRET`, `AUTH`, `AUTHORIZATION`), and keeps installer-needed vars (PATH, HOME, npm_config_*, HOMEBREW_*). LOCAL-mode installs no longer leak the operator's `.env`. Docker installs were already isolated; the helper is now the same posture everywhere by construction.
 - **Adding a new child-process tool:** call `scrubProcessEnv({ EXPLICIT_VAR: "value" })` for any var that legitimately needs to be exposed (e.g. `VIRTUAL_ENV`); never write `env: process.env`. Pre-merge grep: `grep -rn "\.\.\.process\.env" src/lib/tools/` should return zero hits outside the scrubber callsites listed in PM #28.
 - **Rule:** Never expose the `code-execution` tool to unauthenticated users or untrusted networks without explicit containerization limits.
 
@@ -489,7 +489,7 @@ Five files cross the §8 1500-line "MUST decompose next substantive PR" line. No
 
 **`src/lib/tools/code-execution.ts` (1207 LOC, 3 hot edits in 90d)** — security-critical surface.
 - Natural seams:
-  - `code-execution/env.ts` (~150): `scrubProcessEnv` + the PM #28 always-scrub list. THIS IS THE FILE TO TEST HARDEST.
+  - `scrub-env.ts` (DONE, PM #70): `scrubProcessEnv` + the PM #28 always-scrub list already extracted to its own module (shared by code-execution AND install-orchestrator). THIS IS THE FILE TO TEST HARDEST.
   - `code-execution/runners/{python,node,shell}.ts` (~200 each): per-runtime spawn logic + arg normalization.
   - `code-execution/sandbox.ts` (~200): the Docker vs local branch.
   - `code-execution/index.ts` (~250): the public `code_execution` tool entry, composes the above.

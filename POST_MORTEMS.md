@@ -38,6 +38,18 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 70. `install_packages` leaked the operator's `.env` to package post-install hooks
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (secret-egress vector — narrow, requires a malicious package)
+**Symptoms:** None observed in production — found in an adversarial audit of the just-added `brew` install kind. `install_packages` spawned its package managers (npm/pnpm/apt/brew/pip) with `env: process.env` — the FULL environment, including `ORCHESTRA_AUTH_SECRET` and every `*_API_KEY`. A package's post-install script (`npm` lifecycle hook, a `brew` formula, a `pip setup.py`) runs arbitrary code and could read those out of `process.env` and exfiltrate them.
+**Detection:** Manual audit. The PM #28 grep (`...process.env` spread) did NOT catch it because install-orchestrator used the literal `env: process.env` (no spread), so it slipped the existing guard.
+**Root Cause:** PM #28 scrubbed `code-execution`'s spawns but `install-orchestrator.ts` was a separate child-process surface added later that never adopted the scrubber — it passed `process.env` directly to `spawn`. Inconsistent posture: code the agent writes was sandboxed, code a package's install hook runs was not.
+**Resolution:** Extracted `scrubProcessEnv` (+ the always-scrub list + secret regex) from `code-execution.ts` into [`scrub-env.ts`](src/lib/tools/scrub-env.ts) (re-exported from `code-execution.ts` for back-compat), and switched `install-orchestrator`'s `runCommand` to `env: scrubProcessEnv()`. The scrubber keeps installer-needed vars (PATH/HOME/npm_config_*/HOMEBREW_*) while dropping secrets.
+**Regression Coverage:** `install-orchestrator.test.ts` — "install spawns with a scrubbed env" asserts a `*_API_KEY` is dropped from the spawn env while `PATH` is preserved. The existing `code-execution-env.test.ts` still passes via the re-export.
+**Doc Updates:** `CLAUDE.md` §6 (env-scrubbing now names scrub-env.ts + install_packages) and §10 (code-execution seam `scrub-env.ts` marked DONE).
+**Rule:** EVERY agent-reachable `spawn`/`exec` — including package managers, not just the code-execution runtimes — must build its env via `scrubProcessEnv()`. A new child-process surface inherits ZERO of PM #28's protection; re-apply the scrubber explicitly. The `...process.env` grep misses `env: process.env`; grep both forms.
+
 ## 69. Intermittent: main agent stops after a tool call without delivering the final answer (deepseek/OpenRouter `finishReason: "other"`)
 **Date:** 2026-06
 **Status:** RESOLVED

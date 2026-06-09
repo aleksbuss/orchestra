@@ -352,3 +352,20 @@ describe("installPackages — timeout clamping (defensive)", () => {
     expect(result.success).toBe(true);
   });
 });
+
+describe("PM #70 — install spawns with a scrubbed env (no secret leak to package hooks)", () => {
+  it("drops secret-shaped vars but keeps PATH", async () => {
+    process.env.FAKE_INSTALL_API_KEY = "sk-should-not-leak";
+    spawnMock.mockImplementation(() => fakeProcess({ exitCode: 0, stdout: "ok" }));
+    await installPackages({ kind: "node", packages: ["lodash"], cwd: "/tmp" });
+
+    expect(spawnMock).toHaveBeenCalled();
+    const opts = spawnMock.mock.calls[0][2] as { env: Record<string, string | undefined> };
+    // A malicious package's post-install hook must NOT see the operator's keys…
+    expect(opts.env.FAKE_INSTALL_API_KEY).toBeUndefined();
+    // …but the installer still needs PATH to find its binaries.
+    expect(opts.env.PATH).toBe(process.env.PATH);
+
+    delete process.env.FAKE_INSTALL_API_KEY;
+  });
+});

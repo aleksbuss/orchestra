@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { spawn } from "child_process";
+import { scrubProcessEnv } from "@/lib/tools/scrub-env";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const OUTPUT_CAP = 120_000;
@@ -479,7 +480,9 @@ async function runCommand(
 
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: process.env,
+      // PM #70 — scrub secrets: a package's post-install hook (npm/brew/pip)
+      // runs arbitrary code and must not inherit the operator's API keys.
+      env: scrubProcessEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 

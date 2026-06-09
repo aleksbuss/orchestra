@@ -29,8 +29,10 @@ import {
   saveCachedOpenRouterPricing,
   refreshOpenRouterPricingCache,
   getCachedOpenRouterPricing,
+  getOpenRouterMaxOutput,
   __resetOpenRouterPricingForTests,
   __seedOpenRouterPricingForTests,
+  __setOpenRouterMaxOutputForTest,
 } from "./openrouter-pricing";
 
 const originalFetch = globalThis.fetch;
@@ -175,6 +177,27 @@ describe("PM #49 — disk cache round-trip", () => {
     expect(loaded?.pricing.size).toBe(2);
     expect(loaded?.pricing.get("openai/gpt-4o")?.inputUsdPerMillion).toBe(2.5);
     expect(loaded?.fetchedAt).toBe(Date.parse("2026-01-01T00:00:00Z"));
+  });
+
+  it("persists & restores per-model max output — the dynamic source survives a warm-cache boot", async () => {
+    // Seed the in-memory max-output map (incl. a FREE model with no pricing).
+    __setOpenRouterMaxOutputForTest(
+      new Map([
+        ["deepseek/deepseek-chat", 16_000],
+        ["meta/free-model", 4_096],
+      ])
+    );
+    await saveCachedOpenRouterPricing(
+      new Map([["deepseek/deepseek-chat", { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }]]),
+      new Date("2026-01-01T00:00:00Z")
+    );
+    // Wipe in-memory, then reload from disk (the warm-cache path).
+    __setOpenRouterMaxOutputForTest(new Map());
+    expect(getOpenRouterMaxOutput("deepseek/deepseek-chat")).toBeUndefined();
+    await loadCachedOpenRouterPricing();
+    expect(getOpenRouterMaxOutput("deepseek/deepseek-chat")).toBe(16_000);
+    // The free model (absent from `pricing`) was persisted too.
+    expect(getOpenRouterMaxOutput("meta/free-model")).toBe(4_096);
   });
 
   it("loadCachedOpenRouterPricing returns null on corrupt JSON (no throw)", async () => {

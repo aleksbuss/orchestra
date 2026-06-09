@@ -72,6 +72,10 @@ interface OpenRouterListing {
 interface CacheFileShape {
   fetchedAt: string; // ISO8601
   entries: Array<{ id: string; inputUsdPerMillion: number; outputUsdPerMillion: number }>;
+  // Per-model max output tokens (`top_provider.max_completion_tokens`). Optional
+  // so older cache files (pre-feature) load cleanly; persisting it means the
+  // dynamic source survives a warm-cache boot (no network fetch).
+  maxOutput?: Record<string, number>;
 }
 
 const OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models";
@@ -196,6 +200,15 @@ export async function loadCachedOpenRouterPricing(): Promise<{
       outputUsdPerMillion: e.outputUsdPerMillion,
     });
   }
+  // Warm the dynamic max-output source from disk so it survives a warm-cache
+  // boot (no network fetch). Best-effort: absent on pre-feature caches.
+  if (parsed.maxOutput && typeof parsed.maxOutput === "object") {
+    const mo = new Map<string, number>();
+    for (const [id, v] of Object.entries(parsed.maxOutput)) {
+      if (typeof v === "number" && v > 0) mo.set(id.toLowerCase(), v);
+    }
+    if (mo.size > 0) inMemoryMaxOutput = mo;
+  }
   return { pricing: map, fetchedAt };
 }
 
@@ -216,6 +229,9 @@ export async function saveCachedOpenRouterPricing(
       inputUsdPerMillion: p.inputUsdPerMillion,
       outputUsdPerMillion: p.outputUsdPerMillion,
     })),
+    // Persist the per-model output ceilings so a warm-cache boot keeps the
+    // dynamic source populated (free models too — they aren't in `pricing`).
+    maxOutput: Object.fromEntries(inMemoryMaxOutput),
   };
   await safeWriteFile(cachePath, JSON.stringify(payload, null, 2));
 }

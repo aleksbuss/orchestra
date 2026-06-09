@@ -38,6 +38,18 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 71. OpenRouter cost banner ALWAYS showed "cost unknown" — pricing cache warmed in a different module instance than the cost path read
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (a shipped, documented feature — live USD per-chat cost — was silently non-functional for the *recommended* provider)
+**Symptoms:** Every chat's cost banner showed `… tokens · cost unknown (no pricing data for this model)` — never a `$` amount — for OpenRouter models, even though the OpenRouter pricing cache was loaded (boot log `[OpenRouterPricing] memory — 337 models priced`, `/api/health` reporting `337 models priced; age 18h`). The operator concluded the cost feature "wasn't implemented." All of their persisted chats had `cumulativeUsage: { costUsd: 0, fullyPriced: false }`.
+**Detection:** User report ("never saw the cost banner work"). A clean vitest probe proved `getModelPricing("openrouter","deepseek/deepseek-chat")` resolves to `$0.20/$0.80` when the in-memory map is seeded — yet the live path failed. A temporary `console.error` inside `getCachedOpenRouterPricing` showed `{ id: "deepseek/deepseek-chat", size: 0, hit: false }` at the moment of the live lookup: **the cost path's `inMemoryPricing` was an empty Map**, despite the boot/health reporting 337 models.
+**Root Cause:** Next.js bundles `instrumentation-node.ts` and the API route handlers into **separate module graphs**. `refreshOpenRouterPricingCache()` (fired at boot from instrumentation-node) warmed the module-level `let inMemoryPricing` in the *instrumentation* instance of `openrouter-pricing.ts`. The agent's cost path (`agent.ts onFinish → foldTurnUsage → estimateCostFor → getModelPricing → getCachedOpenRouterPricing`) runs in the *route* bundle, which imported a **second instance** of the same module whose `inMemoryPricing` was never warmed (stayed `new Map()`). So the lookup always missed → `knownPricing: false` → `fullyPriced: false` → "cost unknown" for every OpenRouter turn, forever. `/api/health` and the boot log were misleading because they ran in / reported the warmed instance. (`maxOutput` for model-output-limits had the same latent split.)
+**Resolution:** moved `inMemoryPricing` / `inMemoryFetchedAt` / `inMemoryMaxOutput` off module scope onto a single `globalThis`-backed store keyed by `Symbol.for("orchestra.openrouter-pricing.store")` (a `store()` accessor). `globalThis` is one object per Node process, shared across every module instance, so the instrumentation warm and the route read hit the same map. Verified LIVE end-to-end: a fresh OpenRouter chat now renders `12.8k tokens · ~$0.0026`.
+**Regression Coverage:** `openrouter-pricing.test.ts` — the existing seed/round-trip suite still passes against the global store; added an assertion that the warmed state is reachable on `globalThis` (so a re-imported module instance shares it).
+**Doc Updates:** `CLAUDE.md` Observability/data section — the "boot-warmed, route-read" module-state rule (use `globalThis`, never a module-level `let`).
+**Rule:** Mutable module state that is WARMED at boot (instrumentation-node) but READ by request handlers MUST live on `globalThis`, not a module-level `let` — Next.js can instantiate the module twice (instrumentation bundle vs route bundle), and a module-level `let` is per-instance. Symptom signature: a cache that `/api/health` says is full but every consumer sees empty.
+
 ## 70. `install_packages` leaked the operator's `.env` to package post-install hooks
 **Date:** 2026-06
 **Status:** RESOLVED

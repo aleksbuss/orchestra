@@ -1,4 +1,5 @@
 import { spawn } from "child_process";
+import { cliProviderEnv } from "@/lib/tools/scrub-env";
 
 export type CliProviderName = "codex-cli" | "gemini-cli";
 
@@ -27,6 +28,7 @@ function commandForProvider(provider: CliProviderName): string {
 function runCommand(
   command: string,
   args: string[],
+  provider: CliProviderName,
   timeoutMs = 2_500
 ): Promise<CommandResult> {
   return new Promise((resolve) => {
@@ -39,7 +41,8 @@ function runCommand(
     try {
       child = spawn(command, args, {
         stdio: ["ignore", "pipe", "pipe"],
-        env: process.env,
+        // PM #70 — scrub secrets; the CLI keeps only its own auth vars.
+        env: cliProviderEnv(provider),
       });
     } catch (error) {
       resolve({
@@ -219,7 +222,7 @@ export async function getCliProviderModels(
   const discovered = new Set<string>();
 
   for (const args of commandCandidates(provider)) {
-    const result = await runCommand(command, args);
+    const result = await runCommand(command, args, provider);
     if (result.timedOut) continue;
 
     const combined = `${result.stdout}\n${result.stderr}`.trim();

@@ -38,6 +38,17 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 73. New `fetch_webpage` tool — and the security an "agent reads a URL" tool MUST have
+**Date:** 2026-06
+**Status:** RESOLVED (feature + the near-miss it would have been)
+**Severity:** P1 (a proposed implementation, caught in review, would have shipped an SSRF + prompt-injection hole)
+**Symptoms / Context:** The Skeptic could only verify facts via `search_web` (a search engine's *snippet*) or `web_task` (a full Playwright browser). There was no fast "read the raw text of this page" capability, so on OSINT/source-verification tasks it tended to trust the search summary. A proposed plan added a `fetch_webpage` tool that did `fetch(modelSuppliedUrl)` → strip tags → return text. As written it had two P1 holes the proposal did not mention.
+**Root Cause (of the would-be bug):** (1) Fetching a URL the MODEL supplies is an SSRF vector — without `assertSafeOutboundUrl` the agent (or a prompt-injected agent) could hit `169.254.169.254` (cloud metadata), RFC-1918, or `localhost:<other-port>`. (2) The fetched HTML is UNTRUSTED external content; feeding it to the Skeptic un-wrapped lets a malicious page inject "ignore your instructions" — the exact failure the tool was meant to PREVENT.
+**Resolution:** Implemented [`fetch-webpage.ts`](src/lib/tools/fetch-webpage.ts) WITH the contracts: `assertSafeOutboundUrl` (PM #8) before any fetch, `AbortSignal.timeout` + the agent `abortSignal`, a hard body byte-cap + text char-cap, content-type gating (text/html only), and the `<UNTRUSTED_WEBPAGE>` wrapper (PM #27 — covered generically by `<untrusted_content_protocol>`). Returns error strings, never throws (loop-guard §4). Registered in `createAgentTools`; MoA Router Rule 5 + the static critic persona now instruct the Skeptic to use it to verify raw sources; Router Rule 8 nudges `create_goal_tree` for multi-step OSINT (autonomy already existed via the daemon — the gap was the Router not invoking it). Limitation documented: raw `fetch` runs no JS, so SPA pages still need `web_task`.
+**Regression Coverage:** `fetch-webpage.test.ts` — SSRF refusal BEFORE any fetch (metadata/RFC-1918/non-http), `<UNTRUSTED_WEBPAGE>` wrapping, script/tag stripping, HTTP-error string, non-text rejection, JS-rendered hint.
+**Doc Updates:** `CLAUDE.md` §8 (tool list) + §Security (the "agent fetches a model-supplied URL" rule).
+**Rule:** ANY agent/tool path that performs a server-side `fetch` of a URL the MODEL or USER supplies MUST (a) pass it through `assertSafeOutboundUrl` + a timeout, and (b) wrap the response in `<UNTRUSTED_*>` markers before it reaches the model. A tool that "reads the web to verify truth" is worthless if the page it reads can rewrite the reader's instructions.
+
 ## 72. "Download entire project" felt missing — the button was `opacity-0` hover-only
 **Date:** 2026-06
 **Status:** RESOLVED

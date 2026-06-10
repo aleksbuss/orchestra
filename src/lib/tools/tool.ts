@@ -19,6 +19,7 @@ import { memorySave, memoryLoad, memoryDelete } from "@/lib/tools/memory-tools";
 import { knowledgeQuery } from "@/lib/tools/knowledge-query";
 import { searchWeb, isSearchUsable } from "@/lib/tools/search-engine";
 import { createWebTaskTool } from "@/lib/tools/web-task";
+import { createFetchWebpageTool } from "@/lib/tools/fetch-webpage";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1318,6 +1319,12 @@ export function createAgentTools(
   // this is cheap to include. Sits next to search_web because the parent
   // agent picks one or the other for "fetch info from the web" tasks.
   tools.web_task = createWebTaskTool(settings);
+
+  // fetch_webpage (PM #73) — lightweight raw-text read of a single URL for
+  // source verification (SSRF-guarded, <UNTRUSTED_WEBPAGE>-wrapped). Always
+  // registered; no key needed. The fast path between search_web (snippets) and
+  // web_task (full browser). See src/lib/tools/fetch-webpage.ts.
+  tools.fetch_webpage = createFetchWebpageTool();
 
   const telegramRuntime = getTelegramRuntimeData(context);
   if (telegramRuntime) {

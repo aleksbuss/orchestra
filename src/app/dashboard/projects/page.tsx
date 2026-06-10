@@ -11,6 +11,7 @@ import { updateSettingsByPath } from "@/lib/settings/update-settings-path";
 import {
   AlertTriangle,
   Check,
+  FileArchive,
   FolderOpen,
   Loader2,
   Plus,
@@ -80,6 +81,7 @@ function ProjectsPageClient() {
   const { projects, setProjects, setActiveProjectId } = useAppStore(
     useShallow((s) => ({ projects: s.projects, setProjects: s.setProjects, setActiveProjectId: s.setActiveProjectId }))
   );
+  const [exportingId, setExportingId] = useState<string | null>(null);
 
   const isOnboardingQuery = searchParams.get("onboarding") === "1";
   const shouldOpenCreate = searchParams.get("create") === "1" || isOnboardingQuery;
@@ -425,6 +427,37 @@ function ProjectsPageClient() {
     if (!confirm("Delete this project? This cannot be undone.")) return;
     await fetch(`/api/projects/${id}`, { method: "DELETE" });
     await loadProjects();
+  }
+
+  // Download the ENTIRE project as a ZIP (files + knowledge + MCP config).
+  // Mirrors the file-tree's handleDownloadZip; surfaced here too because the
+  // sidebar control is easy to miss (PM #72 — discoverability).
+  async function handleDownloadProject(id: string) {
+    if (exportingId) return;
+    setExportingId(id);
+    try {
+      const response = await fetch(`/api/projects/${id}/export`);
+      if (!response.ok) {
+        const message = await response.json().then((b) => b?.error).catch(() => null);
+        throw new Error(message || `Export failed (HTTP ${response.status})`);
+      }
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `${id}-export.zip`;
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      requestAnimationFrame(() => URL.revokeObjectURL(url));
+    } catch (err) {
+      console.error("Project export failed:", err);
+      window.alert(err instanceof Error ? err.message : "Could not export project.");
+    } finally {
+      setExportingId(null);
+    }
   }
 
   async function handleSaveSettingsStep() {
@@ -929,18 +962,38 @@ function ProjectsPageClient() {
                           </span>
                         </div>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleDelete(project.id);
-                        }}
-                        className="text-muted-foreground hover:text-destructive"
-                        aria-label={`Delete project ${project.name}`}
-                      >
-                        <Trash2 className="size-4" />
-                      </Button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDownloadProject(project.id);
+                          }}
+                          disabled={exportingId === project.id}
+                          className="text-muted-foreground hover:text-foreground"
+                          aria-label={`Download project ${project.name} as ZIP`}
+                          title="Download entire project as ZIP"
+                        >
+                          {exportingId === project.id ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <FileArchive className="size-4" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDelete(project.id);
+                          }}
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label={`Delete project ${project.name}`}
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ))}

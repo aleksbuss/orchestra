@@ -38,6 +38,18 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 72. "Download entire project" felt missing — the button was `opacity-0` hover-only
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (UX — feature present but undiscoverable; operator reported it "disappeared")
+**Symptoms:** Operator: "I used to be able to download a whole project, now I can only grab files one by one." The project ZIP export feature (`/api/projects/[id]/export` + `file-tree.tsx`) was fully functional — but the trigger was a tiny icon styled `opacity-0 group-hover/root:opacity-100`, i.e. INVISIBLE until you hover the project-root "/" row in the sidebar file tree, and only when a project is active. Per-file download is also hover-only but gets discovered incidentally (you hover files); nobody hovers the root row.
+**Detection:** User report. Verified by `git diff` that the hover-only styling shipped with the original feature commit (`5aef8a6`), NOT introduced by the recent Zustand-selector refactor (`bf276ef`) which left the button untouched — so it was a discoverability defect from day one, not a regression.
+**Root Cause:** A primary action was hidden behind a hover state with zero affordance, in a low-traffic location.
+**Resolution:** (1) the sidebar export button is now always-visible (dropped `opacity-0/group-hover`); (2) added a clear "Download project" (FileArchive) button to each card on `/dashboard/projects` — where the operator actually picks among their projects. Both call the same export endpoint.
+**Regression Coverage:** existing `export/route.test.ts` covers the endpoint; UI is a thin wrapper. (No new test — pure styling/affordance change.)
+**Doc Updates:** none.
+**Rule:** Never gate a PRIMARY or hard-to-rediscover action behind `opacity-0`/hover-only with no other entry point. Hover-reveal is fine for secondary actions that have an obvious anchor (per-row), never for a feature an operator must hunt for.
+
 ## 71. OpenRouter cost banner ALWAYS showed "cost unknown" — pricing cache warmed in a different module instance than the cost path read
 **Date:** 2026-06
 **Status:** RESOLVED

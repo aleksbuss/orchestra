@@ -316,6 +316,8 @@ const res = await fetch(safeUrl, { signal: AbortSignal.timeout(5000) });
 
 Failure mode if you skip the helper: PM #8.
 
+**This applies to agent TOOLS too, not just routes (PM #73).** Any tool that performs a server-side `fetch` of a URL the MODEL or user supplies (e.g. [`fetch_webpage`](src/lib/tools/fetch-webpage.ts)) MUST (a) pass the URL through `assertSafeOutboundUrl` + an `AbortSignal.timeout` BEFORE fetching, and (b) wrap the fetched bytes in `<UNTRUSTED_*>` markers (PM #27) before they reach the model — a fetched page is untrusted external content that can carry prompt-injection. `search_web` is exempt only because it hits a fixed operator-configured endpoint, not a model-supplied URL. `fetch-webpage.ts` is the reference implementation.
+
 ### Privacy Mode air-gap — every LLM entry point (PM #47, PM #58)
 
 When `settings.privacyMode.enabled` is true, NO user data may leave the box to a cloud LLM vendor. The runtime guard is `assertPrivacyModeAllowsSettings(settings)` (`agent.ts`) — it throws when `chatModel`, `utilityModel`, `embeddingsModel`, `proposerTiers`, or the tournament judge resolves to a non-local backend.

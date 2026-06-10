@@ -94,13 +94,14 @@ INSTRUCTIONS:
    [GOAL] What they are trying to achieve from their narrow perspective.
    [RULES] 2-3 strict guidelines they must follow (e.g., "Always hunt for edge cases", "Never propose complex solutions").
    [FORMAT] How they should format their answer.
-5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail.
+5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail. When a factual claim looks doubtful — or comes only from a search summary — their [RULES] MUST instruct them to call the \`fetch_webpage\` tool to read the RAW source page and verify it directly. A \`search_web\` snippet is a lead, NOT proof.
 6. (PM #48 — model tier hint): for each expert, set \`modelTier\` to "fast" / "balanced" / "frontier":
    - "fast" for QA / Skeptic / Critic / Reviewer personas — they evaluate, not synthesize. Cheap reliable models are enough.
    - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
    - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
    This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
-7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
+7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}
+8. For COMPLEX, MULTI-STEP investigations (OSINT on a person/company/domain, research that needs several rounds of digging, or anything that cannot be answered in a single pass), instruct the relevant expert in their [RULES] to use the \`create_goal_tree\` tool to break the task into a tracked plan and work it across turns — rather than guessing a final answer in one shot.${fewShotsBlock}`,
       abortSignal,
     });
 

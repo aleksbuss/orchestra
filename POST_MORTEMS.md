@@ -38,6 +38,18 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 74. computeNextRunAtMs scanned ~1M minutes (≈100s) for far/impossible cron exprs
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (perf / mild local DoS — a single tick could hang ~100s of CPU; tests timed out under load)
+**Symptoms:** The cron "impossible expression" tests (`0 0 30 2 *` — Feb 30) took 100+ seconds and failed their timeout under any parallel load. Root cause was general: `computeNextCronRunAtMs` advanced a cursor ONE MINUTE at a time, calling `Intl.DateTimeFormat.formatToParts` every iteration, up to the 2-year cap = 1,054,080 iterations (~100s). Impossible exprs hit the full cap; even VALID-but-far exprs were slow (e.g. "0 0 31 1 *" from mid-May ≈ 260 days ≈ 374k iterations ≈ 37s) — a Jan-31 cron tick would burn ~37s.
+**Detection:** Surfaced while auditing an unrelated change; the impossible-expr tests were flaky-failing on timeout. `git` confirmed cron was untouched since 2026-05-30 — pre-existing.
+**Root Cause:** O(minutes-until-next-match) minute-by-minute scan with a per-iteration `Intl` call. The 2-year cap bounded it but at ~100s.
+**Resolution:** Two complementary fixes in `schedule.ts`: (1) `isDayMonthFeasible` — an O(1) upfront reject for structurally impossible day×month sets (Feb 30, Apr/Jun/Sep/Nov 31), using a per-month max-day table (Feb=29, leap-lenient); the matcher uses AND semantics for day×month so this is sound. (2) Day-skipping lookahead — when the DAY can't match (`matchesDay`: dom×month×dow), jump to ~midnight of the next day instead of scanning its 1440 minutes, turning a months-away match from ~hundreds-of-thousands of iterations into ~hundreds. DST may land the skip ±1h off midnight; harmless — the loop re-evaluates each pass and never skips a day whose day-level fields match.
+**Regression Coverage:** `schedule.test.ts` — impossible exprs (Feb 30 / Apr 31 / 31st of 30-day months) now return undefined INSTANTLY (no 60s timeout); valid edges (Jan 31, Feb 28) still resolve. Full cron suite 88 tests run in ~2.3s (was 100s+).
+**Doc Updates:** none (internal perf).
+**Rule:** A bounded "scan until match or cap" loop is still a latency bug if the per-step cost is high and the cap is large. When iterating a calendar/time space, skip at the COARSEST granularity a field can rule out (whole day/month), and reject structurally-impossible inputs before the loop. Never ship an O(cap) hot loop whose cap is "2 years of minutes."
+
 ## 73. New `fetch_webpage` tool — and the security an "agent reads a URL" tool MUST have
 **Date:** 2026-06
 **Status:** RESOLVED (feature + the near-miss it would have been)

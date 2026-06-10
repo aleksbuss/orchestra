@@ -232,18 +232,32 @@ describe("computeNextRunAtMs — 'cron' schedule (UTC tz)", () => {
     expect(next).toBe(Date.UTC(2026, 4, 17, 9, 0, 0));
   });
 
-  it("returns undefined for impossible expression ('0 0 30 2 *' — Feb 30th)", () => {
-    // Lookahead is capped at 2 years; Feb 30 never exists → undefined.
-    // The 2-year sweep is genuinely a lot of work — vitest 3's default 5s
-    // timeout isn't enough on slower CI. Vitest 1 didn't enforce the limit
-    // on this case for reasons that didn't survive the migration; pin it
-    // explicitly here so future bumps don't regress.
-    const next = computeNextRunAtMs(
-      { kind: "cron", expr: "0 0 30 2 *", tz: TZ },
-      NOW_MS
-    );
-    expect(next).toBeUndefined();
-  }, 60_000);
+  it("returns undefined INSTANTLY for structurally impossible day×month (PM #74)", () => {
+    // PM #74 — these used to scan the full ~1M-minute 2-year lookahead (≈100s,
+    // a mild DoS). Now `isDayMonthFeasible` bails in O(1). No long timeout needed.
+    expect(
+      computeNextRunAtMs({ kind: "cron", expr: "0 0 30 2 *", tz: TZ }, NOW_MS) // Feb 30
+    ).toBeUndefined();
+    expect(
+      computeNextRunAtMs({ kind: "cron", expr: "0 0 31 4 *", tz: TZ }, NOW_MS) // Apr 31
+    ).toBeUndefined();
+    expect(
+      computeNextRunAtMs({ kind: "cron", expr: "0 0 31 6,9,11 *", tz: TZ }, NOW_MS) // 31st of 30-day months
+    ).toBeUndefined();
+  });
+
+  it("still RESOLVES valid day×month edge cases (Jan 31, Feb 28)", () => {
+    // The feasibility check must not over-reject 31-day months or Feb. (Feb 29 is
+    // deliberately NOT asserted here: it's feasible, but the *next* leap day can
+    // fall outside the 2-year lookahead — a pre-existing window limit, unrelated
+    // to PM #74 — so its result is date-dependent.)
+    expect(
+      computeNextRunAtMs({ kind: "cron", expr: "0 0 31 1 *", tz: TZ }, NOW_MS)
+    ).toBeTypeOf("number");
+    expect(
+      computeNextRunAtMs({ kind: "cron", expr: "0 0 28 2 *", tz: TZ }, NOW_MS)
+    ).toBeTypeOf("number");
+  });
 
   it("returns undefined for syntactically invalid expressions", () => {
     expect(

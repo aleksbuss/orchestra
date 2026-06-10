@@ -657,7 +657,7 @@ describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-i
     expect(await stopsAtStep(criticCall?.[0].stopWhen, 3)).toBe(true);
   }, 30_000);
 
-  it("with search disabled: every proposer stops at step 1 (no tools assigned to anyone)", async () => {
+  it("search disabled: the step budget tracks tool presence per role (no maxSteps)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: true, personas: basePersonas() },
     } as never);
@@ -678,9 +678,14 @@ describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-i
     >;
     for (const call of proposerCalls) {
       expect(call[0].maxSteps).toBeUndefined();
-      expect(call[0].tools).toBeUndefined();
-      // No tools → single generation (stop at step 1).
-      expect(await stopsAtStep(call[0].stopWhen, 1)).toBe(true);
+      // PM #73 — fetch_webpage is keyless, so reviewer/researcher keep a toolset
+      // even with search off. The PM #65 invariant is "stopWhen follows tools":
+      // a proposer WITH tools gets the multi-step budget, one WITHOUT stops at 1.
+      if (call[0].tools) {
+        expect(await stopsAtStep(call[0].stopWhen, 3)).toBe(true);
+      } else {
+        expect(await stopsAtStep(call[0].stopWhen, 1)).toBe(true);
+      }
     }
   }, 30_000);
 });

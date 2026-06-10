@@ -4,6 +4,28 @@ import type { CronSchedule } from "@/lib/cron/types";
 const MINUTE_MS = 60_000;
 const MAX_CRON_LOOKAHEAD_MINUTES = 60 * 24 * 366 * 2; // 2 years
 
+// Max possible day-of-month per month (1-indexed; Feb uses 29 to stay
+// leap-year-lenient). Used to reject structurally impossible day×month combos.
+const MAX_DAY_IN_MONTH = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * PM #74 — true if SOME (day-of-month, month) pair from the two sets can ever
+ * occur. "30 2 *" (Feb 30) / "31 4 *" (Apr 31) are structurally impossible: the
+ * minute-by-minute lookahead would otherwise scan all ~1,054,080 minutes of the
+ * 2-year cap — each doing an Intl.formatToParts — ≈100s of CPU. This bails in O(1).
+ * The matcher uses AND semantics for day-of-month × month, so an impossible combo
+ * can never match regardless of day-of-week.
+ */
+function isDayMonthFeasible(dayOfMonth: Set<number>, month: Set<number>): boolean {
+  for (const m of month) {
+    const maxDay = MAX_DAY_IN_MONTH[m] ?? 31;
+    for (const d of dayOfMonth) {
+      if (d <= maxDay) return true;
+    }
+  }
+  return false;
+}
+
 type ZonedDateParts = {
   minute: number;
   hour: number;
@@ -14,6 +36,13 @@ type ZonedDateParts = {
 
 type CronMatcher = {
   matches: (parts: ZonedDateParts) => boolean;
+  /** PM #74 — day-level match only (day-of-month × month × day-of-week). When
+   *  this is false the whole DAY is skippable, so the lookahead jumps to the
+   *  next midnight instead of scanning all 1440 of the day's minutes. */
+  matchesDay: (parts: ZonedDateParts) => boolean;
+  /** PM #74 — false when the day-of-month × month sets have NO possible date
+   *  (e.g. "30 2 *"); lets the lookahead bail in O(1). */
+  dayMonthFeasible: boolean;
 };
 
 function resolveCronTimezone(tz?: string): string {
@@ -147,6 +176,14 @@ function parseCronExpr(expr: string): CronMatcher | null {
         dayOfWeek.has(parts.dayOfWeek)
       );
     },
+    matchesDay(parts: ZonedDateParts) {
+      return (
+        dayOfMonth.has(parts.dayOfMonth) &&
+        month.has(parts.month) &&
+        dayOfWeek.has(parts.dayOfWeek)
+      );
+    },
+    dayMonthFeasible: isDayMonthFeasible(dayOfMonth, month),
   };
 }
 
@@ -197,14 +234,36 @@ function computeNextCronRunAtMs(expr: string, nowMs: number, tz?: string): numbe
   if (!matcher) {
     return undefined;
   }
+  // PM #74 — bail instantly on structurally impossible day×month (Feb 30, Apr 31)
+  // instead of scanning the full ~1M-minute / 2-year lookahead (≈100s of CPU,
+  // and a mild DoS: an operator's "0 0 30 2 *" cron would hang a tick).
+  if (!matcher.dayMonthFeasible) {
+    return undefined;
+  }
   const timezone = resolveCronTimezone(tz);
   let cursor = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS + MINUTE_MS;
-  for (let i = 0; i < MAX_CRON_LOOKAHEAD_MINUTES; i += 1) {
+  // PM #74 — day-skipping lookahead. The old minute-by-minute scan did up to
+  // ~1M Intl.formatToParts calls (≈100s) for far/impossible expressions. When
+  // the DAY can't match (dom/month/dow), jump to ~midnight of the next day
+  // instead of scanning its 1440 minutes — turning a months-away match from
+  // ~hundreds-of-thousands of iterations into ~hundreds (one per day).
+  let scanned = 0;
+  while (scanned < MAX_CRON_LOOKAHEAD_MINUTES) {
     const parts = getZonedDateParts(cursor, timezone);
-    if (matcher.matches(parts)) {
-      return cursor;
+    if (matcher.matchesDay(parts)) {
+      if (matcher.matches(parts)) {
+        return cursor;
+      }
+      cursor += MINUTE_MS;
+      scanned += 1;
+    } else {
+      // Jump to ~00:00 of the next day. A DST transition can land us ±1h off
+      // midnight; that's harmless — the loop re-evaluates the parts each pass.
+      const minutesIntoDay = parts.hour * 60 + parts.minute;
+      const skip = Math.max(1, 24 * 60 - minutesIntoDay);
+      cursor += skip * MINUTE_MS;
+      scanned += skip;
     }
-    cursor += MINUTE_MS;
   }
   return undefined;
 }

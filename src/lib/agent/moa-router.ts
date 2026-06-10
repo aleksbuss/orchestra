@@ -100,8 +100,7 @@ INSTRUCTIONS:
    - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
    - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
    This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
-7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}
-8. For COMPLEX, MULTI-STEP investigations (OSINT on a person/company/domain, research that needs several rounds of digging, or anything that cannot be answered in a single pass), instruct the relevant expert in their [RULES] to use the \`create_goal_tree\` tool to break the task into a tracked plan and work it across turns — rather than guessing a final answer in one shot.${fewShotsBlock}`,
+7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
       abortSignal,
     });
 

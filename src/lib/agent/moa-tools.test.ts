@@ -100,16 +100,18 @@ describe("PM #42 — detectProposerRole", () => {
 });
 
 describe("PM #42 — selectProposerTools", () => {
-  it("reviewer + search enabled → search_web tool included", () => {
+  it("reviewer + search enabled → search_web AND fetch_webpage included", () => {
     const tools = selectProposerTools("reviewer", true, enabledSearch);
     expect(tools).toBeDefined();
     expect(tools).toHaveProperty("search_web");
+    expect(tools).toHaveProperty("fetch_webpage"); // PM #73
   });
 
-  it("researcher + search enabled → search_web tool included", () => {
+  it("researcher + search enabled → search_web AND fetch_webpage included", () => {
     const tools = selectProposerTools("researcher", true, enabledSearch);
     expect(tools).toBeDefined();
     expect(tools).toHaveProperty("search_web");
+    expect(tools).toHaveProperty("fetch_webpage"); // PM #73
   });
 
   it("coder + search enabled → NO tools (creative work doesn't need browsing)", () => {
@@ -122,8 +124,15 @@ describe("PM #42 — selectProposerTools", () => {
     expect(tools).toBeUndefined();
   });
 
-  it("search disabled overrides role → NO tools for any role", () => {
-    for (const role of ["reviewer", "researcher", "coder", "tool"] as const) {
+  it("search disabled: reviewer/researcher KEEP fetch_webpage (no key needed); coder/tool get nothing", () => {
+    // PM #73 — fetch_webpage is keyless, so verification roles retain it even
+    // with no search provider; they just lack search_web.
+    for (const role of ["reviewer", "researcher"] as const) {
+      const t = selectProposerTools(role, false, disabledSearch);
+      expect(t).toHaveProperty("fetch_webpage");
+      expect(t).not.toHaveProperty("search_web");
+    }
+    for (const role of ["coder", "tool"] as const) {
       expect(selectProposerTools(role, false, disabledSearch)).toBeUndefined();
     }
   });

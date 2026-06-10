@@ -89,3 +89,28 @@ describe("htmlToText + wrapper helpers", () => {
     expect(w.endsWith("</UNTRUSTED_WEBPAGE>")).toBe(true);
   });
 });
+
+describe("fetch_webpage — SSRF-safe redirects (PM #73 audit fix)", () => {
+  it("re-validates each redirect hop and REFUSES a redirect to an internal IP", async () => {
+    // A public URL that 302-redirects to cloud metadata — redirect:'follow'
+    // would have chased it; we must re-check and refuse.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      status: 302,
+      ok: false,
+      headers: new Headers({ location: "http://169.254.169.254/latest/" }),
+      body: { cancel: async () => {} },
+    } as unknown as Response);
+    expect(await run("https://safe.example.com/go")).toMatch(/refused redirect/i);
+  });
+});
+
+describe("fetch_webpage — charset (PM #73 audit fix)", () => {
+  it("decodes windows-1251 Cyrillic, not as UTF-8 mojibake", async () => {
+    const cp1251 = new Uint8Array([0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]); // "Привет"
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(cp1251, { headers: { "content-type": "text/html; charset=windows-1251" } })
+    );
+    const out = await run("https://ru.example.com/p");
+    expect(out).toContain("Привет");
+  });
+});

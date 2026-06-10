@@ -40,8 +40,10 @@ function combineSignals(signal: AbortSignal | undefined, timeoutMs: number): Abo
   return timeout;
 }
 
-/** Read a response body up to `maxBytes`, then stop (avoids OOM on huge pages). */
-async function readBodyCapped(res: Response, maxBytes: number): Promise<string> {
+/** Read a response body up to `maxBytes`, then stop (avoids OOM on huge pages).
+ *  Decodes with the page's declared charset (windows-1251 etc.) — not UTF-8 only;
+ *  many RU sites still serve cp1251 and a UTF-8 decode mojibakes them. */
+async function readBodyCapped(res: Response, maxBytes: number, charset: string): Promise<string> {
   const reader = res.body?.getReader();
   if (!reader) return "";
   const chunks: Uint8Array[] = [];
@@ -64,7 +66,13 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string> 
     merged.set(c, offset);
     offset += c.byteLength;
   }
-  return new TextDecoder("utf-8", { fatal: false }).decode(merged);
+  let decoder: TextDecoder;
+  try {
+    decoder = new TextDecoder(charset || "utf-8", { fatal: false });
+  } catch {
+    decoder = new TextDecoder("utf-8", { fatal: false }); // unknown label → utf-8
+  }
+  return decoder.decode(merged);
 }
 
 /** Strip scripts/styles/comments/tags and decode the common entities → text. */
@@ -113,35 +121,59 @@ export function createFetchWebpageTool() {
         return `Error: invalid URL "${url}".`;
       }
 
+      const signal = combineSignals(abortSignal, FETCH_TIMEOUT_MS);
+      const headers = {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; OrchestraBot/1.0; +https://github.com/aleksbuss/orchestra)",
+        Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
+      };
+
       try {
-        const res = await fetch(safeUrl, {
-          signal: combineSignals(abortSignal, FETCH_TIMEOUT_MS),
-          redirect: "follow",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (compatible; OrchestraBot/1.0; +https://github.com/aleksbuss/orchestra)",
-            Accept: "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.5",
-          },
-        });
+        // Manual redirect handling: `redirect: "follow"` would let a public URL
+        // 302 to an INTERNAL one (169.254.x / RFC-1918) and fetch would chase it
+        // without re-checking — an SSRF bypass. Re-validate every hop.
+        let current = safeUrl;
+        let res: Response;
+        for (let hop = 0; ; hop++) {
+          res = await fetch(current, { signal, redirect: "manual", headers });
+          if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
+            if (hop >= 5) {
+              await res.body?.cancel().catch(() => {});
+              return `Error: too many redirects starting from ${safeUrl.href}`;
+            }
+            const nextRaw = new URL(res.headers.get("location")!, current).href;
+            await res.body?.cancel().catch(() => {});
+            try {
+              current = assertSafeOutboundUrl(nextRaw);
+            } catch (err) {
+              return err instanceof UnsafeOutboundUrlError
+                ? `Error: refused redirect to "${nextRaw}" — ${err.message}`
+                : `Error: invalid redirect target "${nextRaw}".`;
+            }
+            continue;
+          }
+          break;
+        }
 
         if (!res.ok) {
-          return `Error: HTTP ${res.status} ${res.statusText} for ${safeUrl.href}`;
+          return `Error: HTTP ${res.status} ${res.statusText} for ${current.href}`;
         }
 
         const contentType = (res.headers.get("content-type") || "").toLowerCase();
         if (contentType && !/text\/|html|xml|json/.test(contentType)) {
           await res.body?.cancel().catch(() => {});
-          return `Error: ${safeUrl.href} is "${contentType}", not a text/HTML page. fetch_webpage only reads text pages.`;
+          return `Error: ${current.href} is "${contentType}", not a text/HTML page. fetch_webpage only reads text pages.`;
         }
+        const charset = /charset=([\w-]+)/.exec(contentType)?.[1] || "utf-8";
 
-        const body = await readBodyCapped(res, MAX_BYTES);
+        const body = await readBodyCapped(res, MAX_BYTES, charset);
         const text = /html|xml/.test(contentType) || /<[a-z!]/i.test(body.slice(0, 200))
           ? htmlToText(body)
           : body.trim();
 
         if (!text) {
           return wrapUntrustedWebpage(
-            safeUrl.href,
+            current.href,
             "(no readable text extracted — the page is likely JavaScript-rendered; try the web_task tool for this URL)"
           );
         }
@@ -151,7 +183,7 @@ export function createFetchWebpageTool() {
             ? text.slice(0, MAX_TEXT_CHARS) + "\n…[truncated — page longer than the read limit]"
             : text;
 
-        return wrapUntrustedWebpage(safeUrl.href, capped);
+        return wrapUntrustedWebpage(current.href, capped);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return `Error fetching ${safeUrl.href}: ${msg}`;

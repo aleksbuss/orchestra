@@ -28,10 +28,16 @@ export default function globalSetup(): void {
   fs.mkdirSync(path.join(dataDir, "settings"), { recursive: true });
 
   // Reuse the operator's real model/key config (read-only copy) when present, so
-  // model-dependent specs have working providers locally.
+  // model-dependent specs have working providers locally. On CI there is no
+  // operator config — seed an empty object so `auth:reset` has a file to edit
+  // (it refuses to run on a missing file, and the settings store deep-merges
+  // DEFAULT_SETTINGS over whatever JSON is on disk, so `{}` is a valid start).
   const realSettings = path.join(realData, "settings", "settings.json");
+  const isoSettings = path.join(dataDir, "settings", "settings.json");
   if (fs.existsSync(realSettings)) {
-    fs.copyFileSync(realSettings, path.join(dataDir, "settings", "settings.json"));
+    fs.copyFileSync(realSettings, isoSettings);
+  } else {
+    fs.writeFileSync(isoSettings, "{}\n", "utf-8");
   }
 
   // Force admin/admin, scoped to the isolated dir (auth:reset honors the env).

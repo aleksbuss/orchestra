@@ -302,8 +302,14 @@ describe("installPackages — execution outcomes", () => {
       packages: ["lodash"],
       cwd: "/tmp",
     });
-    expect(result.attempts[0].stdout.length).toBeLessThan(200_000);
-    expect(result.attempts[0].success).toBe(true);
+    // attempts[] may open with "skipped — manager not on PATH" entries
+    // (plan order is pnpm → npm → …, and commandExists reads the real
+    // host PATH, which the spawn mock can't intercept). CI runners have
+    // no pnpm, so assert on the first attempt that actually executed.
+    const executed = result.attempts.find((a) => !a.skipped);
+    expect(executed).toBeDefined();
+    expect(executed!.stdout.length).toBeLessThan(200_000);
+    expect(executed!.success).toBe(true);
   });
 
   it("a spawn `error` event (e.g. ENOENT) is captured as a failed attempt", async () => {

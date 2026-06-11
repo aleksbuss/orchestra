@@ -5,8 +5,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/tests-2585%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-70%20documented-purple)](./POST_MORTEMS.md)
+[![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-2602%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-74%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -16,9 +17,18 @@ A team of specialized agents, not just one model. Self-hosted, BYOK, MIT-license
 ![Orchestra answering a question — note the live cost banner at the top showing tokens AND the real USD estimate (~$0.0026), plus an inline web-search fact-check](docs/assets/orchestra-hero.png)
 
 <sub>Every chat shows live token + USD cost (top bar) and the agent fact-checks with web search before answering. Flip on Swarm mode to fan the prompt out to a panel of experts — see [the pipeline below](#-the-moa-pipeline).</sub>
-<!-- TODO(visual): swap the static hero for a short demo GIF of a live run when you record one. -->
 
 Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, substantially extended. See [`NOTICE.md`](./NOTICE.md).
+
+### Orchestra vs Upstream Eggent
+| Feature | Upstream Eggent | Orchestra (This repository) |
+| --- | --- | --- |
+| **Agent Architecture** | Single-agent chat loop | **Mixture-of-Agents (MoA)** ensemble with parallel proposers |
+| **Consensus & Verification**| Trust the single model | Code-guaranteed **Skeptic**, Disagreement Detection, Tournament Aggregation |
+| **Resilience & Testing** | Basic test suite | **74 Documented Post-Mortems**, 2602 tests, Trace-memory |
+| **Cost Transparency** | Unknown API usage | Live per-chat cost banner with USD estimates and tokens |
+| **Security** | Basic serverless API | Code-enforced SSRF guards, Path traversal guards, Sandbox constraints |
+
 
 [Quick Start](#-quick-start) · [Architecture](#-the-moa-pipeline) · [Features](#-features) · [Docs](#-documentation)
 
@@ -30,7 +40,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 
 Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The aggregator then synthesizes — and if the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the aggregator's output and applies a revisor pass when issues are flagged.
 
-If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (70 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
+If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (74 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
 
@@ -178,7 +188,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ## 🧪 Tests
 
 ```bash
-npm test                  # full suite — currently 2,585 tests across 168 files
+npm test                  # full suite — currently 2,602 tests across 169 files
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
@@ -404,7 +414,7 @@ The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size,
 
 ## Status
 
-**Alpha quality.** Architecture is end-to-end functional and exercised across 2,585 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
+**Alpha quality.** Architecture is end-to-end functional and exercised across 2,602 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
 
 Solo developer project. PRs welcome; review on a best-effort basis.
 

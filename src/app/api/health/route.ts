@@ -1,5 +1,6 @@
 import { getSettings } from "@/lib/storage/settings-store";
 import { agentSemaphore } from "@/lib/agent/semaphore";
+import { CACHE_TTL_MS } from "@/lib/cost/openrouter-pricing";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { getBrokenChatFiles, getOrphanIndexEntries } from "@/lib/storage/chat-store";
 import { getDataDir, dataPath } from "@/lib/storage/data-dir";
@@ -416,7 +417,7 @@ export async function GET() {
         name: "openrouter_pricing_cache",
         status: "ok",
         detail:
-          "No cache yet — refresh happens at boot. If OpenRouter is unreachable, hardcoded prices in pricing.ts are used as fallback. See PM #49.",
+          "No cache yet — refresh happens at boot and every 6h thereafter. If OpenRouter is unreachable, hardcoded prices in pricing.ts are used as fallback. See PM #49.",
       });
     } else {
       const parsed = JSON.parse(raw) as {
@@ -428,17 +429,18 @@ export async function GET() {
         ? (Date.now() - fetchedAt.getTime()) / 3_600_000
         : null;
       const entryCount = Array.isArray(parsed.entries) ? parsed.entries.length : 0;
-      // Sprint 5 — harmonised with `CACHE_TTL_MS = 24h` in
-      // openrouter-pricing.ts. Pre-Sprint-5 this threshold was 48h, so a
-      // cache that pricing.ts treated as stale (and was actively refusing
-      // to read at 25h+) would still show "ok" in health, hiding boot-
-      // refresh failures from the operator.
-      const stale = ageHours !== null && ageHours > 24;
+      // PM #75 — the threshold IS `CACHE_TTL_MS` (imported), not a literal,
+      // so the health warn and the refresh cadence cannot drift apart.
+      // Pre-Sprint-5 this was an independent 48h literal: a cache that
+      // pricing.ts treated as stale would still show "ok" in health,
+      // hiding refresh failures from the operator.
+      const staleThresholdHours = CACHE_TTL_MS / 3_600_000;
+      const stale = ageHours !== null && ageHours > staleThresholdHours;
       checks.push({
         name: "openrouter_pricing_cache",
         status: stale ? "warn" : "ok",
         detail: stale
-          ? `Cache is ${ageHours.toFixed(1)}h old (>24h stale, matches CACHE_TTL_MS in openrouter-pricing.ts). Boot refresh may be failing; check network or OpenRouter availability. ${entryCount} entries cached. See PM #49.`
+          ? `Cache is ${ageHours.toFixed(1)}h old (>${staleThresholdHours}h stale, matches CACHE_TTL_MS in openrouter-pricing.ts). The 6h periodic refresh has not succeeded for >${staleThresholdHours}h — check network or OpenRouter availability. ${entryCount} entries cached. See PM #49/#75.`
           : `Cache fresh. ${entryCount} models priced; age ${ageHours?.toFixed(1) ?? "?"}h.`,
       });
     }

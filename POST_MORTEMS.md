@@ -38,6 +38,18 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 75. Boot-only pricing refresh guaranteed a "degraded" health status after 24h uptime
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (cosmetic-but-misleading — health honestly reported a stale cache, but the staleness was inevitable by design, training the operator to ignore "degraded")
+**Symptoms:** `/api/health` flips to `status: "degraded"` with `openrouter_pricing_cache: warn — Cache is NNh old (>24h stale)` on ANY server whose uptime exceeds 24h. Observed live at 40.2h uptime during the pre-release verification sweep. Cost banners kept working (in-memory map stays warm; hardcoded fallback exists), so the warn signaled nothing actionable — yet it degraded the overall health verdict.
+**Detection:** Pre-release full health check (2026-06-12): `curl /api/health` on a long-running dev server showed every subsystem `ok` except the pricing-cache warn.
+**Root Cause:** `refreshOpenRouterPricingCache()` was wired ONLY to the boot probe in `instrumentation-node.ts` (PM #49). Disk-cache age therefore equals process uptime; the Sprint-5 health check (PM #53) warns at >24h — so the warn fires on every server that simply stays up, and its detail text ("Boot refresh may be failing") misdiagnosed a working system. A "refresh at boot" + "warn when older than TTL" pair is self-contradictory without a runtime refresh path.
+**Resolution:** `ensureOpenRouterPricingRefreshScheduled()` in [`openrouter-pricing.ts`](src/lib/cost/openrouter-pricing.ts) — a `globalThis`-idempotent, `unref()`d 6h `setInterval` (same posture as `ensureSweepersScheduled`) calling `refreshOpenRouterPricingCache({ forceFetch: true })`. Force matters: the internal TTL gate only fetches past 24h, by which point health already warns — forcing caps cache age at the 6h tick interval. The tick re-reads settings EVERY fire and skips the fetch under Privacy Mode (PM #47 — the mode is toggleable at runtime, so a boot-time check is insufficient). Installed unconditionally from the boot probe (even when Privacy Mode is ON at boot, so disabling it later resumes refreshes without a restart). On network failure the existing map is kept and `fetchedAt` stays put — a genuine >24h outage still correctly warns.
+**Regression Coverage:** [`openrouter-pricing.test.ts`](src/lib/cost/openrouter-pricing.test.ts) § "periodic refresh scheduler" — idempotence (HMR must not stack timers), tick force-fetches even with a fresh map, Privacy-Mode tick skips the fetch.
+**Doc Updates:** CLAUDE.md Data Layout row for `data/cache/openrouter-pricing.json`; health-route detail strings now describe the periodic refresh.
+**Rule:** Every "warn when older than X" health probe MUST be paired with a runtime refresh path whose cadence beats X — a boot-only refresh plus an age-based warn is a time bomb that goes off at exactly X hours of uptime. And any periodic background fetch must re-check Privacy Mode per tick, not per install.
+
 ## 74. computeNextRunAtMs scanned ~1M minutes (≈100s) for far/impossible cron exprs
 **Date:** 2026-06
 **Status:** RESOLVED

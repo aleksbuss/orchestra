@@ -30,10 +30,25 @@ import {
   refreshOpenRouterPricingCache,
   getCachedOpenRouterPricing,
   getOpenRouterMaxOutput,
+  ensureOpenRouterPricingRefreshScheduled,
+  REFRESH_INTERVAL_MS,
+  CACHE_TTL_MS,
   __resetOpenRouterPricingForTests,
   __seedOpenRouterPricingForTests,
   __setOpenRouterMaxOutputForTest,
 } from "./openrouter-pricing";
+import { getSettings } from "@/lib/storage/settings-store";
+
+// The periodic-refresh tick re-reads settings on EVERY fire (Privacy Mode is
+// toggleable at runtime). settings-store resolves its file path at module
+// load, which races the per-test ORCHESTRA_DATA_DIR — mock it with mutable
+// state instead. Only the scheduler describe-block consults this.
+const settingsMockState = vi.hoisted(() => ({ privacyEnabled: false }));
+vi.mock("@/lib/storage/settings-store", () => ({
+  getSettings: vi.fn(async () => ({
+    privacyMode: { enabled: settingsMockState.privacyEnabled },
+  })),
+}));
 
 const originalFetch = globalThis.fetch;
 let tempDir: string;
@@ -430,5 +445,100 @@ describe("PM #71 — pricing state lives on globalThis (survives Next.js dual mo
       Symbol.for("orchestra.openrouter-pricing.store")
     ];
     expect(store?.pricing.get("vendor/probe-model")).toBeDefined();
+  });
+});
+
+describe("periodic refresh scheduler — ensureOpenRouterPricingRefreshScheduled", () => {
+  // Real setTimeout stays live (only setInterval/clearInterval are faked
+  // below), so settle() can poll while the tick's detached async chain —
+  // dynamic import → getSettings → fetch → disk persist — runs on the
+  // real event loop.
+  const settle = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
+  beforeEach(() => {
+    settingsMockState.privacyEnabled = false;
+    vi.mocked(getSettings).mockClear();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  });
+
+  afterEach(() => {
+    if (globalThis.__orchestraPricingRefreshInterval__) {
+      clearInterval(globalThis.__orchestraPricingRefreshInterval__);
+      globalThis.__orchestraPricingRefreshInterval__ = undefined;
+    }
+    vi.useRealTimers();
+  });
+
+  it("PM #75 invariant — the tick interval must beat the staleness threshold", () => {
+    // If a future PR raises the interval past the TTL, the health warn
+    // fires BETWEEN refreshes by construction and PM #75 silently returns.
+    expect(REFRESH_INTERVAL_MS).toBeLessThan(CACHE_TTL_MS);
+  });
+
+  it("is idempotent — a second call must not stack a second timer (HMR posture)", () => {
+    ensureOpenRouterPricingRefreshScheduled();
+    const handle = globalThis.__orchestraPricingRefreshInterval__;
+    expect(handle).toBeDefined();
+    ensureOpenRouterPricingRefreshScheduled();
+    expect(globalThis.__orchestraPricingRefreshInterval__).toBe(handle);
+  });
+
+  it("force-fetches on tick so cache age never crosses the 24h health threshold", async () => {
+    // Seed a FRESH map — a non-forced refresh would short-circuit on the
+    // TTL gate and return "memory" without fetching. The tick must fetch
+    // anyway (forceFetch: true), otherwise health gets up-to-6h warn windows.
+    __seedOpenRouterPricingForTests(
+      [["x/y", { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }]],
+      Date.now()
+    );
+    mockFetchOk({
+      data: [
+        { id: "vendor/tick-model", pricing: { prompt: "0.000001", completion: "0.000002" } },
+      ],
+    });
+
+    // The tick logs AFTER the refresh fully settles (incl. the disk persist) —
+    // waiting on the log line keeps afterEach's tempDir rm from racing the write.
+    const logSpy = vi.spyOn(console, "log");
+    ensureOpenRouterPricingRefreshScheduled();
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    await settle(() =>
+      logSpy.mock.calls.some((args) =>
+        String(args[0]).includes("periodic refresh")
+      )
+    );
+
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+    expect(getCachedOpenRouterPricing("vendor/tick-model")).toEqual({
+      inputUsdPerMillion: 1,
+      outputUsdPerMillion: 2,
+    });
+  });
+
+  it("skips the fetch when Privacy Mode is enabled at tick time (PM #47 air-gap)", async () => {
+    settingsMockState.privacyEnabled = true;
+    const fetchSpy = vi.fn();
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+    const warnSpy = vi.spyOn(console, "warn");
+
+    ensureOpenRouterPricingRefreshScheduled();
+    await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1000);
+    // The tick consults settings BEFORE deciding to fetch — wait for that
+    // read, then give the chain a beat to (wrongly) fetch if it were going to.
+    await settle(() => vi.mocked(getSettings).mock.calls.length > 0);
+    await new Promise((r) => setTimeout(r, 25));
+
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Anti-vacuous guard: "no fetch" must mean "skipped by the privacy
+    // branch", not "the tick crashed before reaching the fetch" — a crash
+    // is routed to the catch below, which logs this exact signature.
+    const tickFailures = warnSpy.mock.calls.filter((args) =>
+      String(args[0]).includes("periodic refresh failed")
+    );
+    expect(tickFailures).toHaveLength(0);
   });
 });

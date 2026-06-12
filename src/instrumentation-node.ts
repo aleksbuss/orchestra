@@ -133,10 +133,19 @@ void boundedBootProbe(
 
 // PM #49 — refresh the OpenRouter pricing cache. Live HTTPS to
 // openrouter.ai/api/v1/models; 10s budget matches the network-probe
-// category. Skipped entirely in Privacy Mode.
+// category. Initial fetch is skipped in Privacy Mode, but the periodic
+// scheduler is installed unconditionally — its tick re-reads settings,
+// so toggling Privacy Mode at runtime starts/stops fetches without a
+// restart. Without the periodic refresh, any server up longer than 24h
+// trips the `openrouter_pricing_cache` health warn (cache age == uptime).
 void boundedBootProbe(
   { name: "OpenRouterPricing", timeoutMs: 10_000 },
   async () => {
+    const {
+      refreshOpenRouterPricingCache,
+      ensureOpenRouterPricingRefreshScheduled,
+    } = await import("@/lib/cost/openrouter-pricing");
+    ensureOpenRouterPricingRefreshScheduled();
     const { getSettings } = await import("@/lib/storage/settings-store");
     const settings = await getSettings();
     if (settings.privacyMode?.enabled) {
@@ -145,9 +154,6 @@ void boundedBootProbe(
       );
       return;
     }
-    const { refreshOpenRouterPricingCache } = await import(
-      "@/lib/cost/openrouter-pricing"
-    );
     const result = await refreshOpenRouterPricingCache();
     console.log(
       `[OpenRouterPricing] ${result.source} — ${result.entryCount} models priced.`

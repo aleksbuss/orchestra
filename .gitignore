@@ -60,3 +60,6 @@ playwright-report/
 # Claude Code local settings
 .claude/
 logs/
+
+# generated benchmark output
+scripts/benchmark-report.md

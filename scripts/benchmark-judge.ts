@@ -6,19 +6,19 @@ import fs from "fs/promises";
 import crypto from "crypto";
 import path from "path";
 
-// Каверзные задачи для проверки архитектуры, безопасности и логики
+// Adversarial tasks probing architecture, security and logic
 const BENCHMARK_QUESTIONS = [
   {
     id: "security_architecture",
-    prompt: "Напиши Express.js (Node) роут, который принимает POST-запрос с `userId` и `newEmail` и обновляет email пользователя в базе (используй сырой SQL-запрос `pg` без ORM). Код должен быть строго защищен от SQL-инъекций и IDOR (Insecure Direct Object Reference).",
+    prompt: "Write an Express.js (Node) route that accepts a POST request with `userId` and `newEmail` and updates the user's email in the database (use a raw `pg` SQL query, no ORM). The code must be strictly protected against SQL injection and IDOR (Insecure Direct Object Reference).",
   },
   {
     id: "logic_puzzle",
-    prompt: "У меня есть 5-литровое ведро и 3-литровое ведро. Воды неограниченно. Мне нужно ровно 4 литра. Но есть подвох: в 3-литровом ведре есть микро-трещина, из-за которой оно теряет ровно 1 литр каждую минуту. Наполнение ведра занимает 1 минуту, переливание — 1 минуту. Напиши пошаговый алгоритм, как получить ровно 4 литра.",
+    prompt: "I have a 5-liter bucket and a 3-liter bucket, with unlimited water. I need exactly 4 liters. The catch: the 3-liter bucket has a micro-crack and loses exactly 1 liter per minute. Filling a bucket takes 1 minute, pouring between buckets takes 1 minute. Write a step-by-step algorithm to end up with exactly 4 liters.",
   }
 ];
 
-// Функция-судья (LLM-as-a-Judge)
+// LLM-as-a-Judge
 async function evaluateAsJudge(judgeModel: any, prompt: string, answerA: string, answerB: string) {
   const judgePrompt = `
 You are an impartial, expert AI Judge evaluating two different AI responses to a complex prompt.
@@ -62,7 +62,7 @@ Output EXACTLY in this JSON format (no markdown code blocks, just raw JSON):
 }
 
 async function runBenchmark() {
-  console.log("🏆 Запуск Бенчмарка: Orchestra MoA vs Single Agent\n");
+  console.log("Benchmark: Orchestra MoA vs Single Agent\n");
   
   const settings = await getSettings();
   const brainModel = createModel(settings.chatModel);
@@ -75,10 +75,10 @@ async function runBenchmark() {
   let totalScoreMoA = 0;
 
   for (const q of BENCHMARK_QUESTIONS) {
-    console.log(`⏳ Тестирую вопрос: ${q.id}...`);
-    
+    console.log(`Running question: ${q.id}...`);
+
     // 1. Single Agent Baseline
-    console.log("   👉 Запуск Single Agent...");
+    console.log("   -> Single Agent...");
     let singleAnswer = "";
     try {
       const res = await generateText({
@@ -94,7 +94,7 @@ async function runBenchmark() {
     }
 
     // 2. Orchestra MoA Swarm
-    console.log("   👉 Запуск Orchestra MoA (Swarm)...");
+    console.log("   -> Orchestra MoA (Swarm)...");
     let moaAnswer = "";
     try {
       const moaResult = await runMoAEnsemble({
@@ -109,7 +109,7 @@ async function runBenchmark() {
     }
 
     // 3. Judgment
-    console.log("   ⚖️  Судья выносит решение...");
+    console.log("   -> Judging...");
     // We shuffle A and B randomly to prevent position bias
     const isMoA_A = Math.random() > 0.5;
     const answerA = isMoA_A ? moaAnswer : singleAnswer;
@@ -123,7 +123,7 @@ async function runBenchmark() {
     totalScoreSingle += singleScore;
     totalScoreMoA += moaScore;
 
-    console.log(`   📊 Результат: Single [${singleScore}/10] vs MoA [${moaScore}/10]\n`);
+    console.log(`   Result: Single [${singleScore}/10] vs MoA [${moaScore}/10]\n`);
 
     markdownReport += `## Test: ${q.id}\n`;
     markdownReport += `> ${q.prompt}\n\n`;
@@ -139,14 +139,14 @@ async function runBenchmark() {
   markdownReport += `- **Orchestra MoA Total:** ${totalScoreMoA} / ${BENCHMARK_QUESTIONS.length * 10}\n\n`;
   
   if (totalScoreMoA > totalScoreSingle) {
-    markdownReport += `**Вывод:** Архитектура Team of Experts математически доказала свое превосходство над одиночной моделью!`;
+    markdownReport += `**Verdict:** MoA outscored the single agent in this run (${totalScoreMoA} vs ${totalScoreSingle}, LLM judge, n=${BENCHMARK_QUESTIONS.length}). Small sample — treat as a smoke signal, not proof.`;
   } else {
-    markdownReport += `**Вывод:** В данном тесте одиночная модель справилась наравне или лучше. Возможно, стоит использовать более сложные задачи.`;
+    markdownReport += `**Verdict:** The single agent matched or beat MoA in this run (${totalScoreSingle} vs ${totalScoreMoA}). Consider harder tasks or more samples.`;
   }
 
   const outPath = path.join(process.cwd(), "scripts", "benchmark-report.md");
   await fs.writeFile(outPath, markdownReport, "utf-8");
-  console.log(`🎉 Бенчмарк завершен! Результаты в файле: ${outPath}`);
+  console.log(`Benchmark complete. Report written to: ${outPath}`);
 }
 
 runBenchmark().catch(console.error);

@@ -8,6 +8,10 @@ import path from 'path';
 const E2E_DATA_DIR = path.resolve('.e2e-data');
 process.env.ORCHESTRA_DATA_DIR = E2E_DATA_DIR;
 
+// Default 3000; override with E2E_PORT when something else occupies it —
+// the suite spins up its OWN server either way (reuseExistingServer: false).
+const E2E_PORT = Number(process.env.E2E_PORT ?? 3000);
+
 export default defineConfig({
   testDir: './tests/e2e',
   fullyParallel: true,
@@ -18,7 +22,7 @@ export default defineConfig({
   globalSetup: './tests/e2e/global-setup.ts',
   use: {
     trace: 'on-first-retry',
-    baseURL: 'http://localhost:3000',
+    baseURL: `http://localhost:${E2E_PORT}`,
   },
   projects: [
     {
@@ -27,8 +31,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
+    command: `PORT=${E2E_PORT} npm run dev`,
+    url: `http://localhost:${E2E_PORT}`,
     // Always start our OWN isolated server — never reuse a server that might be
     // pointed at the real data dir.
     reuseExistingServer: false,

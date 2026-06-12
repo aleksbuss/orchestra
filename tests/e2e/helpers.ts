@@ -1,7 +1,8 @@
 import { request as pwRequest, expect } from "@playwright/test";
 
 export const TEST_PASSWORD = "orchestra-e2e-pw-9!";
-export const BASE_URL = "http://localhost:3000";
+// Must agree with playwright.config.ts — both read E2E_PORT (default 3000).
+export const BASE_URL = `http://localhost:${process.env.E2E_PORT ?? 3000}`;
 
 /**
  * Programmatic login + credentials-rotation. Uses the API directly to sidestep

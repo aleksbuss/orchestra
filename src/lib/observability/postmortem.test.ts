@@ -447,14 +447,22 @@ describe("prunePostmortems — FIFO ring buffer (Sprint 5 follow-up)", () => {
       errorClassification: sampleClassification,
       err: new Error("x"),
     });
-    // Pruner is fire-and-forget (.catch only). Wait long enough for the
-    // post-dump readdir+unlink chain to settle. 50 ms is generous for
-    // up-to-MAX-files in /tmp on any reasonable hardware.
-    await new Promise((r) => setTimeout(r, 50));
-
+    // Pruner is fire-and-forget (.catch only), so we can't await it. A
+    // fixed sleep was flaky under coverage instrumentation (the unlink
+    // chain hadn't settled → 502 instead of 500). Poll until the count
+    // settles to MAX, up to a generous ceiling; fail only if it never
+    // does. As soon as the pruner finishes we proceed.
     const dir = path.join(tmpRoot, "data", "postmortems");
-    const entries = await fs.readdir(dir);
-    const jsonCount = entries.filter((e) => e.endsWith(".json")).length;
+    const deadline = Date.now() + 5_000;
+    let entries: string[] = [];
+    let jsonCount = -1;
+    do {
+      entries = await fs.readdir(dir);
+      jsonCount = entries.filter((e) => e.endsWith(".json")).length;
+      if (jsonCount === MAX_POSTMORTEMS) break;
+      await new Promise((r) => setTimeout(r, 25));
+    } while (Date.now() < deadline);
+
     expect(jsonCount).toBe(MAX_POSTMORTEMS); // EXACT — proves the pruner ran
     expect(entries).toContain("T-fresh.json"); // the fresh dump survived
   });

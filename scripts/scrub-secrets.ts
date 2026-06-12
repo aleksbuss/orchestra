@@ -169,6 +169,7 @@ async function main(): Promise<void> {
   console.log(`[scrub-secrets] settings.json now free of plaintext API keys.`);
   console.log("");
   console.log("⚠  Rotate these keys at the provider — anything ever written to disk in cleartext should be considered exposed.");
+  console.log("⚠  The backup above STILL CONTAINS the cleartext keys. Delete it once you've verified the migration — a 'scrubbed' tree with a keyed backup next to it defeats the point of scrubbing.");
 }
 
 main().catch((err) => {

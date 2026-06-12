@@ -25,6 +25,12 @@
  *     loads disk cache → fires network refresh → on success, updates the
  *     in-memory map AND writes back to disk. Called fire-and-forget at
  *     boot from `instrumentation-node.ts`.
+ *   - `ensureOpenRouterPricingRefreshScheduled()` installs a recurring
+ *     force-refresh every REFRESH_INTERVAL_MS (6h). Without it, a server
+ *     that stays up past CACHE_TTL_MS (24h) inevitably trips the
+ *     `openrouter_pricing_cache` health warn — boot-only refresh means
+ *     cache age == process uptime. Privacy Mode is re-checked on EVERY
+ *     tick (it can be toggled at runtime), not just at boot.
  *   - `getCachedOpenRouterPricing(modelId)` is the **synchronous** lookup
  *     called by `getModelPricing` in pricing.ts (which itself must stay
  *     sync to preserve the existing accumulator contract).
@@ -80,7 +86,9 @@ interface CacheFileShape {
 
 const OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models";
 const FETCH_TIMEOUT_MS = 8_000;
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+// Exported: /api/health derives its staleness threshold from this constant
+// (PM #75 — the health warn and the refresh cadence must never drift apart).
+export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const CACHE_FILENAME = "openrouter-pricing.json";
 
 /**
@@ -323,6 +331,53 @@ export async function refreshOpenRouterPricingCache(options: {
     );
     return { source: "unavailable", entryCount: 0 };
   }
+}
+
+/**
+ * Recurring refresh — keeps the cache younger than the health-check's 24h
+ * staleness threshold on long-running servers.
+ *
+ * Cadence: every 6h with `forceFetch: true`. Force matters: the TTL gate
+ * inside `refreshOpenRouterPricingCache` only fetches once age > 24h, by
+ * which point /api/health already reports `warn` — so a non-forced tick
+ * would leave up-to-6h "degraded" windows. Forcing caps cache age at the
+ * tick interval. If the network is down, the refresh keeps the existing
+ * map and `fetchedAt` stays put, so a >24h outage still (correctly)
+ * surfaces as a health warn.
+ *
+ * Idempotent via `globalThis` (dev-mode HMR must not stack timers) and
+ * `unref()`d so the timer never keeps the process alive — same posture
+ * as `ensureSweepersScheduled` in cron/sweepers.ts.
+ */
+// Exported for the PM #75 invariant test: the tick interval MUST stay below
+// CACHE_TTL_MS, or the health warn fires between refreshes by construction.
+export const REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6h
+
+declare global {
+  var __orchestraPricingRefreshInterval__: NodeJS.Timeout | undefined;
+}
+
+export function ensureOpenRouterPricingRefreshScheduled(): void {
+  if (globalThis.__orchestraPricingRefreshInterval__) return;
+  globalThis.__orchestraPricingRefreshInterval__ = setInterval(() => {
+    void (async () => {
+      // Privacy Mode can be toggled at runtime — re-check on every tick,
+      // not just when the interval was installed (PM #47 air-gap).
+      const { getSettings } = await import("@/lib/storage/settings-store");
+      const settings = await getSettings();
+      if (settings.privacyMode?.enabled) return;
+      const result = await refreshOpenRouterPricingCache({ forceFetch: true });
+      console.log(
+        `[OpenRouterPricing] periodic refresh: ${result.source} — ${result.entryCount} models priced.`
+      );
+    })().catch((err) => {
+      console.warn(
+        "[OpenRouterPricing] periodic refresh failed (non-fatal):",
+        err instanceof Error ? err.message : err
+      );
+    });
+  }, REFRESH_INTERVAL_MS);
+  globalThis.__orchestraPricingRefreshInterval__.unref?.();
 }
 
 /**

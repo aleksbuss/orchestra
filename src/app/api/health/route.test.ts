@@ -33,6 +33,24 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
+import pkg from "../../../../package.json";
+
+// disk_space probes the REAL filesystem via fs.statfs — on a developer
+// machine that is >=90% full the happy-path test would flake (PM #62
+// spirit: tests must not depend on live machine state). Partial mock:
+// statfs returns a healthy 50%-used disk; every other fs API stays real.
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  return {
+    ...actual,
+    default: actual,
+    statfs: vi.fn(async () => ({
+      blocks: 250_000_000,
+      bsize: 4096,
+      bavail: 125_000_000,
+    })),
+  };
+});
 
 vi.mock("@/lib/storage/settings-store", () => ({
   getSettings: vi.fn(),
@@ -125,7 +143,7 @@ describe("GET /api/health — happy path", () => {
     expect(new Date(body.timestamp as string).toISOString()).toBe(body.timestamp);
     expect(typeof body.totalLatencyMs).toBe("number");
     expect((body.totalLatencyMs as number) >= 0).toBe(true);
-    expect(body.version).toBe("1.0.0");
+    expect(body.version).toBe(pkg.version); // single source of truth: package.json
     expect(body.product).toBe("Orchestra");
   });
 
@@ -201,9 +219,9 @@ describe("GET /api/health — disk_space + embeddings_db (Sprint 5)", () => {
     const body = await callHealth();
     const disk = body.subsystems.find((s) => s.name === "disk_space");
     expect(disk).toBeDefined();
-    // Real fs.statfs reading the test machine; "ok" or "warn" but never
-    // a hard error in the default fixture.
-    expect(["ok", "warn"]).toContain(disk?.status);
+    // statfs is mocked to a healthy 50%-used disk (see top-of-file mock),
+    // so this is deterministic regardless of the machine the suite runs on.
+    expect(disk?.status).toBe("ok");
     expect(disk?.detail).toMatch(/% (used|full)/i);
     expect(disk?.detail).toMatch(/GB free/);
   });

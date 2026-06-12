@@ -102,6 +102,25 @@ originally MIT-licensed (© Modesty Zhang). The vendored copy was modified for
 Next.js compatibility (avoiding a startup-time `require('./test/...')` that
 would otherwise break the build). The original MIT license applies.
 
+**Security note on the bundled pdf.js build:** `pdf-parse` embeds pdf.js
+v1.10.100 (2018). Orchestra uses it exclusively for server-side *text
+extraction* in the RAG loaders — no rendering, no embedded-script evaluation —
+which does not exercise the known rendering-path CVEs in old pdf.js (e.g.
+CVE-2024-4367). Treat ingested PDFs as untrusted input regardless; replacing
+the vendored copy with a maintained extraction path is tracked as tech debt.
+
+[`bundled-skills/last30days/scripts/lib/vendor/bird-search/`](./bundled-skills/last30days/scripts/lib/vendor/bird-search/)
+vendors its own `node_modules`, including
+[`@steipete/sweet-cookie`](https://www.npmjs.com/package/@steipete/sweet-cookie)
+(MIT), a browser-cookie reader. **Why a cookie library ships in this repo:**
+the `last30days` skill's X/Twitter search authenticates with the *operator's
+own* logged-in browser session by reading the operator's local cookies — on
+the operator's machine, at the operator's request, as disclosed in the skill's
+`SKILL.md`. Nothing is exfiltrated; the dependency is vendored (rather than
+npm-installed) so the skill works offline and survives registry churn. If
+this trade-off is not acceptable in your environment, delete
+`bundled-skills/last30days/` — nothing else depends on it.
+
 ## Trademarks
 
 "Orchestra" as used in this README refers to this software project only and

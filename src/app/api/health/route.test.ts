@@ -143,7 +143,12 @@ describe("GET /api/health — happy path", () => {
     expect(new Date(body.timestamp as string).toISOString()).toBe(body.timestamp);
     expect(typeof body.totalLatencyMs).toBe("number");
     expect((body.totalLatencyMs as number) >= 0).toBe(true);
-    expect(body.version).toBe(pkg.version); // single source of truth: package.json
+    // Two independent teeth so this isn't a tautology: (1) the value is a
+    // real semver string (catches undefined/garbage/empty), and (2) it
+    // tracks package.json (catches the old hardcoded-literal drift, where
+    // /health said 1.0.0 while package.json was 0.9.0).
+    expect(body.version).toMatch(/^\d+\.\d+\.\d+(?:[-+].+)?$/);
+    expect(body.version).toBe(pkg.version);
     expect(body.product).toBe("Orchestra");
   });
 

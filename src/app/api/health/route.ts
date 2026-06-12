@@ -1,4 +1,5 @@
 import { getSettings } from "@/lib/storage/settings-store";
+import pkg from "../../../../package.json";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { CACHE_TTL_MS } from "@/lib/cost/openrouter-pricing";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
@@ -607,7 +608,7 @@ export async function GET() {
     status: overallStatus,
     timestamp: new Date().toISOString(),
     totalLatencyMs: totalMs,
-    version: "1.0.0",
+    version: pkg.version,
     product: "Orchestra",
     subsystems: checks,
   });

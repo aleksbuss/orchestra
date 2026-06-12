@@ -5,7 +5,10 @@ import { describe, it, expect } from "vitest";
  * These verify the actual HTTP endpoints respond correctly.
  *
  * Prerequisites: `npm run dev` must be running on localhost:3000.
- * When the server is NOT running, all tests gracefully skip instead of failing.
+ * When the server is NOT running — or :3000 is occupied by an unrelated
+ * app (any Next.js dev server defaults to this port; verified via the
+ * /api/health `product` marker) — all tests gracefully skip instead of
+ * failing against the wrong server.
  */
 
 const BASE_URL = "http://127.0.0.1:3000";
@@ -26,9 +29,30 @@ async function safeFetch(
   }
 }
 
+/**
+ * Port 3000 is the default for EVERY Next.js dev server, so "something
+ * responds" does not mean "Orchestra responds" — a foreign app answers
+ * these routes with 404s and turns every assertion below into noise.
+ * Probe `/api/health` once and require the `product: "Orchestra"` marker;
+ * unreachable or foreign both mean skip, same as "server not running".
+ * Status is deliberately ignored here: a degraded-but-real Orchestra must
+ * NOT skip — its failures are exactly what this suite exists to surface.
+ */
+const orchestraDetected: Promise<boolean> = (async () => {
+  const res = await safeFetch(`${BASE_URL}/api/health`);
+  if (!res) return false;
+  try {
+    const data = (await res.json()) as { product?: string };
+    return data?.product === "Orchestra";
+  } catch {
+    return false;
+  }
+})();
+
 describe("API Integration Tests", () => {
   describe("Health Check API", () => {
     it("should respond with 200 and subsystem statuses", async () => {
+      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
       const res = await safeFetch(`${BASE_URL}/api/health`);
       if (!res) return; // Server not running — skip
 
@@ -43,6 +67,7 @@ describe("API Integration Tests", () => {
 
   describe("Chat API", () => {
     it("should reject POST without a message (returns 400 or 401 if auth required)", async () => {
+      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
       const res = await safeFetch(`${BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -55,6 +80,7 @@ describe("API Integration Tests", () => {
     }, 10000);
 
     it("should accept a valid background message and return queued status (or 401 if auth required)", async () => {
+      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
       const res = await safeFetch(`${BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -80,6 +106,7 @@ describe("API Integration Tests", () => {
 
   describe("Settings API", () => {
     it("should return current settings", async () => {
+      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
       const res = await safeFetch(`${BASE_URL}/api/settings`);
       if (!res) return; // Server not running — skip
 
@@ -96,6 +123,7 @@ describe("API Integration Tests", () => {
 
   describe("Dashboard accessibility", () => {
     it("should serve the dashboard page", async () => {
+      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
       const res = await safeFetch(`${BASE_URL}/dashboard`);
       if (!res) return; // Server not running — skip
 

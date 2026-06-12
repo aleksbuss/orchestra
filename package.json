@@ -33,6 +33,7 @@
     "setup:local": "bash ./scripts/install-local.sh",
     "setup:docker": "bash ./scripts/install-docker.sh",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "test:coverage": "vitest run --coverage",
     "test:stress": "npx tsx scripts/stress-test.ts",
     "scrub:secrets": "npx tsx scripts/scrub-secrets.ts",

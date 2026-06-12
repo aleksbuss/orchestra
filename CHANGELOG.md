@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-12
+
 ### Added
 - **Live OpenRouter pricing cache** — 24h-cached `/api/v1/models` snapshot so the cost banner prices 300+ models without hardcoding (PM #49).
 - **Tournament aggregator** — Borda-count ranking as an alternative MoA aggregation mode (PM #52).
@@ -12,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - Per-chat hard USD cap (`costGuard.maxUsdPerChat`) + budget guard (Sprint 2).
 - Lifecycle hardening — multi-process guard, boot-probe timeouts, cron heartbeat, recurring ghost-sweeper (Sprint 2).
 - `data/` retention sweepers (orphan queue + chat-files, tmp), 11-subsystem health probes, JSONL logger redaction, postmortem auto-dump cap, data-layout docs (Sprint 5–7).
+- **SSRF-safe `fetch_webpage` tool** — the Skeptic verifies raw sources; model-supplied URLs go through the outbound-URL guard + untrusted-content markers (PM #73).
+- Soft-delete for chats — `deleteChat` moves to `data/.trash/` with a 30-day sweep; accidental deletions are recoverable (PM #63).
+- `brew` kind for `install_packages` (macOS system CLIs).
+- `E2E_PORT` env for the Playwright suite; `npm run test:e2e`.
 
 ### Changed
 - Modernized ~20 dependencies — Vitest 1→3, React 19.1→19.2, AI SDK family bumps (Sprint 6).
@@ -19,6 +25,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - **Final answer now reaches the chat even when the model emits the `response` call as text** (JSON blob or `<call:…>`); non-tool models get a tool-free prompt instead of the tool-mode prompt (PM #61).
+- **Cost banner showed "cost unknown" for OpenRouter** — the pricing cache lived in per-bundle module state; moved to a `globalThis` singleton shared across Next.js module graphs (PM #71), with a 6h forced refresh (PM #75).
+- Direct-key pricing table covers gpt-4.1 / o3 / o4 / gemini-2.5-flash; expensive o3-pro/o1-pro no longer shadowed by the cheap bare o3/o1 prefixes.
+- Cron `every`-tick performance: day-skip lookahead + O(1) impossible-expression reject (PM #74).
+- "Download project" was an opacity-0 hover-only button — now discoverable (PM #72).
+- Frontend re-render storm fixed by narrowing Zustand subscriptions to `useShallow` selectors.
+- `/api/health` reports the version from `package.json` (was hardcoded), and the disk-space health test no longer depends on the host machine's real disk usage.
 - Recursive-subordinate billing leak — spend bubbles up to the real parent chat through every level (PM #54, Sprint 8–9).
 - Fail-safe sweepers — a transient FS error no longer mass-deletes queue + chat-files (PM #60).
 - Privacy Mode air-gap now enforced on cron + Telegram + subordinate entry points, not just `runAgent` (PM #58).
@@ -28,6 +40,8 @@ All notable changes to this project will be documented in this file.
 ### Security
 - 11 hardening sprints: Next.js RCE patch + SSRF guards on diagnostics/health (Sprint 1); `pdfjs-dist` 2.x→4.x (ESM), `happy-dom` VM-context-escape patch, `xlsx` 0.18.5→0.20.3 via SheetJS CDN; `npm audit` gate wired into `verify:strict`.
 - Closed 3 CRITICAL cap-bypasses + 3 HIGH from an independent security review, plus a path-traversal gap on `GET /api/files` (PM #16 follow-up).
+- Secrets scrubbed from ALL agent-spawned subprocess envs — `install_packages` and the codex/gemini CLI providers included (PM #70); scrub-env moved to `src/lib/security/`.
+- lodash prod-deps high (prototype pollution) closed via npm override; internal launch artifacts purged from the repository and its full git history.
 
 ## [0.3.0] - 2026-05-28
 

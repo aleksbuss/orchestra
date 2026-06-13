@@ -188,7 +188,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ## 🧪 Tests
 
 ```bash
-npm test                  # full suite — currently 2,602 tests across 169 files
+npm test                  # full suite — currently 2,606 tests across 170 files
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
@@ -414,7 +414,7 @@ The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size,
 
 ## Status
 
-**Alpha quality.** Architecture is end-to-end functional and exercised across 2,602 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
+**Alpha quality.** Architecture is end-to-end functional and exercised across 2,606 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
 
 Solo developer project. PRs welcome; review on a best-effort basis.
 

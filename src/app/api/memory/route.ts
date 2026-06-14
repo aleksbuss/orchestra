@@ -6,6 +6,28 @@ import {
   getAllMemories,
 } from "@/lib/memory/memory";
 import { getSettings } from "@/lib/storage/settings-store";
+import { assertPrivacyModeAllowsSettings } from "@/lib/agent/agent";
+import type { AppSettings } from "@/lib/types";
+
+/**
+ * Privacy Mode air-gap at the route boundary (PM #47/#58 class — QA audit
+ * F-19). `searchMemory`/`insertMemory` embed the query/text via the configured
+ * embeddingsModel; under Privacy Mode a cloud embeddings provider would ship
+ * that text off-box. The agent entry points guard this, but THIS route is a
+ * separate, non-agent embedding entry point and must guard independently.
+ * Returns a 403 Response when blocked, or null to proceed.
+ */
+function privacyModeBlocked(settings: AppSettings): Response | null {
+  try {
+    assertPrivacyModeAllowsSettings(settings);
+    return null;
+  } catch (e) {
+    return Response.json(
+      { error: e instanceof Error ? e.message : "Privacy Mode blocks this operation." },
+      { status: 403 }
+    );
+  }
+}
 
 export async function GET(req: NextRequest) {
   const query = req.nextUrl.searchParams.get("query");
@@ -14,6 +36,8 @@ export async function GET(req: NextRequest) {
 
   if (query) {
     const settings = await getSettings();
+    const blocked = privacyModeBlocked(settings);
+    if (blocked) return blocked;
     const results = await searchMemory(
       query,
       limit,
@@ -39,6 +63,8 @@ export async function POST(req: NextRequest) {
     }
 
     const settings = await getSettings();
+    const blocked = privacyModeBlocked(settings);
+    if (blocked) return blocked;
     const id = await insertMemory(
       text,
       area || "main",

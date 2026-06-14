@@ -180,6 +180,24 @@ describe("POST /api/projects/[id]/knowledge", () => {
     expect(res.status).toBe(400);
   });
 
+  it("blocks with 403 + NEVER ingests under Privacy Mode + cloud embeddings (QA audit F-19)", async () => {
+    mockedGetProject.mockResolvedValue({ id: "p-1" } as any);
+    // Local chat model but a CLOUD embeddings model with Privacy Mode ON —
+    // importing would ship the file's content to the cloud embedder.
+    mockedSettings.mockResolvedValue({
+      privacyMode: { enabled: true },
+      chatModel: { provider: "ollama", model: "llama3" },
+      embeddingsModel: { provider: "openai", model: "text-embedding-3-small" },
+    } as any);
+
+    const res = await POST(
+      buildPostMultipart({ name: "secret.md", content: "confidential client data" }),
+      params("p-1")
+    );
+    expect(res.status).toBe(403);
+    expect(mockedImport).not.toHaveBeenCalled(); // the embed never happens
+  });
+
   it("persists the file under .meta/knowledge/ and calls the ingester", async () => {
     mockedGetProject.mockResolvedValue({ id: "p-1" } as any);
     mockedImport.mockResolvedValue({ imported: 4, skipped: 0, errors: [] });

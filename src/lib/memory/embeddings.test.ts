@@ -122,3 +122,55 @@ describe("embedTexts — error wrapping", () => {
     );
   });
 });
+
+describe("embedTexts — abortSignal forwarding (QA audit F-12 / PM #23)", () => {
+  it("forwards the abortSignal to embed() on the single-text path", async () => {
+    mockedEmbed.mockResolvedValue({ embedding: [0.1] } as any);
+    const controller = new AbortController();
+
+    await embedTexts(["hello"], baseConfig, { abortSignal: controller.signal });
+
+    // The whole point of F-12: an aborted turn must cancel the in-flight
+    // embedding request, which only happens if the signal reaches the SDK.
+    expect(mockedEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal })
+    );
+  });
+
+  it("forwards the abortSignal to embedMany() on the batch path", async () => {
+    mockedEmbedMany.mockResolvedValue({ embeddings: [[0.1], [0.2]] } as any);
+    const controller = new AbortController();
+
+    await embedTexts(["a", "b"], baseConfig, { abortSignal: controller.signal });
+
+    expect(mockedEmbedMany).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal })
+    );
+  });
+
+  it("short-circuits an already-aborted signal BEFORE touching the SDK", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      embedTexts(["x"], baseConfig, { abortSignal: controller.signal })
+    ).rejects.toThrow();
+    expect(mockedEmbed).not.toHaveBeenCalled();
+    expect(mockedEmbedMany).not.toHaveBeenCalled();
+  });
+
+  it("propagates the abort error raw — NOT wrapped as an embedding failure", async () => {
+    const controller = new AbortController();
+    const abortErr = new DOMException("The operation was aborted.", "AbortError");
+    mockedEmbed.mockImplementation(async () => {
+      controller.abort();
+      throw abortErr;
+    });
+
+    // Cancellation must stay distinguishable from a real provider error, so
+    // the catch re-throws as-is instead of the "Failed to generate…" wrapper.
+    await expect(
+      embedTexts(["x"], baseConfig, { abortSignal: controller.signal })
+    ).rejects.toBe(abortErr);
+  });
+});

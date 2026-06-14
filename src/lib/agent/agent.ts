@@ -987,7 +987,7 @@ export async function runAgent(options: RunAgentOptions) {
       // Phase 2: RAG Vector Database Archival
       const memorySubdir = options.projectId ? `${options.projectId}` : "main";
       try {
-        await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings);
+        await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings, undefined, options.abortSignal);
         console.log(`[Memory] History successfully vector-archived.`);
       } catch (err) {
         console.error(`[Memory] Failed to vector-archive history:`, err);
@@ -1084,7 +1084,7 @@ export async function runAgent(options: RunAgentOptions) {
   try {
     const memorySubdir = options.projectId ? `${options.projectId}` : "main";
       const similarityThreshold = settings.memory?.similarityThreshold ?? 0.7;
-      const ragResults = await searchMemory(options.userMessage, 3, similarityThreshold, memorySubdir, settings);
+      const ragResults = await searchMemory(options.userMessage, 3, similarityThreshold, memorySubdir, settings, undefined, options.abortSignal);
       
       if (ragResults && ragResults.length > 0) {
         const ragFormatted = ragResults.map((r) => `[Relevance Score: ${r.score.toFixed(2)}] (Area: ${r.metadata.area})\n${r.text}`).join("\n\n");

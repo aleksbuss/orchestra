@@ -89,7 +89,7 @@ export async function detectDisagreement(
   drafts: DisagreementInput[],
   settings: AppSettings,
   threshold: number = DEFAULT_DISAGREEMENT_THRESHOLD,
-  _abortSignal?: AbortSignal
+  abortSignal?: AbortSignal
 ): Promise<DisagreementResult> {
   const noSignal: DisagreementResult = {
     maxDistance: 0,
@@ -109,13 +109,17 @@ export async function detectDisagreement(
 
   let embeddings: number[][];
   try {
-    embeddings = await embedTexts(inputs, {
-      provider: settings.embeddingsModel.provider,
-      model: settings.embeddingsModel.model,
-      apiKey: settings.embeddingsModel.apiKey,
-      baseUrl: settings.embeddingsModel.baseUrl,
-      dimensions: settings.embeddingsModel.dimensions,
-    });
+    embeddings = await embedTexts(
+      inputs,
+      {
+        provider: settings.embeddingsModel.provider,
+        model: settings.embeddingsModel.model,
+        apiKey: settings.embeddingsModel.apiKey,
+        baseUrl: settings.embeddingsModel.baseUrl,
+        dimensions: settings.embeddingsModel.dimensions,
+      },
+      { abortSignal }
+    );
   } catch (err) {
     console.warn(
       "[Disagreement] Embedding failed, skipping detection:",

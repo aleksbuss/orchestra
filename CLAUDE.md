@@ -127,7 +127,7 @@ Orchestra exposes capabilities to the agent through **two distinct mechanisms** 
 - The agent's system prompt has a global `<untrusted_content_protocol>` section ([`src/prompts/system.md`](src/prompts/system.md)) that codifies the rule for ALL `<UNTRUSTED_*>` markers (MCP, web_task, future tools). When you add a new boundary, the wrapper helper + a marker name (`<UNTRUSTED_<FAMILY>>`) is the entire integration.
 
 **Test coverage today:**
-- Tools: most are unit-tested (88% lib coverage). Tools that touch network or browsers (`web_task`) have both mock-based unit tests AND real-Playwright integration tests.
+- Tools: coverage is uneven, NOT the flat "88%" once claimed here. `web_task` is well-covered (~88%: mock unit tests + real-Playwright integration), but the large `tool.ts` registry itself sits at ~24% line coverage (the loop-guard wrap and most tool `execute` bodies are unexercised — the single biggest coverage gap; raise it as part of the §10 `tool.ts` split). Across `src/lib` the aggregate is ~61% lines (measured v8, 2026-06): `security`/`memory`/`auth`/`cost` exceed 90% while `tools` (~40%) / `providers` (~43%) / `mcp` (~8%) trail. Per-module floors in `vitest.config.ts` gate the high-blast-radius files; the global floor tracks the measured ~46%.
 - Skills: structural validation only (PM #24) — every `SKILL.md` is parsed and required frontmatter fields are checked. We deliberately do NOT exercise the underlying CLI binary in CI because that would require installing dozens of external dependencies. The skill body is operator-facing markdown; the agent reads it as system-prompt context, not executable code.
 
 ---
@@ -167,21 +167,21 @@ export async function POST(req: Request) {
 }
 ```
 
-- Every `generateText` call receives `abortSignal`. **Every `generateObject` and `streamText` call too** (PM #23 — the original contract said "generateText"; the inner Router uses `generateObject`, which silently leaked for six months).
+- Every `generateText` call receives `abortSignal`. **Every `generateObject`, `streamText`, AND `embed`/`embedMany` call too** (PM #23 — the original contract said "generateText"; the inner Router uses `generateObject`, which silently leaked for six months. QA audit F-12/F-13 — `embedTexts` wrapping `embed`/`embedMany` for RAG, disagreement detection, and trace few-shots was a *second* blind spot: the embedding HTTP request ran to completion after an abort, and the audit grep below didn't even check for it).
 - Every tool implementation receives and respects `abortSignal` (long `fetch`, child processes, sleeps).
 - Every iteration of `src/lib/agent/daemon.ts` and `src/lib/cron/runtime.ts` checks `signal.aborted` between hops.
 - Background tasks that outlive a single request use a **separate `AbortController`** owned by `daemon.ts`, NOT `req.signal` — the request finishes, but the daemon keeps running. This is the one exception.
 
 **Pre-merge audit (PM #23).** Run on every PR that touches `src/lib/agent/` or `src/lib/tools/`. The brittle awk-based grep that used to live here gave false positives on multi-line argument blocks; use this Node bracket-balanced variant instead:
 ```bash
-for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts src/lib/agent/moa-router.ts; do
+for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts src/lib/agent/moa-router.ts src/lib/memory/embeddings.ts src/lib/memory/blackboard.ts; do
   node -e "
     const fs = require('fs');
     const src = fs.readFileSync('$f', 'utf8').split('\n');
     let inCall=false, depth=0, callStart=0, hasSignal=false, total=0, missing=[];
     for (let i=0; i<src.length; i++) {
       const L = src[i];
-      if (!inCall && /(await\s+generateText|await\s+generateObject|streamText)\s*\(/.test(L)) {
+      if (!inCall && /(await\s+generateText|await\s+generateObject|streamText|await\s+embedMany|await\s+embed)\s*\(/.test(L)) {
         inCall=true; depth=0; callStart=i+1; hasSignal=false; total++;
       }
       if (inCall) {
@@ -196,9 +196,11 @@ for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts
   "
 done
 ```
-All five orchestration files should report `missing=0`. If not, that's the leak.
+All seven audited files (five orchestration + `embeddings.ts` + `blackboard.ts`) should report `missing=0`. If not, that's the leak. **Note `blackboard.ts` calls the AI SDK `embed()` DIRECTLY (bypassing `embedTexts`)** — that's why it needs its own entry; a skeptical re-audit of F-12 caught it after the first pass only fixed the `embedTexts` chokepoint. Lesson: scope abort audits to the SDK primitive (`embed`/`embedMany`/`generate*`), not to a single in-house wrapper.
 
 **PM #23 closed (2026-05-28 audit):** both `runAgentText` ([agent.ts:1833](src/lib/agent/agent.ts#L1833)) and `runSubordinateAgent` ([agent.ts:1992](src/lib/agent/agent.ts#L1992)) accept `abortSignal?: AbortSignal` and plumb it into their inner `generateText` calls. Callers (`cron/service.ts`, `external/handle-external-message.ts`, `tools/call-subordinate.ts`) thread the appropriate signal — daemon's `AbortController` for cron, `req.signal` for the rest. Don't reintroduce the gap.
+
+**QA audit F-12/F-13 closed (2026-06-14):** `embedTexts` ([embeddings.ts](src/lib/memory/embeddings.ts)) now accepts `options.abortSignal` and forwards it to `embed`/`embedMany` (+ a `throwIfAborted()` short-circuit and a raw re-throw on abort so cancellation stays distinguishable from a provider error). In-loop callers thread the signal: `detectDisagreement` (was silently dropping it as `_abortSignal`), the MoA reflection convergence check, and `runAgent`'s RAG search + history-archive insert. `searchMemory`/`insertMemory`/`insertManyMemories` gained an optional trailing `abortSignal`. A skeptical re-audit then caught a SECOND family of embed calls the first pass missed: **`blackboard.ts` calls the SDK `embed()` directly** (write_fact/search_facts tools), bypassing `embedTexts` entirely — now fixed with its own `abortSignal` param threaded from `tool.ts`. Lower-frequency callers where the param now exists but the signal isn't yet threaded (incremental follow-up, NOT a regression): the `memory_save`/`memory_load` tool wrappers, bulk knowledge import, and the fire-and-forget trace capture. The audit grep + file list above were extended to `embed`/`embedMany` so this surface can't silently regress again. Regression tests: [`embeddings.test.ts`](src/lib/memory/embeddings.test.ts) (forwarding + already-aborted short-circuit + raw re-throw), [`disagreement.test.ts`](src/lib/agent/disagreement.test.ts) (forwards to `embedTexts`).
 
 If you cannot answer "what cancels this stream?" you MUST NOT merge the change.
 

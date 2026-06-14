@@ -66,6 +66,32 @@ describe("PM #39 — detectDisagreement", () => {
     expect(mockedEmbedTexts).not.toHaveBeenCalled();
   });
 
+  it("forwards its abortSignal to embedTexts (QA audit F-12 — used to drop it as `_abortSignal`)", async () => {
+    mockedEmbedTexts.mockResolvedValueOnce([
+      [1, 0, 0, 0],
+      [0, 1, 0, 0],
+    ]);
+    const controller = new AbortController();
+
+    await detectDisagreement(
+      [
+        { text: "a", role: "p1" },
+        { text: "b", role: "p2" },
+      ],
+      settings(),
+      undefined, // default threshold
+      controller.signal
+    );
+
+    // 3rd positional arg is the options bag; the signal must reach embedTexts
+    // so an aborted MoA turn cancels the disagreement embedding call.
+    expect(mockedEmbedTexts).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.any(Object),
+      { abortSignal: controller.signal }
+    );
+  });
+
   it("identical embeddings → cosine distance 0 → NOT detected", async () => {
     // Three identical unit vectors. Cosine sim = 1, distance = 0.
     mockedEmbedTexts.mockResolvedValueOnce([

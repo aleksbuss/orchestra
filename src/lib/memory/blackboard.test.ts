@@ -236,3 +236,40 @@ describe("searchBlackboardFacts", () => {
     expect(out[0].score).toBe(0);
   });
 });
+
+describe("abortSignal forwarding (QA audit F-12 follow-up — blackboard bypasses embedTexts)", () => {
+  it("writeFactToBlackboard forwards abortSignal to the SDK embed()", async () => {
+    mockedEmbed.mockResolvedValue({ embedding: [0.1, 0.2] } as any);
+    const controller = new AbortController();
+
+    await writeFactToBlackboard({
+      projectId: "p-1",
+      topic: "t",
+      content: "c",
+      author: "agent",
+      abortSignal: controller.signal,
+    });
+
+    // blackboard calls the AI SDK embed() directly (not via embedTexts), so it
+    // needs its own forward; an aborted agent turn must cancel this request.
+    expect(mockedEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal })
+    );
+  });
+
+  it("searchBlackboardFacts forwards abortSignal to the SDK embed()", async () => {
+    await saveBlackboard("p-1", [fakeFact()]);
+    mockedEmbed.mockResolvedValue({ embedding: [1, 0, 0] } as any);
+    const controller = new AbortController();
+
+    await searchBlackboardFacts({
+      projectId: "p-1",
+      query: "q",
+      abortSignal: controller.signal,
+    });
+
+    expect(mockedEmbed).toHaveBeenCalledWith(
+      expect.objectContaining({ abortSignal: controller.signal })
+    );
+  });
+});

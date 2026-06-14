@@ -60,8 +60,9 @@ export async function writeFactToBlackboard(params: {
   topic: string;
   content: string;
   author: string;
+  abortSignal?: AbortSignal;
 }): Promise<string> {
-  const { projectId, topic, content, author } = params;
+  const { projectId, topic, content, author, abortSignal } = params;
   
   const settings = await getSettings();
   if (!settings.embeddingsModel) {
@@ -72,6 +73,9 @@ export async function writeFactToBlackboard(params: {
   const { embedding } = await embed({
     model,
     value: `Topic: ${topic}\nContent: ${content}`,
+    // QA audit F-12 follow-up: blackboard bypasses embedTexts and calls the
+    // AI SDK directly, so it needs its own abortSignal forward.
+    abortSignal,
   });
 
   const bbPath = await getBlackboardPath(projectId);
@@ -102,8 +106,9 @@ export async function searchBlackboardFacts(params: {
   projectId: string;
   query: string;
   topK?: number;
+  abortSignal?: AbortSignal;
 }): Promise<Array<{ topic: string; content: string; author: string; score: number }>> {
-  const { projectId, query, topK = 5 } = params;
+  const { projectId, query, topK = 5, abortSignal } = params;
   
   const facts = await loadBlackboard(projectId);
   if (facts.length === 0) {
@@ -119,6 +124,7 @@ export async function searchBlackboardFacts(params: {
   const { embedding: queryEmbedding } = await embed({
     model,
     value: query,
+    abortSignal,
   });
 
   const scoredFacts = facts.map((fact) => ({

@@ -1662,13 +1662,14 @@ export function createAgentTools(
         topic: z.string().describe("Topic or category of the factual knowledge (e.g. 'Project Architecture', 'Database Schema')."),
         content: z.string().describe("The dense, factual content to store."),
       }),
-      execute: async ({ topic, content }) => {
+      execute: async ({ topic, content }, { abortSignal }) => {
         try {
           await writeFactToBlackboard({
             projectId: context.projectId!,
             topic,
             content,
             author: "agent",
+            abortSignal,
           });
           return `Fact successfully written to Blackboard memory under topic '${topic}'.`;
         } catch (e: any) {
@@ -1682,12 +1683,13 @@ export function createAgentTools(
       inputSchema: z.object({
         query: z.string().describe("Semantic query string to search for."),
       }),
-      execute: async ({ query }) => {
+      execute: async ({ query }, { abortSignal }) => {
         try {
           const results = await searchBlackboardFacts({
             projectId: context.projectId!,
             query,
             topK: 5,
+            abortSignal,
           });
           if (results.length === 0) return "No matching facts found in Blackboard.";
           return results.map(r => `[Topic: ${r.topic}] ${r.content} (Score: ${r.score.toFixed(2)})`).join("\n\n");

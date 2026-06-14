@@ -115,9 +115,10 @@ export async function insertMemory(
   area: string,
   subdir: string,
   settings: AppSettings,
-  additionalMetadata: Record<string, unknown> = {}
+  additionalMetadata: Record<string, unknown> = {},
+  abortSignal?: AbortSignal
 ): Promise<string> {
-  const [id] = await insertManyMemories([text], area, subdir, settings, additionalMetadata);
+  const [id] = await insertManyMemories([text], area, subdir, settings, additionalMetadata, abortSignal);
   return id;
 }
 
@@ -130,13 +131,14 @@ export async function insertManyMemories(
   area: string,
   subdir: string,
   settings: AppSettings,
-  additionalMetadata: Record<string, unknown> = {}
+  additionalMetadata: Record<string, unknown> = {},
+  abortSignal?: AbortSignal
 ): Promise<string[]> {
   if (texts.length === 0) return [];
 
   // Generate embeddings for the entire batch in one call, respecting system resource limits
-  const embeddings = await agentSemaphore.run(() => 
-    embedTexts(texts, settings.embeddingsModel)
+  const embeddings = await agentSemaphore.run(() =>
+    embedTexts(texts, settings.embeddingsModel, { abortSignal })
   );
   if (!embeddings || embeddings.length !== texts.length) {
     throw new Error("Failed to generate embeddings for batch");
@@ -178,13 +180,14 @@ export async function searchMemory(
   threshold: number,
   subdir: string,
   settings: AppSettings,
-  areaFilter?: string
+  areaFilter?: string,
+  abortSignal?: AbortSignal
 ): Promise<{ id: string; text: string; score: number; metadata: Record<string, unknown> }[]> {
   const db = await loadDB(subdir);
   if (db.documents.length === 0) return [];
 
-  const embeddings = await agentSemaphore.run(() => 
-    embedTexts([query], settings.embeddingsModel)
+  const embeddings = await agentSemaphore.run(() =>
+    embedTexts([query], settings.embeddingsModel, { abortSignal })
   );
   if (!embeddings || embeddings.length === 0) return [];
 

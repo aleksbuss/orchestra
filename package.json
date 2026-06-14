@@ -36,6 +36,7 @@
     "test:e2e": "playwright test",
     "test:coverage": "vitest run --coverage",
     "test:stress": "npx tsx scripts/stress-test.ts",
+    "badge:sync": "node scripts/sync-test-badge.mjs",
     "scrub:secrets": "npx tsx scripts/scrub-secrets.ts",
     "auth:reset": "npx tsx scripts/auth-reset.ts",
     "evals": "npx tsx scripts/run-evals.ts",

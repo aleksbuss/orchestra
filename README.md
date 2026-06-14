@@ -6,7 +6,7 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-2616%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-2621%20passing-brightgreen)](#tests)
 [![Post-Mortems](https://img.shields.io/badge/post--mortems-75%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
@@ -25,7 +25,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 | --- | --- | --- |
 | **Agent Architecture** | Single-agent chat loop | **Mixture-of-Agents (MoA)** ensemble with parallel proposers |
 | **Consensus & Verification**| Trust the single model | Code-guaranteed **Skeptic**, Disagreement Detection, Tournament Aggregation |
-| **Resilience & Testing** | Basic test suite | **75 Documented Post-Mortems**, 2616 tests, Trace-memory |
+| **Resilience & Testing** | Basic test suite | **75 Documented Post-Mortems**, 2621 tests, Trace-memory |
 | **Cost Transparency** | Unknown API usage | Live per-chat cost banner with USD estimates and tokens |
 | **Security** | Basic serverless API | Code-enforced SSRF guards, Path traversal guards, Sandbox constraints |
 
@@ -188,7 +188,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ## 🧪 Tests
 
 ```bash
-npm test                  # full suite — currently 2,616 tests across 170 files
+npm test                  # full suite — currently 2,621 tests across 170 files
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
@@ -415,7 +415,7 @@ The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size,
 
 ## Status
 
-**Alpha quality.** Architecture is end-to-end functional and exercised across 2,616 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
+**Alpha quality.** Architecture is end-to-end functional and exercised across 2,621 tests. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
 
 Solo developer project. PRs welcome; review on a best-effort basis.
 

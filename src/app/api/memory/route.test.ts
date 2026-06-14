@@ -183,3 +183,49 @@ describe("DELETE /api/memory — by id", () => {
     expect(mockedDelete).toHaveBeenCalledWith("mem-1", "p-1");
   });
 });
+
+describe("Privacy Mode air-gap (QA audit F-19 — embedding routes bypass the agent entry guard)", () => {
+  // The exact dangerous config: local chat model, but a CLOUD embeddings model,
+  // with Privacy Mode ON. Nothing at settings-write time forbids this state, so
+  // the route must reject it before searchMemory/insertMemory embed the text.
+  const cloudEmbedPrivacy = {
+    memory: { similarityThreshold: 0.5 },
+    privacyMode: { enabled: true },
+    chatModel: { provider: "ollama", model: "llama3" },
+    embeddingsModel: { provider: "openai", model: "text-embedding-3-small" },
+  };
+
+  it("GET search: 403 + searchMemory NEVER called under Privacy Mode + cloud embeddings", async () => {
+    mockedSettings.mockResolvedValue(cloudEmbedPrivacy as any);
+    const res = await GET(buildGet("?query=confidential client data"));
+    expect(res.status).toBe(403);
+    // The leak is the embedding call itself — it must not happen.
+    expect(mockedSearch).not.toHaveBeenCalled();
+    expect((await res.json()).error).toMatch(/Privacy Mode/i);
+  });
+
+  it("POST insert: 403 + insertMemory NEVER called under Privacy Mode + cloud embeddings", async () => {
+    mockedSettings.mockResolvedValue(cloudEmbedPrivacy as any);
+    const res = await POST(buildPost({ text: "confidential client data" }));
+    expect(res.status).toBe(403);
+    expect(mockedInsert).not.toHaveBeenCalled();
+  });
+
+  it("does NOT over-block: Privacy Mode ON with a LOCAL embeddings model proceeds", async () => {
+    mockedSettings.mockResolvedValue({
+      ...cloudEmbedPrivacy,
+      embeddingsModel: { provider: "ollama", model: "nomic-embed-text" },
+    } as any);
+    mockedSearch.mockResolvedValue([]);
+    const res = await GET(buildGet("?query=x"));
+    expect(res.status).toBe(200);
+    expect(mockedSearch).toHaveBeenCalled();
+  });
+
+  it("does NOT block when Privacy Mode is OFF (the default)", async () => {
+    mockedInsert.mockResolvedValue("id-1");
+    const res = await POST(buildPost({ text: "x" }));
+    expect(res.status).toBe(201);
+    expect(mockedInsert).toHaveBeenCalled();
+  });
+});

@@ -166,6 +166,26 @@ This skeptical pass added 2 tests → suite 2614→**2616** → a **4th** manual
 
 ---
 
+## 0.5 Sprint 1 (Security) — F-19: Privacy Mode air-gap bypassed by embedding routes (2026-06-14)
+
+**F-19 · P1 · data egress under Privacy Mode via non-agent routes.** Measuring (not assuming) the security-test landscape surfaced a live PM #58-class hole:
+
+- `assertPrivacyModeAllowsSettings` explicitly treats `embeddingsModel` as a leak vector (agent.ts comment: "embeddingsModel … text leaves the box"), but it's only called at the **agent** entry points. Two **non-agent API routes embed text directly**, bypassing the guard:
+  - `GET /api/memory?query=` + `POST /api/memory` — search/insert embed the query/text.
+  - `POST /api/projects/[id]/knowledge` — import embeds the uploaded file's content.
+- **Reachable, not theoretical:** there is **no settings-write enforcement** of Privacy Mode (verified — `grep privacyMode src/lib/storage/settings-store.ts` is empty), so "Privacy Mode ON + a cloud `embeddingsModel`" is a config the operator can hold. Under it, these routes shipped memory text / knowledge files to the cloud embedder while the UI showed Privacy Mode ON — the exact promise ("NO user data may leave the box") broken.
+- `/api/health` matched the symbol grep but was **excluded** (verified: the match was a comment, it does not embed).
+
+**Fix:** both routes call `assertPrivacyModeAllowsSettings(settings)` after `getSettings()` and return **403 before any embedding** (memory via a file-local `privacyModeBlocked` helper; knowledge inline). Imports from `@/lib/agent/agent` — the established route pattern (`/api/chat` already does it).
+
+**Tests (5 new):** `memory/route.test.ts` — GET+POST blocked under Privacy+cloud (embed never called), NOT over-blocked with local embeddings, NOT blocked when Privacy off. `knowledge/route.test.ts` — POST blocked + import never called.
+
+**Verification:** typecheck clean; both route suites green (16 + 33); completeness grep confirms memory+knowledge are the ONLY non-agent embed routes (blackboard is agent-tool-only, already guarded by the entry point). CLAUDE.md Privacy Mode section + audit grep extended.
+
+**Lesson (same family as PM #58):** the air-gap is only as strong as the number of entry points that call it — and **embedding is egress**, so every route that reaches `searchMemory`/`insertMemory`/`importKnowledgeFile`/blackboard counts, not just the chat path.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

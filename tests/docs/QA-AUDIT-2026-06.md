@@ -186,6 +186,20 @@ This skeptical pass added 2 tests → suite 2614→**2616** → a **4th** manual
 
 ---
 
+## 0.6 Sprint 1 (Security) — process.env gate + SSRF/auth sweep (2026-06-14)
+
+Continuation of Sprint 1 after F-19. One fix + two **negative results** (controls verified working, not assumed — a clean sweep is a real audit deliverable).
+
+**F-20 · DONE · automate the `...process.env` grep-gate (PM #28/#70).** The "never spread the operator's `process.env` into a child process" invariant was enforced only by a manual pre-merge grep CLAUDE.md asks reviewers to run — the exact control that gets skipped (and `env: process.env` already slipped once, PM #70). Added [`no-raw-process-env.test.ts`](src/lib/security/no-raw-process-env.test.ts): a structural Vitest gate scanning `src/lib/tools` + `src/lib/providers` for the whole-object spread/assign forms (single-var reads like `process.env.FOO` are fine), with a >10-file floor against a vacuous pass. **Meta-tested** — injecting a spread turns it red at file:line. CLAUDE.md updated to point at the gate.
+
+**SSRF sweep — NO new hole (verified).** Cross-referenced every server-side `fetch()` in `src/app/api` + `src/lib` against `assertSafeOutboundUrl`. Every dynamic-URL fetch is either (a) already guarded (`fetch_webpage`, `web_task`, MCP transport, `/api/health`/`/api/models`/`/api/diagnostics` custom-backend cases, `local-backend-detect`, `model-fallback`) or (b) a fixed, trusted host not under client/model control (`api.telegram.org`, `api.github.com`/`githubusercontent.com` for skill install, `openrouter.ai`, `generativelanguage.googleapis.com`). `project-store`/`cron-service` fetch fixed hosts → no guard needed. LLM-provider fetches target the operator's own configured `baseUrl` (loopback is the intended Ollama case). Conclusion: the SSRF control is applied where it matters.
+
+**Auth-gate sweep — well-covered (verified).** PM #25 `mustChangeCredentials` **API 403** gate is fully pinned in [`middleware.test.ts`](src/middleware.test.ts) (`/api/chat|projects|files|settings|events` → 403; `/api/auth/credentials|logout` exceptions allowed). `ORCHESTRA_DISABLE_AUTH` strict-`"true"` is covered (the F-01a flaky test, now de-flaked). No gap.
+
+**Sprint 1 status:** the high-value items are closed — one real egress hole fixed (F-19), one fragile manual control automated (F-20), and the SSRF + auth + secrets-scrub controls verified intact. Remaining lower-drama items (exhaustive path-traversal route matrix) are incremental test-hardening of already-working guards.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

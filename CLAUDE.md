@@ -525,6 +525,7 @@ Five files cross the §8 1500-line "MUST decompose next substantive PR" line. No
 - **Pre-Deploy Gate:** `npm run verify` (lint + typecheck + tests + build; one-stop check before shipping)
 - **Scrub Secrets:** `npm run scrub:secrets` (before sharing the tree externally)
 - **Reset Auth:** `npm run auth:reset` (recovery from forgotten password — see "Auth escape hatches" in Security Patterns)
+- **Sync test badge:** `npm run badge:sync` (derives the README "tests" badge count from vitest's own total; `-- --check` fails CI-style if stale). The count lives ONLY in the badge now — prose is number-free — so this is the single update site (QA audit F-04). Don't hand-edit the badge number.
 
 ---
 *Note for AI Assistants: Read this file entirely before making architectural changes to Orchestra. When in doubt, read the source code of `agent.ts` or `moa.ts` before writing new logic.*

@@ -200,6 +200,16 @@ Continuation of Sprint 1 after F-19. One fix + two **negative results** (control
 
 ---
 
+## 0.7 Sprint 2 (backend depth) — F-21: tree-wide AbortSignal CI gate (2026-06-14)
+
+**F-21 · DONE · the documented abort-audit file list was incomplete (again) — replace it with a tree scan.** Measuring before building (the F-13 lesson) showed the AI-SDK call surface is **10 files, not the 7** in CLAUDE.md's hardcoded audit list. Three callers were outside the list — `agent-response.ts`, `tournament-aggregator.ts`, `web-task.ts` — all currently `missing=0` (no live leak), but a future abort-drop in any of them would sail past the documented manual audit. Same class as F-13 (blackboard): a hand-maintained file list drifts.
+
+**Fix:** [`abort-contract.test.ts`](src/lib/agent/abort-contract.test.ts) ports CLAUDE.md's bracket-balanced scanner but runs it over **every non-test file under `src/`** — no list to keep in sync, so a new SDK callsite in a new file is covered automatically. Asserts `missing=0` tree-wide, with a `totalCalls > 8` floor against a vacuous pass. **Meta-tested**: a temp file with `await embed({model})` and no signal turns it red at `file:line`. CLAUDE.md's PM #23 section now points at the gate as the source of truth (the manual grep stays as a quick local spot-check).
+
+This is the same "fragile manual control → CI gate" move as F-20, applied to the P0-class abort contract. The remaining Sprint 2 items (race/atomicity stress for `withFileLock`, daemon billing-loop PM #59, fail-safe sweepers PM #60) are larger and deferred to a focused session.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

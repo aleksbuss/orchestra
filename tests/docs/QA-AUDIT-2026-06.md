@@ -232,6 +232,8 @@ The biggest measured coverage gap is the frontend (F-03: 45 components, 5 tests)
 
 This is structural enforcement, not render coverage. Full component render tests (chat-panel's PM #5 refetch-on-`syncTick`, `MessageBubble` memoization per PM #33) remain the larger Sprint 3 effort — they need per-component SSE/Zustand/AI-SDK mocking and are a genuine multi-session body of work.
 
+**First render test landed (F-22 follow-up):** [`quick-model-selector.dom.test.tsx`](src/components/chat/quick-model-selector.dom.test.tsx) — render coverage for a previously-untested 524-LOC component, pinning the mount-fetch → model-display contract + the `disabled` guard. `chat-panel` itself was assessed and deferred: it pulls `useChat` (@ai-sdk/react) + 4 other hooks + ~8 child components + two competing fetch effects, so a clean render test is genuinely multi-mock/brittle — the honest "store-driven component first" call. **Minor finding (F-23):** writing the test surfaced DEAD CODE — `quick-model-selector`'s `activePreset !== "custom"` branch (`Preset: <name>`) is unreachable because `PresetTier` collapsed to the single literal `"custom"` (the fast/balanced/frontier tiers were removed). Cosmetic cleanup, noted not chased.
+
 ---
 
 ## 1. Executive Summary

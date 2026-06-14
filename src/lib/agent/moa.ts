@@ -987,7 +987,8 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
                   apiKey: settings.embeddingsModel.apiKey,
                   baseUrl: settings.embeddingsModel.baseUrl,
                   dimensions: settings.embeddingsModel.dimensions,
-                }
+                },
+                { abortSignal }
               );
               const similarity = cosineSimilarity(embA, embB);
               if (similarity >= convergenceThreshold) {

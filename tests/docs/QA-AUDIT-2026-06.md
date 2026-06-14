@@ -200,6 +200,27 @@ Continuation of Sprint 1 after F-19. One fix + two **negative results** (control
 
 ---
 
+## 0.7 Sprint 2 (backend depth) — F-21: tree-wide AbortSignal CI gate (2026-06-14)
+
+**F-21 · DONE · the documented abort-audit file list was incomplete (again) — replace it with a tree scan.** Measuring before building (the F-13 lesson) showed the AI-SDK call surface is **10 files, not the 7** in CLAUDE.md's hardcoded audit list. Three callers were outside the list — `agent-response.ts`, `tournament-aggregator.ts`, `web-task.ts` — all currently `missing=0` (no live leak), but a future abort-drop in any of them would sail past the documented manual audit. Same class as F-13 (blackboard): a hand-maintained file list drifts.
+
+**Fix:** [`abort-contract.test.ts`](src/lib/agent/abort-contract.test.ts) ports CLAUDE.md's bracket-balanced scanner but runs it over **every non-test file under `src/`** — no list to keep in sync, so a new SDK callsite in a new file is covered automatically. Asserts `missing=0` tree-wide, with a `totalCalls > 8` floor against a vacuous pass. **Meta-tested**: a temp file with `await embed({model})` and no signal turns it red at `file:line`. CLAUDE.md's PM #23 section now points at the gate as the source of truth (the manual grep stays as a quick local spot-check).
+
+This is the same "fragile manual control → CI gate" move as F-20, applied to the P0-class abort contract. The remaining Sprint 2 items (race/atomicity stress for `withFileLock`, daemon billing-loop PM #59, fail-safe sweepers PM #60) are larger and deferred to a focused session.
+
+---
+
+## 0.8 F-01a — residual flake properly fixed (2026-06-14)
+
+The §0.4 skeptical pass flagged the `testTimeout: 15000` Sprint-0 fix as a band-aid; it then bit during this session (a `badge:sync` run hit a transient failure). Rather than fix by assumption, a low-timeout reproduction (`vitest run --testTimeout=5000`) surfaced the actual slow tests — and there were **two**, not one:
+
+- **The real-scrypt route tests** (login, credentials): they run the N=2^17 KDF (~0.6–2 s/call) but test *routing*, not crypto. Fixed by mocking just `hashPassword`/`verifyPassword` (via `importOriginal`, keeping the real constants + verify behavior the routes depend on). **login 9801 ms → 61 ms; credentials 6171 ms → 70 ms**, all assertions intact.
+- **A second, unrelated slow test** the user's "fix F-01a" framing would have missed: `chat-store.cache.test.ts` (PM #64) creates+reads `MAX_CACHED_CHATS (200) + margin` chats against the **real filesystem** (~500 disk ops). It's a legitimate I/O-heavy integration test — mocking disk would gut it — so it got a 30 s file-level timeout. `password.test.ts` (which legitimately CANNOT mock the KDF — it *is* the unit) got the same headroom.
+
+**Verification:** the suite that previously flaked is now green **3×/3 at the normal 15 s config**; the worst flaker (login's 5-verify loop, ~3 s isolated → ~15 s under extreme load) is now 61 ms. The broader 2–5 s test population the 5 s repro surfaced (`dependency-floor`, `agent.integration`, a `_debug` hook) has 3–7× headroom at 15 s and is intentionally left alone — chasing it would be gold-plating. **Lesson reaffirmed: confirm what flakes before fixing — the cache test was invisible to the "it's scrypt" assumption.**
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

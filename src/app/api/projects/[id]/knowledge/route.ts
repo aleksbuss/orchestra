@@ -6,6 +6,7 @@ import { importKnowledgeFile } from "@/lib/memory/knowledge";
 import { deleteMemoryByMetadata, getChunkCountsByFilename } from "@/lib/memory/memory";
 import { getProject } from "@/lib/storage/project-store";
 import { getSettings } from "@/lib/storage/settings-store";
+import { assertPrivacyModeAllowsSettings } from "@/lib/agent/agent";
 import { assertPathInside, withFileLock } from "@/lib/storage/fs-utils";
 import { dataPath } from "@/lib/storage/data-dir";
 
@@ -124,6 +125,18 @@ export async function POST(
         // DIFFERENT filenames proceed in parallel — the lock key is the
         // filePath, not the directory.
         const settings = await getSettings();
+        // Privacy Mode air-gap (PM #47/#58 class — QA audit F-19). Importing a
+        // knowledge file embeds its content via the embeddingsModel; under
+        // Privacy Mode a cloud provider would ship the file off-box. This route
+        // is a non-agent embedding entry point and must guard independently.
+        try {
+            assertPrivacyModeAllowsSettings(settings);
+        } catch (e) {
+            return NextResponse.json(
+                { error: e instanceof Error ? e.message : "Privacy Mode blocks knowledge import." },
+                { status: 403 }
+            );
+        }
         const result = await withFileLock(filePath, async () => {
             await fs.writeFile(filePath, buffer);
             // Ingest only the uploaded file (removes its old chunks first, so no duplicates)

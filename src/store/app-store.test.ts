@@ -69,8 +69,13 @@ describe("chats actions", () => {
   it("setChats replaces the list wholesale", () => {
     useAppStore.getState().setChats([chat("a"), chat("b")]);
     expect(useAppStore.getState().chats).toHaveLength(2);
-    useAppStore.getState().setChats([chat("c")]);
-    expect(useAppStore.getState().chats).toEqual([chat("c")]);
+    // Capture the factory object ONCE. `chat()` stamps `createdAt`/`updatedAt`
+    // with `new Date().toISOString()`, so re-invoking it inside
+    // `toEqual([chat("c")])` minted a SECOND, fresh timestamp; on a millisecond
+    // boundary under parallel load the two differed and flaked the deep-equal.
+    const replacement = chat("c");
+    useAppStore.getState().setChats([replacement]);
+    expect(useAppStore.getState().chats).toEqual([replacement]);
   });
 
   it("addChat PREPENDS (most-recent first matches sidebar order)", () => {

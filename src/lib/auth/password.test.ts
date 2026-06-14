@@ -17,8 +17,15 @@
  *   - malformed input never throws (returns false)
  *   - isDefaultAuthCredentials only fires on the EXACT default pair
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { scryptSync } from "node:crypto";
+
+// password.ts is the real scrypt KDF (N=2^17 ≈ 0.6–2s per hash/verify). Tests
+// that do multiple ops (hash+verify roundtrips, the case-sensitivity check) can
+// approach the global 15s timeout under parallel CI load. This file legitimately
+// CANNOT mock the KDF — it IS the unit under test — so give it headroom (F-01a
+// sibling; the route tests mock the KDF instead, since they only test routing).
+vi.setConfig({ testTimeout: 30000 });
 import {
   DEFAULT_AUTH_PASSWORD,
   DEFAULT_AUTH_PASSWORD_HASH,

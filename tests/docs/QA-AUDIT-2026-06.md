@@ -221,6 +221,21 @@ The §0.4 skeptical pass flagged the `testTimeout: 15000` Sprint-0 fix as a band
 
 ---
 
+## 0.9 Sprint 3 (frontend) — F-22: CI-gate the frontend structural invariants (2026-06-14)
+
+The biggest measured coverage gap is the frontend (F-03: 45 components, 5 tests). The cheapest high-value slice of it: the two structural invariants CLAUDE.md enforces with a **hand-run grep** — the same fragile control as F-20/F-21.
+
+- **Narrow Zustand subscriptions** (CLAUDE.md §5): no `useAppStore()` without a selector — a no-arg call subscribes to the whole store and re-renders on EVERY `set()` (a PM-class perf bug; `chat-panel` re-rendering on each SSE chats tick was the offender).
+- **Single shared `EventSource`** (Realtime Resilience / PM #5): no `new EventSource(...)` outside `use-background-sync.ts` — a rogue one exhausts the browser's 6-connection cap and kills the bus.
+
+**F-22 · DONE:** [`frontend-invariants.test.ts`](src/components/frontend-invariants.test.ts) scans all of `src/` for both (allowlisting only `use-background-sync.ts` for the one legitimate `EventSource`), with a `>100`-file floor against a vacuous pass. **Meta-tested**: a temp file with both violations turns both gates red at `file:line`. Both manual greps in CLAUDE.md now point at the gate. Measured-clean today (0 violations) — this prevents the drift, it doesn't fix a live bug.
+
+This is structural enforcement, not render coverage. Full component render tests (chat-panel's PM #5 refetch-on-`syncTick`, `MessageBubble` memoization per PM #33) remain the larger Sprint 3 effort — they need per-component SSE/Zustand/AI-SDK mocking and are a genuine multi-session body of work.
+
+**First render test landed (F-22 follow-up):** [`quick-model-selector.dom.test.tsx`](src/components/chat/quick-model-selector.dom.test.tsx) — render coverage for a previously-untested 524-LOC component, pinning the mount-fetch → model-display contract + the `disabled` guard. `chat-panel` itself was assessed and deferred: it pulls `useChat` (@ai-sdk/react) + 4 other hooks + ~8 child components + two competing fetch effects, so a clean render test is genuinely multi-mock/brittle — the honest "store-driven component first" call. **Minor finding (F-23):** writing the test surfaced DEAD CODE — `quick-model-selector`'s `activePreset !== "custom"` branch (`Preset: <name>`) is unreachable because `PresetTier` collapsed to the single literal `"custom"` (the fast/balanced/frontier tiers were removed). Cosmetic cleanup, noted not chased.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

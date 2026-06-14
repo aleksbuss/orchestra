@@ -9,6 +9,13 @@ import path from "path";
 import os from "os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// These PM #64 tests create + read MAX_CACHED_CHATS (200) + a margin of chats
+// against the REAL filesystem to prove the cache bound under realistic pressure
+// — ~500 disk ops each. That's legitimately I/O-heavy, so give them room above
+// the 15s global timeout: at the edge they intermittently flaked under parallel
+// CI load (confirmed via a low-timeout reproduction; QA audit F-01a sibling).
+vi.setConfig({ testTimeout: 30000 });
+
 let tmpDir: string;
 let chatStore: typeof import("./chat-store");
 

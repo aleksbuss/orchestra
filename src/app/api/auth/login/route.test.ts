@@ -35,6 +35,26 @@ vi.mock("@/lib/auth/rate-limit", () => ({
   recordLoginOutcome: vi.fn(),
 }));
 
+// Real scrypt (N=2^17) costs ~0.6–2s per call; this route's tests exercise
+// ROUTING, not the KDF (password.test.ts owns the real KDF round-trip). Replace
+// only the two expensive functions with deterministic fast stubs — keeping the
+// real constants (DEFAULT_AUTH_*) and the verify behavior the route depends on.
+// Fixes the F-01a timeout flake: the 5-iteration escape-hatch test below ran
+// five real verifies and intermittently blew the timeout under parallel load.
+vi.mock("@/lib/auth/password", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth/password")>();
+  const fakeHash = (pw: string) =>
+    `scrypt$teststub$${Buffer.from(String(pw)).toString("base64url")}`;
+  return {
+    ...actual,
+    hashPassword: (pw: string) => fakeHash(pw),
+    verifyPassword: (pw: string, storedHash: string) =>
+      storedHash === actual.DEFAULT_AUTH_PASSWORD_HASH
+        ? String(pw) === "admin"
+        : storedHash === fakeHash(pw),
+  };
+});
+
 import { POST } from "./route";
 import { getSettings } from "@/lib/storage/settings-store";
 import {

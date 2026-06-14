@@ -30,6 +30,25 @@ vi.mock("@/lib/auth/session", async () => {
   };
 });
 
+// Real scrypt (N=2^17) costs ~0.6–2s per call; this route's tests exercise
+// ROUTING + validation, not the KDF. Stub just the two expensive functions —
+// the `scrypt$teststub$…` envelope still satisfies the "persisted password is a
+// scrypt envelope, not plaintext" assertion. Fixes the F-01a timeout flake (the
+// username-charset loop hashed a new password per iteration).
+vi.mock("@/lib/auth/password", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/auth/password")>();
+  const fakeHash = (pw: string) =>
+    `scrypt$teststub$${Buffer.from(String(pw)).toString("base64url")}`;
+  return {
+    ...actual,
+    hashPassword: (pw: string) => fakeHash(pw),
+    verifyPassword: (pw: string, storedHash: string) =>
+      storedHash === actual.DEFAULT_AUTH_PASSWORD_HASH
+        ? String(pw) === "admin"
+        : storedHash === fakeHash(pw),
+  };
+});
+
 import { PUT } from "./route";
 import {
   getSettings,

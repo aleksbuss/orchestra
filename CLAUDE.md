@@ -172,7 +172,7 @@ export async function POST(req: Request) {
 - Every iteration of `src/lib/agent/daemon.ts` and `src/lib/cron/runtime.ts` checks `signal.aborted` between hops.
 - Background tasks that outlive a single request use a **separate `AbortController`** owned by `daemon.ts`, NOT `req.signal` — the request finishes, but the daemon keeps running. This is the one exception.
 
-**Pre-merge audit (PM #23).** Run on every PR that touches `src/lib/agent/` or `src/lib/tools/`. The brittle awk-based grep that used to live here gave false positives on multi-line argument blocks; use this Node bracket-balanced variant instead:
+**Pre-merge audit (PM #23) — now a CI gate, not a hand-run grep.** [`abort-contract.test.ts`](src/lib/agent/abort-contract.test.ts) runs the bracket-balanced scan below over EVERY non-test file under `src/` and fails the build on any generate/stream/embed callsite missing `abortSignal`. It scans the whole tree precisely because a hardcoded file list drifts: F-13 caught `blackboard.ts` outside the list, and standing the gate up caught three MORE unlisted callers (`agent-response.ts`, `tournament-aggregator.ts`, `web-task.ts`). The Node variant below is the same logic, kept for a quick local spot-check on the legacy file set:
 ```bash
 for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts src/lib/agent/reflection.ts src/lib/agent/moa-router.ts src/lib/memory/embeddings.ts src/lib/memory/blackboard.ts; do
   node -e "
@@ -196,7 +196,7 @@ for f in src/lib/agent/agent.ts src/lib/agent/moa.ts src/lib/agent/compressor.ts
   "
 done
 ```
-All seven audited files (five orchestration + `embeddings.ts` + `blackboard.ts`) should report `missing=0`. If not, that's the leak. **Note `blackboard.ts` calls the AI SDK `embed()` DIRECTLY (bypassing `embedTexts`)** — that's why it needs its own entry; a skeptical re-audit of F-12 caught it after the first pass only fixed the `embedTexts` chokepoint. Lesson: scope abort audits to the SDK primitive (`embed`/`embedMany`/`generate*`), not to a single in-house wrapper.
+These seven are the legacy spot-check list, but the **source of truth is `abort-contract.test.ts`, which scans all of `src/`** — so a new callsite in a new file is covered automatically, with nothing to keep in sync. Today's real surface is ~10 files (the seven + `agent-response.ts`, `tournament-aggregator.ts`, `web-task.ts`); all must report `missing=0`. The fixed list drifted twice (blackboard via F-13; the three extras via the F-21 gate) — which is why the gate scans the tree, not a list. Lesson: scope abort audits to the SDK primitive (`embed`/`embedMany`/`generate*`), tree-wide, not a hand-maintained file list or a single in-house wrapper.
 
 **PM #23 closed (2026-05-28 audit):** both `runAgentText` ([agent.ts:1833](src/lib/agent/agent.ts#L1833)) and `runSubordinateAgent` ([agent.ts:1992](src/lib/agent/agent.ts#L1992)) accept `abortSignal?: AbortSignal` and plumb it into their inner `generateText` calls. Callers (`cron/service.ts`, `external/handle-external-message.ts`, `tools/call-subordinate.ts`) thread the appropriate signal — daemon's `AbortController` for cron, `req.signal` for the rest. Don't reintroduce the gap.
 

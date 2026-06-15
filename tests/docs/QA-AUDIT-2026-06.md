@@ -246,6 +246,14 @@ Measuring the `withFileLock` race coverage first (the recurring discipline) show
 
 ---
 
+## 0.11 F-15 — tool.ts coverage: 24% → 37% (2026-06-15)
+
+`tool.ts` (1930 LOC) was the biggest single-file gap at ~24% lines. The untested bulk is `createAgentTools` — the ~30-tool registration. A probe answered the question that kept it untested: **`createAgentTools` imports cleanly in a test** (the CLAUDE.md "transitive imports fail in test" warning is about `agent.ts`'s `applyGlobalToolLoopGuard`, NOT this function — measuring beat the assumption again).
+
+**F-15 · DONE:** [`tool.test.ts`](src/lib/tools/tool.test.ts) — 7 tests pinning the registration + **gating** contract. The gating is a real safety boundary, not just coverage: `code_execution` MUST be absent from the ToolSet when `settings.codeExecution.enabled` is false (the agent can't run code it has no tool for); same for `memory_*` (memory.enabled), `search_web` (search usability), and `write_to_blackboard` (context.projectId). Plus a well-formedness sweep (every registered tool has a string `description` + `execute` fn) and the `response` tool's return. **Impact: tool.ts 23.87% → 37.15% lines** (+13 pts), thresholds still green. The per-tool `execute` bodies (which delegate to already-tested modules) remain the longer tail; this banked the high-value registration/gating half cheaply.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

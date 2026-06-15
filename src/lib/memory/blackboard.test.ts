@@ -273,3 +273,30 @@ describe("abortSignal forwarding (QA audit F-12 follow-up — blackboard bypasse
     );
   });
 });
+
+describe("writeFactToBlackboard — concurrency (PM #1 class: withFileLock load→mutate→save race)", () => {
+  it("N parallel fact writes ALL land — no lost update under the file lock", async () => {
+    mockedEmbed.mockResolvedValue({ embedding: [0.1, 0.2, 0.3] } as any);
+    const N = 30;
+
+    // The MoA scenario: many agents writing facts to the SAME blackboard at
+    // once. writeFactToBlackboard does load → push → cap → save; without the
+    // withFileLock around it, the N calls would each read the same snapshot and
+    // clobber one another on save (lost facts). The lock must serialize them.
+    await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        writeFactToBlackboard({
+          projectId: "p-race",
+          topic: `topic-${i}`,
+          content: `content-${i}`,
+          author: "agent",
+        })
+      )
+    );
+
+    const facts = await loadBlackboard("p-race");
+    expect(facts).toHaveLength(N);
+    // Every distinct topic survived → no read-modify-write was clobbered.
+    expect(new Set(facts.map((f) => f.topic)).size).toBe(N);
+  });
+});

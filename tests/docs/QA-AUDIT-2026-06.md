@@ -236,6 +236,16 @@ This is structural enforcement, not render coverage. Full component render tests
 
 ---
 
+## 0.10 Sprint 2 (backend depth) — F-24: blackboard concurrency stress (2026-06-15)
+
+Measuring the `withFileLock` race coverage first (the recurring discipline) showed it's **already strong**: `chat-store.test.ts` fires 50 parallel `updateChat` appends, `goal-store.test.ts` 30 parallel updates, `fs-utils.test.ts` tests the primitive's serialization directly, `chat-store.integration.test.ts` covers concurrent different-chat saves. Not the gap I'd assumed.
+
+**The one high-concurrency consumer with NO race test: the Project Blackboard.** `writeFactToBlackboard` (`blackboard.ts`) does the textbook `withFileLock`-protected `load → push → cap(500) → save` — and it's the MoA hot path (multiple agents writing facts to `.orchestra_blackboard.json` in parallel). `blackboard.test.ts` only exercised it sequentially.
+
+**F-24 · DONE:** added a 30-parallel `writeFactToBlackboard` stress test asserting all 30 distinct facts land (no read-modify-write clobber). **Meta-tested**: temporarily bypassing the `withFileLock` wrapper makes it red (`expected length 30, got 0` — the concurrent saves clobber to nothing), proving the test actually guards the lock. Same shape as the existing chat/goal concurrency tests; closes the blackboard corner of the PM #1 data-integrity surface.
+
+---
+
 ## 1. Executive Summary
 
 Orchestra is an unusually disciplined alpha codebase: 75 documented post-mortems, 2,608 passing tests, a clean `tsc --noEmit`, codified security helpers (`assertPathInside`, `assertSafeOutboundUrl`, `scrubProcessEnv`, `assertPrivacyModeAllowsSettings`), and a doc-as-code `CLAUDE.md` contract. The architecture is healthy; the gaps are in **test-suite determinism, the lint quality gate, frontend coverage, and documentation freshness** — not in core correctness.

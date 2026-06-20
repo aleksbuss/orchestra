@@ -546,15 +546,18 @@ There is uncommitted **model-wizards WIP** (`budget-banner.tsx`, `chat-panel.tsx
 ## 💻 Commands
 - **Install (Local):** `npm run setup:local`
 - **Development Server:** `npm run dev`
-- **Production Build:** `npm run build` (runs lint via `prebuild` hook — fails the build on lint *errors*; warnings are allowed and counted in CI)
+- **Production Build:** `npm run build` (runs lint via `prebuild` hook — fails the build on lint *errors*; warnings are allowed)
 - **Start Production:** `npm run start`
 - **Run Unit Tests:** `npm run test`
-- **Linting:** `npm run lint` (allows warnings) / `npm run lint:strict` (zero warnings — CI gate)
+- **Linting:** `npm run lint` (allows warnings — this is what CI runs) / `npm run lint:strict` (`--max-warnings 0`; a **local** tidiness target, NOT wired into CI — see the "What CI actually enforces" note below).
 - **TypeScript Check:** `npm run typecheck` (standalone `tsc --noEmit`)
 - **Pre-Deploy Gate:** `npm run verify` (lint + typecheck + tests + build; one-stop check before shipping)
 - **Scrub Secrets:** `npm run scrub:secrets` (before sharing the tree externally)
 - **Reset Auth:** `npm run auth:reset` (recovery from forgotten password — see "Auth escape hatches" in Security Patterns)
-- **Sync test badge:** `npm run badge:sync` (derives the README "tests" badge count from vitest's own total; `-- --check` fails CI-style if stale). The count lives ONLY in the badge now — prose is number-free — so this is the single update site (QA audit F-04). Don't hand-edit the badge number.
+- **Sync test badge:** `npm run badge:sync` (derives the README "tests" badge count from vitest's own total; `-- --check` exits non-zero if stale). The count lives ONLY in the badge — prose is number-free — so this is the single update site (QA audit F-04). Don't hand-edit the badge number. **Run it in any PR that changes the test count** — it is a *manual* hygiene step, NOT a CI gate (so it CAN drift; it had to be re-synced 2644→2701 during the 2026-06 context-management track because nothing enforced it).
+
+### What CI actually enforces (`.github/workflows/ci.yml`)
+Don't trust prose that calls something "the CI gate" — read `ci.yml`. Today it runs exactly: `npm run lint` (warnings **allowed**), `npm run test:coverage` (vitest + the per-module/global coverage floors in `vitest.config.ts`), `npm run build`, and the Playwright `e2e` job. That's it. **`lint:strict` and `badge:sync --check` are deliberately NOT in CI:** `eslint.config.mjs` keeps `no-explicit-any` / `prefer-const` / `ban-ts-comment` / `react/no-unescaped-entities` at `warn` for vendor-SDK legacy debt, and wiring `--max-warnings 0` would make CI permanently red on ~26 known warnings — the same "a permanently-red gate trains everyone to ignore it" reasoning the `audit:gate` uses for `high` advisories. Clean the warnings incrementally (the 11 dead `eslint-disable` directives were swept 2026-06; the lint config is the single rule-severity source of truth — there is no longer a vestigial `.eslintrc.json`). If you tighten `lint` toward zero warnings, wire `lint:strict` into `ci.yml` IN THE SAME PR, not before.
 
 ---
 *Note for AI Assistants: Read this file entirely before making architectural changes to Orchestra. When in doubt, read the source code of `agent.ts` or `moa.ts` before writing new logic.*

@@ -4,11 +4,8 @@ import { dispatchAgentJob } from "@/lib/agent/daemon";
 import { ensureSweepersScheduled, runAllSweepers } from "@/lib/cron/sweepers";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __orchestraCronScheduler__: CronScheduler | undefined;
-  // eslint-disable-next-line no-var
   var __orchestraBootRecoveryController__: AbortController | undefined;
-  // eslint-disable-next-line no-var
   var __orchestraShutdownHandlersInstalled__: boolean | undefined;
 }
 

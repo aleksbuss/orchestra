@@ -115,7 +115,6 @@ describe("embedTexts — error wrapping", () => {
   });
 
   it("wraps non-Error throws (string, undefined) without crashing", async () => {
-    // eslint-disable-next-line @typescript-eslint/only-throw-error
     mockedEmbed.mockRejectedValue("plain string");
     await expect(embedTexts(["x"], baseConfig)).rejects.toThrow(
       /Failed to generate embeddings: plain string/

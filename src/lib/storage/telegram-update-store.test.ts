@@ -113,7 +113,6 @@ describe("releaseTelegramUpdate — rollback for downstream failure", () => {
 
   it("is a silent no-op on non-integer updateId (defensive — webhook may pass garbage)", async () => {
     const m = await loadModule();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(m.releaseTelegramUpdate("bot", "abc" as any)).resolves.toBeUndefined();
     await expect(m.releaseTelegramUpdate("bot", 1.5)).resolves.toBeUndefined();
   });

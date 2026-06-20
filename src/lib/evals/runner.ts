@@ -134,7 +134,6 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
     const response = result.toUIMessageStreamResponse({});
     if (response.body) {
       const reader = response.body.getReader();
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done } = await reader.read();
         if (done) break;

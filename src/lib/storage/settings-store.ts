@@ -7,6 +7,7 @@ import {
 } from "@/lib/auth/password";
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
+import { stampSchemaVersion, warnIfFutureSchema } from "@/lib/storage/schema-version";
 
 const DATA_DIR = getDataDir();
 const SETTINGS_DIR = path.join(DATA_DIR, "settings");
@@ -82,6 +83,10 @@ export async function getSettings(): Promise<AppSettings> {
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) {
       return structuredClone(DEFAULT_SETTINGS);
     }
+    // Defensive load — warn if written by a newer build, then strip the
+    // schemaVersion envelope so it never enters the domain settings object.
+    warnIfFutureSchema(saved, "settings.json");
+    delete (saved as Record<string, unknown>).schemaVersion;
     // Deep merge with defaults to handle new nested fields.
     return deepMerge(
       structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>,
@@ -102,7 +107,7 @@ export async function saveSettings(
       current as unknown as Record<string, unknown>,
       settings as unknown as Record<string, unknown>
     ) as unknown as AppSettings;
-    await safeWriteFile(SETTINGS_FILE, JSON.stringify(merged, null, 2));
+    await safeWriteFile(SETTINGS_FILE, JSON.stringify(stampSchemaVersion(merged), null, 2));
     return merged;
   });
 }

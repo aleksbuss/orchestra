@@ -457,13 +457,13 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 
 Five files cross the §8 1500-line "MUST decompose next substantive PR" line. None can be split in a single PR without a comprehensive integration test scaffold — each touches a critical contract (PM #1 abortSignal, PM #5 SSE, PM #17 tool-capability detection, PM #29 flush, PM #50 code-execution). The seam analysis below is the contract to honor when the next focused PR lands.
 
-**`src/lib/agent/agent.ts` (~1550 LOC, 9 hot edits in 90d)** — orchestration core, every chat turn flows through it.
+**`src/lib/agent/agent.ts` (~1475 LOC after Phase 3, 9 hot edits in 90d — the hottest god-file, decompose-by-churn priority #1)** — orchestration core, every chat turn flows through it.
 - **Phase 1 DONE:** message/response helpers (`stripThinkingTags`, `unwrapSerializedResponseCall` PM #61, `getLast*`/`extract*` text helpers, `shouldAutoContinueAssistant`, `turnHasDeliverableAnswer` + `resolveTurnContinuation` PM #36/#69) → [`agent-response.ts`](src/lib/agent/agent-response.ts).
 - **Phase 2 DONE:** `ChatMessage`↔`ModelMessage` conversion + the per-turn LLM request logger → [`agent-messages.ts`](src/lib/agent/agent-messages.ts).
-- Both extractions are behavior-preserving (full suite green) and re-exported / re-imported so callers are unaffected. The remaining seams below are higher-risk — they restructure `runAgent`'s control flow, not pure helpers.
-- Natural seams:
-  - `agent-stream.ts` (~500): the `streamText` + SSE plumbing block at L1540, including the `pendingChatErrorClassification` writeback path.
-  - `agent-fallback.ts` (~400): the model-fallback retry chain. Touches PM #17 (`modelSupportsTools`) — keep both branches honest.
+- **Phase 3 / PR-1 DONE:** the model auto-fallback seam — `attemptModelFallback` (agent-side orchestration: classify → pick → persist → notify; PM #17) → [`agent-fallback.ts`](src/lib/agent/agent-fallback.ts). It was ~87 LOC, not the ~400 the seam list guessed — the heavy fallback primitives (`classifyModelError`/`pickFallbackModel`/`describeFallback`) already lived in [`providers/model-fallback.ts`](src/lib/providers/model-fallback.ts); only the agent-side wiring was in `agent.ts`. Single private caller (runAgent streamText `onError`), leaf-deps only → behavior-preserving move, and the function gained a focused unit test ([`agent-fallback.test.ts`](src/lib/agent/agent-fallback.test.ts), 6 cases) where it previously had only indirect integration coverage.
+- All three extractions are behavior-preserving (full suite green) and re-imported so callers are unaffected. The remaining seams below are higher-risk — they restructure `runAgent`'s control flow, not pure helpers.
+- Natural seams (remaining):
+  - `agent-stream.ts` (~500): the `streamText` + SSE plumbing block, including the `pendingChatErrorClassification` writeback path.
   - `agent-tools.ts` (~300): `ToolSet` *assembly*. NOTE: the `applyGlobalToolLoopGuard` wrap itself is ALREADY extracted to [`tool-guard.ts`](src/lib/agent/tool-guard.ts) (2026-06, to break the agent↔moa cycle so MoA proposers can share it); this remaining seam is the tool-*assembly* glue. Every callsite that builds tools for `generateText` MUST still route through `applyGlobalToolLoopGuard` (CLAUDE.md §4).
   - `agent-core.ts` (~500): the `runAgent` orchestrator that composes the above.
   - `agent.ts` itself shrinks to a re-export facade ≤200 LOC.

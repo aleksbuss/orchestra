@@ -44,7 +44,11 @@ function backupDisabled(): boolean {
   return process.env.ORCHESTRA_BACKUP_DISABLED === "true";
 }
 
-const DEFAULT_RETENTION = 10;
+// Each backup is a FULL uncompressed copy of data/ (chats, memory vectors,
+// chat-files uploads), so the on-disk footprint is roughly RETENTION × |data/|.
+// Default 7 = one week of dailies; lower it (ORCHESTRA_BACKUP_RETENTION) if
+// data/ is large. Audit fix #1 — was 10.
+const DEFAULT_RETENTION = 7;
 const DEFAULT_INTERVAL_HOURS = 24;
 
 /** Regenerable / ephemeral `data/` subdirs — excluded to keep backups lean. */
@@ -176,6 +180,53 @@ export async function listBackups(): Promise<Array<{ name: string; path: string 
     .map((name) => ({ name, path: path.join(root, name) }));
 }
 
+/**
+ * Boot-backup gate (audit fix #1). Run the boot snapshot only when there's no
+ * backup yet OR the newest is at least half an interval old — so a burst of
+ * restarts doesn't produce a full-data/ copy each time. Pure + exported for tests.
+ */
+export function shouldRunBootBackup(newestAgeMs: number | null, interval: number): boolean {
+  return newestAgeMs === null || newestAgeMs >= interval / 2;
+}
+
+/** Age (ms) of the newest backup by mtime, or null when there are none. */
+async function mostRecentBackupAgeMs(): Promise<number | null> {
+  const backups = await listBackups(); // newest first
+  if (backups.length === 0) return null;
+  try {
+    const st = await fs.stat(backups[0].path);
+    return Date.now() - st.mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Operator-facing backup health (audit fix #2) — surfaced by `/api/health` so a
+ * silently-stopped backup is observable instead of false safety. Cheap by
+ * design: one `readdir` + one `stat`, NO recursive size walk (the health route
+ * is latency-sensitive). `staleThresholdMs` lets the caller flag "backups have
+ * stopped" without re-deriving the interval.
+ */
+export async function getBackupStatus(): Promise<{
+  disabled: boolean;
+  count: number;
+  newestAgeMs: number | null;
+  staleThresholdMs: number;
+}> {
+  const staleThresholdMs = intervalMs() * 2;
+  if (backupDisabled()) {
+    return { disabled: true, count: 0, newestAgeMs: null, staleThresholdMs };
+  }
+  const backups = await listBackups();
+  return {
+    disabled: false,
+    count: backups.length,
+    newestAgeMs: await mostRecentBackupAgeMs(),
+    staleThresholdMs,
+  };
+}
+
 declare global {
   var __orchestraBackupInterval__: NodeJS.Timeout | undefined;
 }
@@ -193,7 +244,13 @@ export function ensureDataBackupScheduled(): void {
   if (globalThis.__orchestraBackupInterval__) return;
 
   // Boot snapshot — captures state before the session does anything risky.
-  void createDataBackup().catch((err) => {
+  // Audit fix #1: SKIP it when a recent backup already exists, so frequent
+  // restarts don't thrash full-data/ copies.
+  void (async () => {
+    const age = await mostRecentBackupAgeMs();
+    if (!shouldRunBootBackup(age, intervalMs())) return;
+    await createDataBackup();
+  })().catch((err) => {
     console.warn("[backup] boot backup failed (non-fatal):", err);
   });
 

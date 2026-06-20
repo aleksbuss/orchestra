@@ -23,6 +23,7 @@ import {
   detectDisagreement,
 } from "@/lib/agent/disagreement";
 import { createModel } from "@/lib/providers/llm-provider";
+import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import type { AppSettings } from "@/lib/types";
 import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
 import { agentSemaphore } from "./semaphore";
@@ -499,9 +500,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             cwd: getWorkDir(projectId),
           }
         );
+        // §4 — proposers MUST go through the same loop guard as the main agent
+        // path. Without it, a throwing tool (e.g. a flaky search_web) is caught
+        // by the per-proposer try/catch and silently DROPS this proposer's draft
+        // instead of self-healing within its step budget; proposers also lacked
+        // no-progress dedup and the A3 per-tool output cap. selectProposerTools
+        // returns undefined for tool-less roles, so wrap only when present.
+        const guardedProposerTools = proposerTools
+          ? applyGlobalToolLoopGuard(proposerTools)
+          : proposerTools;
         const augmentedSystemPrompt = augmentProposerPromptForTools(
           proposer.systemPrompt,
-          proposerTools
+          guardedProposerTools
         );
 
         const PROPOSER_TIMEOUT_MS = 120_000; // 2 minutes — generous for free/slow models
@@ -535,7 +545,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // defaulting to 2048 when unset. The final-answer paths (aggregator,
           // bypass, revisor) are uncapped — they're 1×, not N×.
           maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 4096),
-          tools: proposerTools,
+          tools: guardedProposerTools,
           // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
           // from generateText; the old `maxSteps: …` here was silently ignored
           // (it is not a CallSettings field), so generateText fell back to its
@@ -546,7 +556,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // agent path: tool proposers get up to 3 steps (call → result →
           // answer); tool-less proposers do a single generation (was the
           // PM #42 intent — a coder without tools shouldn't pay for tool rounds).
-          stopWhen: stepCountIs(proposerTools ? 3 : 1),
+          stopWhen: stepCountIs(guardedProposerTools ? 3 : 1),
           abortSignal: proposerSignal,
         });
 

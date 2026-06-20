@@ -94,7 +94,7 @@ describe("schema-version wiring (chat-store, isolated ORCHESTRA_DATA_DIR)", () =
     try {
       const chat = await getChat("future");
       expect(chat?.id).toBe("future"); // loaded, not rejected
-      expect((chat as Record<string, unknown>)?.schemaVersion).toBeUndefined(); // stripped
+      expect((chat as unknown as Record<string, unknown>)?.schemaVersion).toBeUndefined(); // stripped
       expect(warn.mock.calls.some((c) => String(c[0]).includes("NEWER Orchestra schema"))).toBe(true);
     } finally {
       warn.mockRestore();

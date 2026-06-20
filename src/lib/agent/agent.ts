@@ -6,6 +6,7 @@ import {
   type ModelMessage,
   type ToolExecutionOptions,
   type ToolSet,
+  type PrepareStepFunction,
 } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
@@ -36,6 +37,8 @@ import { createCallAgentTool } from "@/lib/swarm/tools";
 import { getSwarmSystemPrompt } from "@/lib/swarm/prompts";
 import type { SwarmRole } from "@/lib/swarm/types";
 import { compressChatHistory, estimateTokenCount } from "@/lib/agent/compressor";
+import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
+import { createTokenGovernor, capToolResultSize } from "@/lib/agent/token-governor";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import { runMoAEnsemble } from "@/lib/agent/moa";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
@@ -610,12 +613,31 @@ function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: string;
           noProgressByCall.delete(callKey);
         }
 
-        return outputWithHint;
+        // A3: cap an oversized result AFTER loop-guard bookkeeping (signature /
+        // no-progress hashing run on the full output above).
+        return capToolResultSize(outputWithHint);
       },
     } as typeof toolDef;
   }
 
   return wrappedTools;
+}
+
+/**
+ * Sprint A3 — assemble the in-flight token governor (`prepareStep`) for a
+ * tool-loop callsite. Reserves headroom equal to the same `maxOutputTokens` the
+ * call passes to the model, and reuses a pre-resolved window when the caller
+ * already has one (the interactive path) to avoid a redundant Ollama probe.
+ */
+async function buildTokenGovernor(
+  windowConfig: { provider: string; model?: string; baseUrl?: string },
+  reservedOutputTokens: number,
+  abortSignal?: AbortSignal,
+  preResolvedWindow?: number
+): Promise<PrepareStepFunction> {
+  const contextWindow =
+    preResolvedWindow ?? (await resolveContextWindow(windowConfig, { abortSignal }));
+  return createTokenGovernor({ contextWindow, reservedOutputTokens });
 }
 
 
@@ -706,6 +728,11 @@ async function runSubAgent(
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      abortSignal
+    );
     const result = await generateText({
       model,
       system: systemPrompt,
@@ -713,6 +740,7 @@ async function runSubAgent(
       messages: [{ role: "user", content: promptText }],
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
@@ -950,54 +978,69 @@ export async function runAgent(options: RunAgentOptions) {
 
   // Load existing chat history
   let chat = await getChat(options.chatId);
+
+  // Sprint A2/A3: resolve the model's REAL context window ONCE — reused for
+  // pre-flight compaction (below) AND the in-flight token governor (streamText).
+  // Ollama is probed live (/api/ps → Modelfile num_ctx → env → default) because
+  // its runtime num_ctx (e.g. 4096) is far below the trained context_length
+  // (/api/show reports 32768 for qwen2.5); cloud uses a conservative per-family map.
+  const contextWindow = await resolveContextWindow(resolvedModelConfig, {
+    abortSignal: options.abortSignal,
+  });
+
   if (chat) {
     const rawModelMessages = convertChatMessagesToModelMessages(chat.messages);
     const estimatedTokens = estimateTokenCount(rawModelMessages);
-    
-    // Semantic Context Compaction threshold — raised to 12000 tokens for modern
-    // long-context models (Gemini 3 Flash, 2.5 Pro, etc.). This gives the agent
-    // much more room before compression kicks in.
 
-    // Phase 1: Dynamic Thresholds
-    const modelIdForLimits = resolvedModelConfig.model?.toLowerCase() ?? "";
-    let contextLimit = 8000; // safe default for unknown/small models
-    if (modelIdForLimits.includes("gpt-4") || modelIdForLimits.includes("claude-3") || modelIdForLimits.includes("gemini") || modelIdForLimits.includes("128k") || modelIdForLimits.includes("qwen2.5-coder-32b")) {
-      contextLimit = 100000; // Giant context models
-    } else if (modelIdForLimits.includes("32k")) {
-      contextLimit = 30000;
-    } else if (modelIdForLimits.includes("8b") || modelIdForLimits.includes("7b") || modelIdForLimits.includes("llama3") || modelIdForLimits.includes("gemma")) {
-      contextLimit = 6000; // conservative for small local models to prevent hallucination collapses
-    }
+    // Compaction fires at 75% of the resolved window (Sprint A2).
+    const contextLimit = compactionThresholdFor(contextWindow);
 
-    if (estimatedTokens > contextLimit && chat.messages.length > 12) {
-      console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
-      publishUiSyncEvent({
-        topic: "chat",
-        chatId: options.chatId,
-        projectId: options.projectId ?? null,
-        reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
-      });
-
-      const cutoff = chat.messages.length - 8; // keep last 8 fresh for better continuity
+    // Sprint A1: gate compaction on token pressure ONLY. The old
+    // `&& chat.messages.length > 12` guard let a moderate (9–12 message) chat
+    // that genuinely exceeds the limit sail past compaction. Removing it would,
+    // however, expose a negative-slice footgun, so the archival body below is
+    // guarded explicitly — see the cutoff note.
+    if (estimatedTokens > contextLimit) {
+      // Keep the last 8 messages fresh; archive everything older. `Math.max(0)`
+      // is load-bearing: `chat.messages.length - 8` is NEGATIVE for short
+      // histories, and `slice(0, -n)` keeps the FIRST length−n items (counting
+      // from the tail), NOT none — so without the clamp a 7-message over-limit
+      // chat would archive 6 and keep 1, and a 2-message paste would emit a
+      // bogus "Deep-archiving" event + insert an EMPTY RAG memory (a wasted
+      // embed call). Clamped, "≤ 8 messages" ⇒ olderMessages empty ⇒ skip.
+      const cutoff = Math.max(0, chat.messages.length - 8);
       const olderMessages = chat.messages.slice(0, cutoff);
       const newerMessages = chat.messages.slice(cutoff);
 
-      const summary = await compressChatHistory(olderMessages, settings, options.projectId);
-      
-      // Phase 2: RAG Vector Database Archival
-      const memorySubdir = options.projectId ? `${options.projectId}` : "main";
-      try {
-        await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings, undefined, options.abortSignal);
-        console.log(`[Memory] History successfully vector-archived.`);
-      } catch (err) {
-        console.error(`[Memory] Failed to vector-archive history:`, err);
-      }
+      // Nothing old enough to archive — don't fake an archive event or pollute
+      // RAG with an empty summary. (The genuine single-giant-paste fix —
+      // compacting the current oversized turn itself — is Sprint A3/A4.)
+      if (olderMessages.length > 0) {
+        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
+        publishUiSyncEvent({
+          topic: "chat",
+          chatId: options.chatId,
+          projectId: options.projectId ?? null,
+          reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
+        });
 
-      const updated = await updateChat(options.chatId, (c) => {
-        c.messages = newerMessages;
-        return c;
-      });
-      if (updated) chat = updated;
+        const summary = await compressChatHistory(olderMessages, settings, options.projectId, options.abortSignal);
+
+        // Phase 2: RAG Vector Database Archival
+        const memorySubdir = options.projectId ? `${options.projectId}` : "main";
+        try {
+          await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings, undefined, options.abortSignal);
+          console.log(`[Memory] History successfully vector-archived.`);
+        } catch (err) {
+          console.error(`[Memory] Failed to vector-archive history:`, err);
+        }
+
+        const updated = await updateChat(options.chatId, (c) => {
+          c.messages = newerMessages;
+          return c;
+        });
+        if (updated) chat = updated;
+      }
     }
 
     const allMessages = convertChatMessagesToModelMessages(chat.messages);
@@ -1244,6 +1287,14 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
   }
 
   try {
+    // Sprint A3 — in-flight token governor. Reuses the window resolved above
+    // (preResolvedWindow) so the interactive path adds no extra Ollama probe.
+    const tokenGovernor = await buildTokenGovernor(
+      resolvedModelConfig,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal,
+      contextWindow
+    );
     // Run the agent with streaming
     const result = streamText({
     model,
@@ -1252,15 +1303,39 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
     providerOptions,
     tools: effectiveTools,
     maxRetries: 3,
+    prepareStep: tokenGovernor,
     ...(useTools
-      ? { 
-          maxSteps: MAX_TOOL_STEPS_PER_TURN,
-          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")] 
+      ? {
+          // PM #65 — AI SDK v5 removed `maxSteps` from streamText; it was a
+          // silently-ignored no-op here. The tool loop is bounded by `stopWhen`.
+          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")]
         }
       : {}),
     temperature: settings.chatModel.temperature ?? 0.7,
     maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
     abortSignal: options.abortSignal,
+    onStepFinish: async (event) => {
+      // PM #81 — incremental billing. If a multi-step loop crashes on step 3 
+      // (e.g. Rate Limit or Context Exceeded), `onFinish` might not fire or 
+      // might drop usage. We accumulate per-step to ensure actual spend is 
+      // always captured.
+      const stepUsage = event.usage;
+      if (stepUsage) {
+        try {
+          await updateChat(options.chatId, (chat) => {
+            chat.cumulativeUsage = foldTurnUsage(
+              chat.cumulativeUsage,
+              resolvedModelConfig.provider,
+              resolvedModelConfig.model,
+              { streamUsage: stepUsage }
+            );
+            return chat;
+          });
+        } catch (err) {
+          console.error("[Agent] Failed to persist step usage:", err);
+        }
+      }
+    },
     onFinish: async (event) => {
       // ── Guaranteed DAG completion — even if this callback itself throws ──
       // This is the single source of truth for "agent turn done". All paths
@@ -1318,13 +1393,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           try { await mcpCleanup(); } catch { /* non-critical */ }
         }
 
-        // PM #36 — collect the main streamText turn's usage. Vercel AI SDK
-        // returns this in the onFinish event regardless of whether the turn
-        // ended via tool-call, stop, or length. May be undefined for some
-        // providers; the accumulator handles that as a zero-add.
-        const streamUsage =
-          (event as unknown as { usage?: import("@/lib/cost/accumulator").RawUsage })
-            .usage ?? undefined;
+        // PM #36 / PM #81 — main stream usage is now tracked incrementally via
+        // `onStepFinish` to prevent dropped billing on crashes. We no longer
+        // extract it here to avoid double-counting.
 
         try {
           await updateChat(options.chatId, (chat) => {
@@ -1337,6 +1408,13 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 id: crypto.randomUUID(),
                 role: "assistant",
                 content: stripThinkingTags(continuationText),
+                createdAt: now,
+              });
+            } else if (turnExtra.uiNotice) {
+              chat.messages.push({
+                id: crypto.randomUUID(),
+                role: "assistant",
+                content: `> ⚠️ **Notice:** ${turnExtra.uiNotice}\n\n*The stream was interrupted before a final text response could be generated.*`,
                 createdAt: now,
               });
             }
@@ -1356,7 +1434,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               chat.cumulativeUsage,
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
-              { streamUsage, continuationUsage, turnExtraUsage }
+              { continuationUsage, turnExtraUsage }
             );
             return chat;
           });
@@ -1609,6 +1687,11 @@ export async function runAgentText(options: {
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal
+    );
     const generated = await generateText({
       model,
       system: systemPrompt,
@@ -1616,6 +1699,7 @@ export async function runAgentText(options: {
       providerOptions,
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
@@ -1814,6 +1898,11 @@ export async function runSubordinateAgent(options: {
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal
+    );
     const result = await generateText({
       model,
       system: systemPrompt,
@@ -1821,6 +1910,7 @@ export async function runSubordinateAgent(options: {
       providerOptions,
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),

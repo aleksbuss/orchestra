@@ -6,6 +6,8 @@ import {
   createDataBackup,
   pruneBackups,
   listBackups,
+  shouldRunBootBackup,
+  getBackupStatus,
 } from "./backup";
 
 let dataDir: string;
@@ -107,6 +109,47 @@ describe("rotation (FIFO retention)", () => {
     expect(kept).toEqual([created[4], created[3], created[2]]);
     expect(kept).not.toContain(created[0]);
     expect(kept).not.toContain(created[1]);
+  });
+});
+
+describe("shouldRunBootBackup (audit fix #1 — boot-dedup)", () => {
+  const INTERVAL = 24 * 60 * 60 * 1000;
+  it("runs when there is no backup yet", () => {
+    expect(shouldRunBootBackup(null, INTERVAL)).toBe(true);
+  });
+  it("SKIPS when the newest backup is younger than half the interval", () => {
+    expect(shouldRunBootBackup(INTERVAL / 4, INTERVAL)).toBe(false); // 6h old, < 12h
+  });
+  it("runs when the newest backup is older than half the interval", () => {
+    expect(shouldRunBootBackup(INTERVAL / 2, INTERVAL)).toBe(true);
+    expect(shouldRunBootBackup(INTERVAL * 3, INTERVAL)).toBe(true);
+  });
+});
+
+describe("getBackupStatus (audit fix #2 — observability)", () => {
+  it("reports disabled when opted out", async () => {
+    setEnv("ORCHESTRA_BACKUP_DISABLED", "true");
+    const s = await getBackupStatus();
+    expect(s.disabled).toBe(true);
+    expect(s.count).toBe(0);
+    expect(s.newestAgeMs).toBeNull();
+  });
+
+  it("reports no backups (null age) before any run", async () => {
+    const s = await getBackupStatus();
+    expect(s.disabled).toBe(false);
+    expect(s.count).toBe(0);
+    expect(s.newestAgeMs).toBeNull();
+    expect(s.staleThresholdMs).toBeGreaterThan(0);
+  });
+
+  it("reports count + a recent age after a backup", async () => {
+    await seedDataDir();
+    await createDataBackup();
+    const s = await getBackupStatus();
+    expect(s.count).toBe(1);
+    expect(s.newestAgeMs).not.toBeNull();
+    expect(s.newestAgeMs!).toBeLessThan(60_000); // just created
   });
 });
 

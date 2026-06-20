@@ -597,6 +597,39 @@ export async function GET() {
     });
   }
 
+  // Data backup (audit fix #2) — make a silently-stopped backup observable.
+  // Cheap probe (readdir + one stat); no recursive size walk.
+  try {
+    const { getBackupStatus } = await import("@/lib/storage/backup");
+    const b = await getBackupStatus();
+    const ageH = b.newestAgeMs !== null ? Math.round(b.newestAgeMs / 3_600_000) : null;
+    let status: SubsystemStatus["status"];
+    let detail: string;
+    if (b.disabled) {
+      status = "ok";
+      detail = "Disabled (ORCHESTRA_BACKUP_DISABLED).";
+    } else if (b.newestAgeMs === null) {
+      // No false alarm on a fresh install — the boot backup runs shortly after
+      // start. The "backups silently stopped" signal is the STALE branch below
+      // (backups exist but are old), not absence.
+      status = "ok";
+      detail = "No backups yet (the boot backup runs shortly after start).";
+    } else if (b.newestAgeMs > b.staleThresholdMs) {
+      status = "warn";
+      detail = `Stale — last backup ~${ageH}h ago (${b.count} kept). Backups may have stopped.`;
+    } else {
+      status = "ok";
+      detail = `${b.count} backup(s); last ~${ageH}h ago.`;
+    }
+    checks.push({ name: "data_backup", status, detail });
+  } catch (err) {
+    checks.push({
+      name: "data_backup",
+      status: "warn",
+      detail: `Could not read backup status (${err instanceof Error ? err.constructor.name : "Error"}).`,
+    });
+  }
+
   const totalMs = Date.now() - startTotal;
   const overallStatus = checks.some((c) => c.status === "error")
     ? "unhealthy"

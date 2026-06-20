@@ -43,7 +43,6 @@ describe("knowledgeQuery", () => {
   });
 
   it("turns a non-Error throw into the same string format (defensive)", async () => {
-    // eslint-disable-next-line @typescript-eslint/only-throw-error
     mocked.mockRejectedValue("plain string");
     const out = await knowledgeQuery("q", 3, ["main"], {} as any);
     expect(out).toBe("Knowledge query error: plain string");

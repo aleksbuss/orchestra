@@ -30,12 +30,14 @@ import {
   refreshOpenRouterPricingCache,
   getCachedOpenRouterPricing,
   getOpenRouterMaxOutput,
+  getOpenRouterContextWindow,
   ensureOpenRouterPricingRefreshScheduled,
   REFRESH_INTERVAL_MS,
   CACHE_TTL_MS,
   __resetOpenRouterPricingForTests,
   __seedOpenRouterPricingForTests,
   __setOpenRouterMaxOutputForTest,
+  __setOpenRouterContextLengthForTest,
 } from "./openrouter-pricing";
 import { getSettings } from "@/lib/storage/settings-store";
 
@@ -146,6 +148,37 @@ describe("PM #49 — fetchOpenRouterPricing", () => {
     expect(map.has("anthropic/claude-haiku-4-5")).toBe(true);
   });
 
+  it("captures per-model context_length (top-level + top_provider fallback, free models too)", async () => {
+    mockFetchOk({
+      data: [
+        {
+          id: "anthropic/claude-3.5-sonnet",
+          pricing: { prompt: "0.000003", completion: "0.000015" },
+          context_length: 250000,
+        },
+        {
+          // top-level absent → fall back to top_provider.context_length
+          id: "vendor/model-fallback",
+          pricing: { prompt: "0.000001", completion: "0.000002" },
+          top_provider: { context_length: 32000 },
+        },
+        {
+          // FREE model (no pricing) still contributes its window
+          id: "meta/free-model",
+          context_length: 8192,
+        },
+      ],
+    });
+    await fetchOpenRouterPricing();
+    expect(getOpenRouterContextWindow("anthropic/claude-3.5-sonnet")).toBe(250000);
+    expect(getOpenRouterContextWindow("vendor/model-fallback")).toBe(32000);
+    expect(getOpenRouterContextWindow("meta/free-model")).toBe(8192);
+    // Case-insensitive lookup.
+    expect(getOpenRouterContextWindow("Anthropic/Claude-3.5-Sonnet")).toBe(250000);
+    // Miss → undefined (resolveContextWindow falls back to the static map).
+    expect(getOpenRouterContextWindow("absent/model")).toBeUndefined();
+  });
+
   it("throws on non-200 status (caller handles fallback)", async () => {
     mockFetchStatus(503, "Service Unavailable");
     await expect(fetchOpenRouterPricing()).rejects.toThrow(/503/);
@@ -213,6 +246,25 @@ describe("PM #49 — disk cache round-trip", () => {
     expect(getOpenRouterMaxOutput("deepseek/deepseek-chat")).toBe(16_000);
     // The free model (absent from `pricing`) was persisted too.
     expect(getOpenRouterMaxOutput("meta/free-model")).toBe(4_096);
+  });
+
+  it("persists & restores per-model context window — survives a warm-cache boot", async () => {
+    __setOpenRouterContextLengthForTest(
+      new Map([
+        ["anthropic/claude-3.5-sonnet", 250000],
+        ["meta/free-model", 8192],
+      ])
+    );
+    await saveCachedOpenRouterPricing(
+      new Map([["anthropic/claude-3.5-sonnet", { inputUsdPerMillion: 3, outputUsdPerMillion: 15 }]]),
+      new Date("2026-01-01T00:00:00Z")
+    );
+    // Wipe in-memory, then reload from disk (the warm-cache path).
+    __setOpenRouterContextLengthForTest(new Map());
+    expect(getOpenRouterContextWindow("anthropic/claude-3.5-sonnet")).toBeUndefined();
+    await loadCachedOpenRouterPricing();
+    expect(getOpenRouterContextWindow("anthropic/claude-3.5-sonnet")).toBe(250000);
+    expect(getOpenRouterContextWindow("meta/free-model")).toBe(8192);
   });
 
   it("loadCachedOpenRouterPricing returns null on corrupt JSON (no throw)", async () => {

@@ -37,6 +37,9 @@ yarn-error.log*
 # data directory (chats, memory, projects)
 /data/
 
+# local full-data/ backups (storage/backup.ts) — sibling of data/, never committed
+/data-backups/
+
 # vercel
 .vercel
 

@@ -23,6 +23,9 @@ import {
   detectDisagreement,
 } from "@/lib/agent/disagreement";
 import { createModel } from "@/lib/providers/llm-provider";
+import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
+import { createTokenGovernor } from "@/lib/agent/token-governor";
+import { resolveContextWindow } from "@/lib/providers/context-window";
 import type { AppSettings } from "@/lib/types";
 import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
 import { agentSemaphore } from "./semaphore";
@@ -218,6 +221,28 @@ export interface MoAResult {
  *   1. Fan-out: Run N proposers in parallel
  *   2. Fan-in:  Aggregate results with a brain model
  */
+/**
+ * Build a context-window resolver memoized for a single ensemble run (audit fix
+ * #4). Keyed by provider|model|baseUrl; stores the in-flight PROMISE so that
+ * concurrent proposers sharing a config await ONE probe instead of racing N.
+ */
+export function createWindowResolver(
+  abortSignal?: AbortSignal
+): (config: { provider: string; model?: string; baseUrl?: string }) => Promise<number> {
+  const cache = new Map<string, Promise<number>>();
+  return (config) => {
+    const key = `${config.provider}|${config.model ?? ""}|${
+      (config as { baseUrl?: string }).baseUrl ?? ""
+    }`;
+    let p = cache.get(key);
+    if (!p) {
+      p = resolveContextWindow(config, { abortSignal });
+      cache.set(key, p);
+    }
+    return p;
+  };
+}
+
 export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const totalStart = Date.now();
   const {
@@ -231,6 +256,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     abortSignal,
     forceSwarm,
   } = options;
+
+  // Audit fix #4 — memoize context-window resolution for THIS ensemble run.
+  // resolveContextWindow probes live Ollama (/api/ps) per call; without this,
+  // N proposers + the aggregator fire up to N+1 redundant probes per turn,
+  // usually for the SAME config. Shared per provider|model|baseUrl.
+  const resolveWindow = createWindowResolver(abortSignal);
 
   // ── Step 1: Resolve model configs ──────────────────────────────────
   const workerConfig = resolveWorkerKey(
@@ -499,9 +530,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             cwd: getWorkDir(projectId),
           }
         );
+        // §4 — proposers MUST go through the same loop guard as the main agent
+        // path. Without it, a throwing tool (e.g. a flaky search_web) is caught
+        // by the per-proposer try/catch and silently DROPS this proposer's draft
+        // instead of self-healing within its step budget; proposers also lacked
+        // no-progress dedup and the A3 per-tool output cap. selectProposerTools
+        // returns undefined for tool-less roles, so wrap only when present.
+        const guardedProposerTools = proposerTools
+          ? applyGlobalToolLoopGuard(proposerTools)
+          : proposerTools;
         const augmentedSystemPrompt = augmentProposerPromptForTools(
           proposer.systemPrompt,
-          proposerTools
+          guardedProposerTools
         );
 
         const PROPOSER_TIMEOUT_MS = 120_000; // 2 minutes — generous for free/slow models
@@ -513,6 +553,21 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           proposerSignal = AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
         }
 
+        // PM #66 ceiling, lifted out so it feeds BOTH the output cap and the
+        // in-flight governor's reserve (Follow-up A3b).
+        const proposerMaxOutput = Math.min(
+          proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048,
+          4096
+        );
+        // Follow-up A3b — proposers are tool-loops too (Skeptic/researcher with
+        // search_web take up to 3 steps), so they need the SAME in-flight token
+        // governor as the main agent path: prune the payload BETWEEN steps so
+        // accreting tool results can't overflow the proposer model's real window.
+        // The per-tool output cap already rides on the loop guard; this adds the
+        // cross-step message-pruning the guard can't do. Resolved per-proposer
+        // because tiers (PM #48) can land proposers on different models/windows.
+        const proposerContextWindow = await resolveWindow(proposerConfig);
+
         const result = await generateText({
           model: workerModel,
           // PM #42 — system prompt is augmented with the Fact-Check Mandate
@@ -521,6 +576,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // verbatim.
           system: augmentedSystemPrompt,
           messages,
+          prepareStep: createTokenGovernor({
+            contextWindow: proposerContextWindow,
+            reservedOutputTokens: proposerMaxOutput,
+          }),
           // PM #48 — temperature/maxTokens read from the RESOLVED config
           // (proposerConfig), not workerConfig. A tier slot can override
           // both alongside the model id.
@@ -534,8 +593,8 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // (raised 2048 → 4096 so genuinely long drafts aren't truncated),
           // defaulting to 2048 when unset. The final-answer paths (aggregator,
           // bypass, revisor) are uncapped — they're 1×, not N×.
-          maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 4096),
-          tools: proposerTools,
+          maxOutputTokens: proposerMaxOutput,
+          tools: guardedProposerTools,
           // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
           // from generateText; the old `maxSteps: …` here was silently ignored
           // (it is not a CallSettings field), so generateText fell back to its
@@ -546,7 +605,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // agent path: tool proposers get up to 3 steps (call → result →
           // answer); tool-less proposers do a single generation (was the
           // PM #42 intent — a coder without tools shouldn't pay for tool rounds).
-          stopWhen: stepCountIs(proposerTools ? 3 : 1),
+          stopWhen: stepCountIs(guardedProposerTools ? 3 : 1),
           abortSignal: proposerSignal,
         });
 
@@ -841,6 +900,15 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   console.log(`[MoA] Starting aggregation with model: ${brainConfig.provider}/${brainConfig.model} (${aggregatorPrompt.length} chars)`);
 
+  // Follow-up A3b — govern the aggregator payload too. The aggregatorPrompt
+  // concatenates the original request + every proposer draft (+ a disagreement
+  // marker), which can dwarf the brain model's window. The governor is a no-op
+  // under budget and pair-safe above it; it's mostly future-proofing here
+  // (single-message, tool-less today) but keeps the contract uniform across
+  // every tool-loop/LLM callsite in the MoA path.
+  const aggregatorMaxOutput = resolveMaxOutputTokens(brainConfig);
+  const aggregatorContextWindow = await resolveWindow(brainConfig);
+
   try {
     const aggResult = await generateText({
       model: brainModel,
@@ -853,8 +921,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // The aggregatorPrompt already contains the original userMessage.
         { role: "user", content: aggregatorPrompt },
       ],
+      prepareStep: createTokenGovernor({
+        contextWindow: aggregatorContextWindow,
+        reservedOutputTokens: aggregatorMaxOutput,
+      }),
       temperature: 0.3,
-      maxOutputTokens: resolveMaxOutputTokens(brainConfig),
+      maxOutputTokens: aggregatorMaxOutput,
       abortSignal,
     });
 

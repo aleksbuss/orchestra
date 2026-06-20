@@ -4,24 +4,13 @@ import {
   stepCountIs,
   hasToolCall,
   type ModelMessage,
-  type ToolExecutionOptions,
-  type ToolSet,
+  type PrepareStepFunction,
 } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import type { ModelConfig } from "@/lib/types";
-import {
-  classifyModelError,
-  pickFallbackModel,
-  describeFallback,
-} from "@/lib/providers/model-fallback";
-import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
-import { saveSettings } from "@/lib/storage/settings-store";
-import { classifyChatError } from "@/lib/observability/classify-error";
-import { getCurrentTraceId, log } from "@/lib/observability/logger";
-import { dumpPostmortem } from "@/lib/observability/postmortem";
 import { buildSystemPrompt, PLAIN_CHAT_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
@@ -35,7 +24,16 @@ import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { createCallAgentTool } from "@/lib/swarm/tools";
 import { getSwarmSystemPrompt } from "@/lib/swarm/prompts";
 import type { SwarmRole } from "@/lib/swarm/types";
-import { compressChatHistory, estimateTokenCount } from "@/lib/agent/compressor";
+import {
+  compressChatHistory,
+  estimateTokenCount,
+  partitionForCompaction,
+  formatVerbatimArchive,
+  shouldSummarizeEviction,
+} from "@/lib/agent/compressor";
+import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
+import { createTokenGovernor } from "@/lib/agent/token-governor";
+import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import { runMoAEnsemble } from "@/lib/agent/moa";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
@@ -43,7 +41,6 @@ import { resolveWorkDirForProject } from "@/lib/storage/project-store";
 
 // §10 phase 1 — message/response helpers live in agent-response.ts.
 import {
-  asRecord,
   stripThinkingTags,
   unwrapSerializedResponseCall,
   getLastAssistantText,
@@ -59,6 +56,10 @@ import {
   convertModelMessageToChatMessages,
   logLLMRequest,
 } from "@/lib/agent/agent-messages";
+// §10 PR-1 — the model auto-fallback seam lives in agent-fallback.ts.
+import { attemptModelFallback } from "@/lib/agent/agent-fallback";
+// §10 — the shared turn-error reporting (onError ≡ fatal-catch) lives in agent-stream.ts.
+import { reportTurnError } from "@/lib/agent/agent-stream";
 // Re-export the public surface so existing importers keep resolving from "./agent".
 export {
   unwrapSerializedResponseCall,
@@ -69,8 +70,13 @@ export type { TurnContinuationResult };
 
 const MAX_TOOL_STEPS_PER_TURN = 30;
 const MAX_TOOL_STEPS_SUBORDINATE = 15;
-const POLL_NO_PROGRESS_BLOCK_THRESHOLD = 16;
-const POLL_BACKOFF_SCHEDULE_MS = [5000, 10000, 30000, 60000] as const;
+
+/**
+ * Sprint A4 — number of most-recent messages kept VERBATIM in the live context
+ * during pre-flight compaction (the sliding window). Everything older than this
+ * (and not a leading system anchor) is evicted to RAG.
+ */
+const KEEP_RECENT_MESSAGES = 8;
 
 // ── Swarm DAG Completion Guard ────────────────────────────────────────────────
 // Guarantees that the orchestrator node always transitions out of "running"
@@ -115,507 +121,20 @@ function resolveModelProviderOptions(provider: string) {
 }
 
 /**
- * Auto-fallback on model failures. Called from the streamText `onError`
- * handler (and the MoA equivalent, see runMoAEnsemble). If the error
- * shape matches "model is unavailable" or "model doesn't support tools",
- * we pick a replacement model from the same provider, persist it as the
- * new default in settings, and surface a `model_fallback` notification
- * so the user knows what happened.
- *
- * Intentionally NOT a retry of the current turn — that would mean
- * double LLM cost and risk of double tool execution. The user's next
- * message uses the new model automatically.
- *
- * Fire-and-forget — never throws. Any internal failure is logged but
- * not surfaced; the caller is expected to ALSO publish the original
- * error event so the UI sees the immediate failure regardless of
- * whether fallback succeeds.
+ * Sprint A3 — assemble the in-flight token governor (`prepareStep`) for a
+ * tool-loop callsite. Reserves headroom equal to the same `maxOutputTokens` the
+ * call passes to the model, and reuses a pre-resolved window when the caller
+ * already has one (the interactive path) to avoid a redundant Ollama probe.
  */
-async function attemptModelFallback(
-  error: unknown,
-  settings: AppSettings,
-  chatId: string,
-  projectId: string | null | undefined
-): Promise<void> {
-  try {
-    const failureKind = classifyModelError(error);
-    if (failureKind !== "model_not_found" && failureKind !== "no_tool_support" && failureKind !== "unknown_4xx") {
-      // Not a model-availability problem — let the existing error path
-      // surface to the user without auto-switching providers.
-      return;
-    }
-
-    const chatModel = settings.chatModel;
-    if (!chatModel?.provider || !chatModel?.model) {
-      return;
-    }
-
-    const result = await pickFallbackModel({
-      provider: chatModel.provider,
-      failedModel: chatModel.model,
-      apiKey: chatModel.apiKey || undefined,
-      baseUrl: (chatModel as { baseUrl?: string }).baseUrl,
-    });
-
-    if (!result.modelId) {
-      log.info("agent_fallback_no_candidate", {
-        chatId,
-        provider: chatModel.provider,
-        failedModel: chatModel.model,
-        failureKind,
-      });
-      return;
-    }
-
-    // Persist the new model so subsequent turns don't re-fail. We only
-    // change `chatModel.model`; everything else (provider, api key,
-    // baseUrl) stays intact.
-    await saveSettings({
-      chatModel: { ...chatModel, model: result.modelId },
-    });
-
-    const details = {
-      originalModel: chatModel.model,
-      newModel: result.modelId,
-      provider: chatModel.provider,
-      source: result.source,
-      reason: failureKind === "no_tool_support"
-        ? "no_tool_support" as const
-        : failureKind === "model_not_found"
-          ? "model_not_found" as const
-          : "unknown_4xx" as const,
-      pricing: result.pricing,
-    };
-    const { message, hint } = describeFallback(details);
-
-    log.info("agent_fallback_applied", {
-      chatId,
-      provider: chatModel.provider,
-      from: chatModel.model,
-      to: result.modelId,
-      source: result.source,
-      isFree: result.pricing?.isFree ?? false,
-    });
-
-    publishChatErrorEvent({
-      chatId,
-      projectId,
-      payload: {
-        kind: "model_fallback",
-        message,
-        hint,
-        recoverable: true,
-        modelFallback: details,
-        traceId: getCurrentTraceId(),
-      },
-    });
-  } catch (fallbackErr) {
-    // Never throw out of fallback — that would compound the original
-    // error and possibly mask the user-visible PM #17 banner.
-    log.warn("agent_fallback_failed", {
-      chatId,
-      err: fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr)),
-    });
-  }
-}
-
-
-function toStableValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => toStableValue(item));
-  }
-  const record = asRecord(value);
-  if (!record) {
-    return value;
-  }
-  return Object.keys(record)
-    .sort()
-    .reduce<Record<string, unknown>>((acc, key) => {
-      acc[key] = toStableValue(record[key]);
-      return acc;
-    }, {});
-}
-
-function stableSerialize(value: unknown): string {
-  try {
-    return JSON.stringify(toStableValue(value));
-  } catch {
-    return String(value);
-  }
-}
-
-function parseJsonObject(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed);
-    return asRecord(parsed);
-  } catch {
-    return null;
-  }
-}
-
-function getOutputTextForRecovery(output: unknown): string {
-  if (typeof output === "string") {
-    return output;
-  }
-  const record = asRecord(output);
-  if (!record) {
-    return "";
-  }
-  const out = typeof record.output === "string" ? record.output : "";
-  const err = typeof record.error === "string" ? record.error : "";
-  return [out, err].filter(Boolean).join("\n");
-}
-
-function extractNodeMissingModule(text: string): string | null {
-  const match = text.match(/Cannot find module ['"]([^'"\n]+)['"]/i);
-  const mod = match?.[1]?.trim();
-  return mod ? mod : null;
-}
-
-function extractPythonMissingModule(text: string): string | null {
-  const match = text.match(/ModuleNotFoundError:\s*No module named ['"]([^'"\n]+)['"]/i);
-  const mod = match?.[1]?.trim();
-  return mod ? mod : null;
-}
-
-function extractMissingCommand(text: string): string | null {
-  const shellMatch = text.match(/(?:^|\n)(?:\/bin\/sh:\s*\d+:\s*)?([a-zA-Z0-9._-]+):\s*not found(?:\n|$)/i);
-  if (shellMatch?.[1]) {
-    return shellMatch[1];
-  }
-  const spawnMatch = text.match(/spawn\s+([a-zA-Z0-9._/-]+)\s+ENOENT/i);
-  if (spawnMatch?.[1]) {
-    const command = spawnMatch[1].split("/").pop();
-    return command ?? null;
-  }
-  return null;
-}
-
-function buildAutoRecoveryHint(toolName: string, output: unknown): string | null {
-  if (toolName !== "code_execution" && toolName !== "process") {
-    return null;
-  }
-
-  const text = getOutputTextForRecovery(output);
-  if (!text) {
-    return null;
-  }
-
-  if (
-    /Need to install the following packages/i.test(text) &&
-    /Ok to proceed\?/i.test(text)
-  ) {
-    return [
-      "Recoverable blocker detected: interactive npx prompt is waiting for confirmation.",
-      "Next action: rerun with non-interactive form using `npx -y ...`, then continue polling/retrying in this turn.",
-      "Do not stop on this blocker.",
-    ].join("\n");
-  }
-
-  if (
-    /npm error could not determine executable to run/i.test(text) &&
-    /playwright-cli/i.test(text)
-  ) {
-    return [
-      "Recoverable blocker detected: deprecated `playwright-cli` npm package does not expose an executable.",
-      "Next action: run the command with `npx -y @playwright/cli ...` (or install `@playwright/cli` via install_packages and retry).",
-      "Do not stop on this blocker.",
-    ].join("\n");
-  }
-
-  if (text.includes("Host system is missing dependencies to run browsers")) {
-    return [
-      "Recoverable blocker detected: Playwright browser system dependencies are missing.",
-      "Next action: run install_packages with kind=\"apt\" for the required libs (or run `npx playwright install-deps` in terminal runtime), then retry the same Playwright command in this turn.",
-      "Do not stop and do not ask the user to run commands manually unless installation keeps failing after corrected retries.",
-    ].join("\n");
-  }
-
-  const missingNodeModule = extractNodeMissingModule(text);
-  if (missingNodeModule) {
-    return [
-      `Recoverable blocker detected: missing Node module "${missingNodeModule}".`,
-      `Next action: call install_packages with kind="node" and packages=["${missingNodeModule}"], then retry the same command in this turn.`,
-      "Do not stop after this error.",
-    ].join("\n");
-  }
-
-  const missingPythonModule = extractPythonMissingModule(text);
-  if (missingPythonModule) {
-    return [
-      `Recoverable blocker detected: missing Python module "${missingPythonModule}".`,
-      `Next action: call install_packages with kind="python" and packages=["${missingPythonModule}"], then retry the same command in this turn.`,
-      "Do not stop after this error.",
-    ].join("\n");
-  }
-
-  if (/playwright-cli:\s*not found/i.test(text)) {
-    return [
-      "Recoverable blocker detected: playwright-cli is not installed/in PATH.",
-      "Next action: first try running the same command via `npx -y @playwright/cli ...`.",
-      "If npx path is unavailable, call install_packages with kind=\"node\" and packages=[\"@playwright/cli\"], then retry in this turn.",
-      "Do not end the turn on this error.",
-    ].join("\n");
-  }
-
-  const missingCommand = extractMissingCommand(text);
-  if (missingCommand && missingCommand !== "node" && missingCommand !== "python3") {
-    return [
-      `Recoverable blocker detected: command "${missingCommand}" is missing.`,
-      `Next action: install it via install_packages (kind depends on ecosystem, e.g. apt for system commands), then retry the original command in this turn.`,
-      "Only report blocker after corrected install attempts fail.",
-    ].join("\n");
-  }
-
-  return null;
-}
-
-function appendRecoveryHint(output: unknown, hint: string | null): unknown {
-  if (!hint) {
-    return output;
-  }
-
-  const block = `\n\n[Auto-recovery hint]\n${hint}`;
-  if (typeof output === "string") {
-    return `${output}${block}`;
-  }
-
-  const record = asRecord(output);
-  if (!record) {
-    return output;
-  }
-
-  const current = typeof record.output === "string" ? record.output : "";
-  return {
-    ...record,
-    output: current ? `${current}${block}` : block.trim(),
-    recoverable: true,
-    recoveryHint: hint,
-  };
-}
-
-function extractDeterministicFailureSignature(output: unknown): string | null {
-  const outputRecord = asRecord(output);
-  if (outputRecord && outputRecord.success === false) {
-    const errorText =
-      typeof outputRecord.error === "string"
-        ? outputRecord.error
-        : "Tool returned success=false";
-    const codeText = typeof outputRecord.code === "string" ? outputRecord.code : "";
-    return [errorText, codeText].filter(Boolean).join(" | ");
-  }
-
-  if (typeof output !== "string") {
-    return null;
-  }
-
-  const trimmed = output.trim();
-  const parsed = parseJsonObject(trimmed);
-  if (parsed && parsed.success === false) {
-    const errorText =
-      typeof parsed.error === "string" ? parsed.error : "Tool returned success=false";
-    const codeText = typeof parsed.code === "string" ? parsed.code : "";
-    return [errorText, codeText].filter(Boolean).join(" | ");
-  }
-
-  const isExplicitFailure =
-    trimmed.startsWith("[MCP tool error]") ||
-    trimmed.startsWith("[Preflight error]") ||
-    trimmed.startsWith("[Loop guard]") ||
-    trimmed.includes("Process error:") ||
-    trimmed.includes("[Process killed after timeout]") ||
-    /Exit code:\s*-?[1-9]\d*/.test(trimmed) ||
-    /^Failed\b/i.test(trimmed) ||
-    /^Skill ".+" not found\./i.test(trimmed) ||
-    (/\bnot found\b/i.test(trimmed) &&
-      !/No relevant memories found\./i.test(trimmed));
-
-  if (!isExplicitFailure) {
-    return null;
-  }
-
-  return trimmed.length > 400 ? `${trimmed.slice(0, 400)}...` : trimmed;
-}
-
-function isPollLikeCall(toolName: string, input: unknown): boolean {
-  if (toolName !== "process") {
-    return false;
-  }
-  const record = asRecord(input);
-  if (!record) {
-    return false;
-  }
-  const action = typeof record.action === "string" ? record.action : "";
-  return action === "poll" || action === "log";
-}
-
-function normalizeNoProgressValue(value: unknown): unknown {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed.length > 1000 ? `${trimmed.slice(0, 1000)}...` : trimmed;
-  }
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 8).map((item) => normalizeNoProgressValue(item));
-  }
-
-  const record = asRecord(value);
-  if (!record) {
-    return value;
-  }
-
-  const out: Record<string, unknown> = {};
-  for (const [key, raw] of Object.entries(record)) {
-    if (key === "output" && typeof raw === "string") {
-      out[key] = raw.length > 1000 ? `${raw.slice(0, 1000)}...` : raw;
-      continue;
-    }
-    if (key === "attempts" && Array.isArray(raw)) {
-      out[key] = raw.slice(0, 3).map((item) => normalizeNoProgressValue(item));
-      continue;
-    }
-    out[key] = normalizeNoProgressValue(raw);
-  }
-
-  return out;
-}
-
-function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: string; parentNodeId?: string }): ToolSet {
-  let lastDeterministicFailure: { callKey: string; signature: string } | null = null;
-  const noProgressByCall = new Map<string, { hash: string; count: number }>();
-  const wrappedTools: ToolSet = {};
-
-  for (const [toolName, toolDef] of Object.entries(tools)) {
-    if (toolName === "response" || typeof toolDef.execute !== "function") {
-      wrappedTools[toolName] = toolDef;
-      continue;
-    }
-
-    wrappedTools[toolName] = {
-      ...toolDef,
-      execute: async (input: unknown, options: ToolExecutionOptions) => {
-        const callKey = `${toolName}:${stableSerialize(input)}`;
-        const previousNoProgress = noProgressByCall.get(callKey);
-        if (
-          previousNoProgress &&
-          previousNoProgress.count >= POLL_NO_PROGRESS_BLOCK_THRESHOLD &&
-          isPollLikeCall(toolName, input)
-        ) {
-          const scheduleIdx = Math.min(
-            previousNoProgress.count - POLL_NO_PROGRESS_BLOCK_THRESHOLD,
-            POLL_BACKOFF_SCHEDULE_MS.length - 1
-          );
-          const retryInMs = POLL_BACKOFF_SCHEDULE_MS[scheduleIdx] ?? 60000;
-          return (
-            `[Loop guard] Detected no-progress polling loop for "${toolName}".\n` +
-            `Repeated identical result ${previousNoProgress.count} times.\n` +
-            `Back off for ~${retryInMs}ms or report the background task as stuck.`
-          );
-        }
-
-        if (lastDeterministicFailure?.callKey === callKey) {
-          return (
-            `[Loop guard] Blocked repeated tool call "${toolName}" with identical arguments.\n` +
-            `Previous deterministic error: ${lastDeterministicFailure.signature}\n` +
-            "Change arguments based on the tool error before retrying."
-          );
-        }
-
-        // DAG: publish tool_node start event
-        const toolNodeId = dagContext ? crypto.randomUUID() : undefined;
-        if (dagContext && toolName !== "call_agent" && toolName !== "process") {
-          const inputRecord = asRecord(input);
-          const summary = inputRecord
-            ? (typeof inputRecord.code === "string" ? inputRecord.code.slice(0, 80) : typeof inputRecord.query === "string" ? inputRecord.query.slice(0, 80) : typeof inputRecord.message === "string" ? inputRecord.message.slice(0, 80) : toolName)
-            : toolName;
-          publishUiSyncEvent({
-            topic: "chat",
-            chatId: dagContext.chatId,
-            nodeType: "tool_node",
-            swarmNode: {
-              nodeId: toolNodeId!,
-              parentNodeId: dagContext.parentNodeId,
-              role: "tool",
-              taskSummary: summary,
-              status: "running",
-              startedAt: new Date().toISOString(),
-              toolName,
-            },
-          });
-        }
-
-        let outputWithHint: unknown;
-        let isError = false;
-
-        try {
-          const output = await toolDef.execute!(input as never, options as never);
-          const recoveryHint = buildAutoRecoveryHint(toolName, output);
-          outputWithHint = appendRecoveryHint(output, recoveryHint);
-        } catch (err) {
-          isError = true;
-          const errMsg = err instanceof Error ? err.message : String(err);
-          console.error(`[agent:Self-Healing] Tool ${toolName} failed:`, errMsg);
-          outputWithHint = `[Tool Execution Failed]: ${errMsg}\n[Self-Healing Prompt]: Your previous tool call crashed. Check your arguments (e.g. missing required fields, wrong enums, syntax errors) and try calling the tool again correctly. Do not repeat the exact same mistake.`;
-        }
-
-        const failureSignature = extractDeterministicFailureSignature(outputWithHint);
-        const finalStatus = (isError || failureSignature) ? "error" : "completed";
-
-        // DAG: publish tool_node completion or error
-        if (dagContext && toolNodeId) {
-          publishUiSyncEvent({
-            topic: "chat",
-            chatId: dagContext.chatId,
-            nodeType: "tool_node",
-            swarmNode: {
-              nodeId: toolNodeId,
-              parentNodeId: dagContext.parentNodeId,
-              role: "tool",
-              taskSummary: toolName,
-              status: finalStatus,
-              completedAt: new Date().toISOString(),
-              toolName,
-            },
-          });
-        }
-
-        if (failureSignature) {
-          lastDeterministicFailure = {
-            callKey,
-            signature: failureSignature,
-          };
-        } else {
-          lastDeterministicFailure = null;
-        }
-
-        if (isPollLikeCall(toolName, input)) {
-          const outputHash = stableSerialize(normalizeNoProgressValue(outputWithHint));
-          const previous = noProgressByCall.get(callKey);
-          if (previous && previous.hash === outputHash) {
-            noProgressByCall.set(callKey, {
-              hash: outputHash,
-              count: previous.count + 1,
-            });
-          } else {
-            noProgressByCall.set(callKey, {
-              hash: outputHash,
-              count: 1,
-            });
-          }
-        } else {
-          noProgressByCall.delete(callKey);
-        }
-
-        return outputWithHint;
-      },
-    } as typeof toolDef;
-  }
-
-  return wrappedTools;
+async function buildTokenGovernor(
+  windowConfig: { provider: string; model?: string; baseUrl?: string },
+  reservedOutputTokens: number,
+  abortSignal?: AbortSignal,
+  preResolvedWindow?: number
+): Promise<PrepareStepFunction> {
+  const contextWindow =
+    preResolvedWindow ?? (await resolveContextWindow(windowConfig, { abortSignal }));
+  return createTokenGovernor({ contextWindow, reservedOutputTokens });
 }
 
 
@@ -706,6 +225,11 @@ async function runSubAgent(
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      abortSignal
+    );
     const result = await generateText({
       model,
       system: systemPrompt,
@@ -713,6 +237,7 @@ async function runSubAgent(
       messages: [{ role: "user", content: promptText }],
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
@@ -950,54 +475,103 @@ export async function runAgent(options: RunAgentOptions) {
 
   // Load existing chat history
   let chat = await getChat(options.chatId);
+
+  // Sprint A2/A3: resolve the model's REAL context window ONCE — reused for
+  // pre-flight compaction (below) AND the in-flight token governor (streamText).
+  // Ollama is probed live (/api/ps → Modelfile num_ctx → env → default) because
+  // its runtime num_ctx (e.g. 4096) is far below the trained context_length
+  // (/api/show reports 32768 for qwen2.5); cloud uses a conservative per-family map.
+  const contextWindow = await resolveContextWindow(resolvedModelConfig, {
+    abortSignal: options.abortSignal,
+  });
+
   if (chat) {
     const rawModelMessages = convertChatMessagesToModelMessages(chat.messages);
     const estimatedTokens = estimateTokenCount(rawModelMessages);
-    
-    // Semantic Context Compaction threshold — raised to 12000 tokens for modern
-    // long-context models (Gemini 3 Flash, 2.5 Pro, etc.). This gives the agent
-    // much more room before compression kicks in.
 
-    // Phase 1: Dynamic Thresholds
-    const modelIdForLimits = resolvedModelConfig.model?.toLowerCase() ?? "";
-    let contextLimit = 8000; // safe default for unknown/small models
-    if (modelIdForLimits.includes("gpt-4") || modelIdForLimits.includes("claude-3") || modelIdForLimits.includes("gemini") || modelIdForLimits.includes("128k") || modelIdForLimits.includes("qwen2.5-coder-32b")) {
-      contextLimit = 100000; // Giant context models
-    } else if (modelIdForLimits.includes("32k")) {
-      contextLimit = 30000;
-    } else if (modelIdForLimits.includes("8b") || modelIdForLimits.includes("7b") || modelIdForLimits.includes("llama3") || modelIdForLimits.includes("gemma")) {
-      contextLimit = 6000; // conservative for small local models to prevent hallucination collapses
-    }
+    // Compaction fires at 75% of the resolved window (Sprint A2).
+    const contextLimit = compactionThresholdFor(contextWindow);
 
-    if (estimatedTokens > contextLimit && chat.messages.length > 12) {
-      console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
-      publishUiSyncEvent({
-        topic: "chat",
-        chatId: options.chatId,
-        projectId: options.projectId ?? null,
-        reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
-      });
+    // Sprint A1: gate compaction on token pressure ONLY. The old
+    // `&& chat.messages.length > 12` guard let a moderate (9–12 message) chat
+    // that genuinely exceeds the limit sail past compaction.
+    if (estimatedTokens > contextLimit) {
+      // Sprint A4 — sliding-window + anchors. Keep leading SYSTEM anchors (task
+      // framing) and the most-recent-K messages VERBATIM in the live context;
+      // only the middle tail is evicted. That tail is archived to RAG TWICE:
+      //   (1) VERBATIM — exact artifacts (stack traces, file contents, API keys)
+      //       must stay byte-for-byte retrievable, never paraphrased away. This
+      //       is the core A4 fix: LLM-summarization alone destroyed exact strings.
+      //   (2) Dense LLM summary — cheap narrative continuity for the Router/RAG.
+      // `partitionForCompaction` returns an EMPTY `evicted` for short histories
+      // (≤ anchors + K), so the guard below also kills the old negative-slice
+      // footgun that emitted bogus "Deep-archiving" events + empty RAG inserts.
+      const { anchors, evicted, recent } = partitionForCompaction(
+        chat.messages,
+        KEEP_RECENT_MESSAGES
+      );
 
-      const cutoff = chat.messages.length - 8; // keep last 8 fresh for better continuity
-      const olderMessages = chat.messages.slice(0, cutoff);
-      const newerMessages = chat.messages.slice(cutoff);
+      if (evicted.length > 0) {
+        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
+        publishUiSyncEvent({
+          topic: "chat",
+          chatId: options.chatId,
+          projectId: options.projectId ?? null,
+          reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
+        });
 
-      const summary = await compressChatHistory(olderMessages, settings, options.projectId);
-      
-      // Phase 2: RAG Vector Database Archival
-      const memorySubdir = options.projectId ? `${options.projectId}` : "main";
-      try {
-        await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings, undefined, options.abortSignal);
-        console.log(`[Memory] History successfully vector-archived.`);
-      } catch (err) {
-        console.error(`[Memory] Failed to vector-archive history:`, err);
+        const memorySubdir = options.projectId ? `${options.projectId}` : "main";
+        const archivedAt = new Date().toISOString();
+
+        // (1) Verbatim archive — exact strings survive compaction unparaphrased.
+        try {
+          await insertMemory(
+            `Archived Chat History (verbatim) [${archivedAt}]:\n${formatVerbatimArchive(evicted)}`,
+            "Auto-Archive",
+            memorySubdir,
+            settings,
+            undefined,
+            options.abortSignal
+          );
+        } catch (err) {
+          console.error(`[Memory] Failed to vector-archive verbatim history:`, err);
+        }
+
+        // (2) Dense summary — narrative continuity. GATED (audit fix #3): the
+        // summary is an extra LLM call (compressChatHistory) + a second embed.
+        // For a SMALL eviction the verbatim copy above already IS the summary,
+        // so we skip it — a small-window model (Ollama 4096) compacts often and
+        // shouldn't pay an LLM round-trip + duplicate RAG record each time. Only
+        // a substantial tail (where a dense paraphrase actually compresses many
+        // messages) earns the summary. Paraphrase is acceptable ONLY because the
+        // verbatim copy is the source of truth for exact text.
+        const evictedTokens = estimateTokenCount(convertChatMessagesToModelMessages(evicted));
+        if (shouldSummarizeEviction(evictedTokens)) {
+          const summary = await compressChatHistory(evicted, settings, options.projectId, options.abortSignal);
+          try {
+            await insertMemory(
+              `Archived Chat History (summary) [${archivedAt}]:\n${summary}`,
+              "Auto-Archive",
+              memorySubdir,
+              settings,
+              undefined,
+              options.abortSignal
+            );
+            console.log(`[Memory] History successfully vector-archived (verbatim + summary).`);
+          } catch (err) {
+            console.error(`[Memory] Failed to vector-archive history summary:`, err);
+          }
+        } else {
+          console.log(`[Memory] History vector-archived (verbatim only — evicted ${evictedTokens} tokens below summary threshold).`);
+        }
+
+        // Live context = anchors + recent window, both kept VERBATIM.
+        const updated = await updateChat(options.chatId, (c) => {
+          c.messages = [...anchors, ...recent];
+          return c;
+        });
+        if (updated) chat = updated;
       }
-
-      const updated = await updateChat(options.chatId, (c) => {
-        c.messages = newerMessages;
-        return c;
-      });
-      if (updated) chat = updated;
     }
 
     const allMessages = convertChatMessagesToModelMessages(chat.messages);
@@ -1244,6 +818,14 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
   }
 
   try {
+    // Sprint A3 — in-flight token governor. Reuses the window resolved above
+    // (preResolvedWindow) so the interactive path adds no extra Ollama probe.
+    const tokenGovernor = await buildTokenGovernor(
+      resolvedModelConfig,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal,
+      contextWindow
+    );
     // Run the agent with streaming
     const result = streamText({
     model,
@@ -1252,15 +834,39 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
     providerOptions,
     tools: effectiveTools,
     maxRetries: 3,
+    prepareStep: tokenGovernor,
     ...(useTools
-      ? { 
-          maxSteps: MAX_TOOL_STEPS_PER_TURN,
-          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")] 
+      ? {
+          // PM #65 — AI SDK v5 removed `maxSteps` from streamText; it was a
+          // silently-ignored no-op here. The tool loop is bounded by `stopWhen`.
+          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")]
         }
       : {}),
     temperature: settings.chatModel.temperature ?? 0.7,
     maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
     abortSignal: options.abortSignal,
+    onStepFinish: async (event) => {
+      // PM #81 — incremental billing. If a multi-step loop crashes on step 3 
+      // (e.g. Rate Limit or Context Exceeded), `onFinish` might not fire or 
+      // might drop usage. We accumulate per-step to ensure actual spend is 
+      // always captured.
+      const stepUsage = event.usage;
+      if (stepUsage) {
+        try {
+          await updateChat(options.chatId, (chat) => {
+            chat.cumulativeUsage = foldTurnUsage(
+              chat.cumulativeUsage,
+              resolvedModelConfig.provider,
+              resolvedModelConfig.model,
+              { streamUsage: stepUsage }
+            );
+            return chat;
+          });
+        } catch (err) {
+          console.error("[Agent] Failed to persist step usage:", err);
+        }
+      }
+    },
     onFinish: async (event) => {
       // ── Guaranteed DAG completion — even if this callback itself throws ──
       // This is the single source of truth for "agent turn done". All paths
@@ -1318,13 +924,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           try { await mcpCleanup(); } catch { /* non-critical */ }
         }
 
-        // PM #36 — collect the main streamText turn's usage. Vercel AI SDK
-        // returns this in the onFinish event regardless of whether the turn
-        // ended via tool-call, stop, or length. May be undefined for some
-        // providers; the accumulator handles that as a zero-add.
-        const streamUsage =
-          (event as unknown as { usage?: import("@/lib/cost/accumulator").RawUsage })
-            .usage ?? undefined;
+        // PM #36 / PM #81 — main stream usage is now tracked incrementally via
+        // `onStepFinish` to prevent dropped billing on crashes. We no longer
+        // extract it here to avoid double-counting.
 
         try {
           await updateChat(options.chatId, (chat) => {
@@ -1337,6 +939,13 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 id: crypto.randomUUID(),
                 role: "assistant",
                 content: stripThinkingTags(continuationText),
+                createdAt: now,
+              });
+            } else if (turnExtra.uiNotice) {
+              chat.messages.push({
+                id: crypto.randomUUID(),
+                role: "assistant",
+                content: `> ⚠️ **Notice:** ${turnExtra.uiNotice}\n\n*The stream was interrupted before a final text response could be generated.*`,
                 createdAt: now,
               });
             }
@@ -1356,7 +965,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               chat.cumulativeUsage,
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
-              { streamUsage, continuationUsage, turnExtraUsage }
+              { continuationUsage, turnExtraUsage }
             );
             return chat;
           });
@@ -1373,52 +982,20 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       }
     },
     onError: ({ error }) => {
-      // Called when the stream itself errors (network cut, provider timeout, etc.)
-      // This fires even when SSE disconnects mid-stream, so we guarantee DAG cleanup.
+      // Called when the stream itself errors (network cut, provider timeout,
+      // upstream 404, etc.) — fires even when SSE disconnects mid-stream, so we
+      // guarantee DAG cleanup here. The classify → structured log → chat-error
+      // SSE event → forensic postmortem plumbing is shared with the fatal catch
+      // via reportTurnError (agent-stream.ts); PM #17 lives in that shared path.
       //
-      // PM #17 / Sprint 3 — this is the path that previously left the user
-      // staring at a blank chat pane. The Vercel SDK's `streamText` swallowed
-      // the upstream 404 (no endpoints support tool use) into the stream
-      // and the frontend never rendered anything. Now we ALSO publish a
-      // structured `chat-error` event so the UI knows what happened.
-      //
-      // 2026-05 — added auto-fallback: when the failure shape matches
-      // "model deprecated / no tool support", try to pick a replacement
-      // model from the same provider, persist it to settings, and
-      // surface a friendly `model_fallback` notification instead of a
-      // hard error. The user's next message uses the new model
-      // automatically. We intentionally do NOT retry the current turn
-      // (would mean double LLM cost and complex stream replay).
-      const payload = classifyChatError(error, getCurrentTraceId());
-      log.error("agent_stream_error", {
-        chatId: options.chatId,
-        projectId: options.projectId,
-        kind: payload.kind,
-        message: payload.message,
-        err: error instanceof Error ? error : new Error(String(error)),
-      });
-
-      // Fire-and-forget — we want the rest of onError to run synchronously
-      // (DAG cleanup, postmortem dump, sync events) while the fallback
-      // lookup happens in the background. If fallback succeeds, it
-      // publishes its own `model_fallback` chat-error event AFTER the
-      // PM #17 error event, so the UI sees both: "something failed" and
-      // then "we switched models for next time".
-      void attemptModelFallback(error, settings, options.chatId, options.projectId);
-
-      publishChatErrorEvent({
-        chatId: options.chatId,
-        projectId: options.projectId,
-        payload,
-      });
-      // Sprint 5 — durable forensic snapshot. Best-effort, never throws.
-      // The .catch is belt-and-braces around a function whose own contract
-      // already guarantees no-throw; we keep it so a regression in the
-      // contract can't poison the SSE stream's onError path.
-      const traceId = getCurrentTraceId();
-      if (traceId) {
-        void dumpPostmortem({
-          traceId,
+      // PM #17 — publish the structured error FIRST (synchronously, inside
+      // reportTurnError), THEN kick off the background model-fallback. Fallback
+      // is fire-and-forget and async, so its own `model_fallback` event always
+      // lands AFTER the error event the UI must render immediately. We do NOT
+      // retry the current turn (double LLM cost + complex stream replay).
+      void reportTurnError(
+        error,
+        {
           chatId: options.chatId,
           projectId: options.projectId,
           request: {
@@ -1428,10 +1005,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             currentPath: options.currentPath,
           },
           settings,
-          errorClassification: payload,
-          err: error,
-        }).catch(() => undefined);
-      }
+        },
+        { logEvent: "agent_stream_error", awaitPostmortem: false }
+      );
+      void attemptModelFallback(error, settings, options.chatId, options.projectId);
       publishOrchestratorFinished(
         options.chatId,
         options.projectId,
@@ -1449,49 +1026,26 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
   return result;
 
   } catch (error) {
-    // PM #17 / Sprint 3 — same surface contract as the `onError` path above:
-    // (1) structured log line carrying the trace-id, (2) structured chat
-    // error event so the UI shows something actionable, (3) DAG cleanup,
-    // (4) re-throw so the route handler can return a non-200.
-    const payload = classifyChatError(error, getCurrentTraceId());
-    log.error("agent_fatal_error", {
-      chatId: options.chatId,
-      projectId: options.projectId,
-      kind: payload.kind,
-      message: payload.message,
-      err: error instanceof Error ? error : new Error(String(error)),
-    });
-    publishChatErrorEvent({
-      chatId: options.chatId,
-      projectId: options.projectId,
-      payload,
-    });
-    // Sprint 5 — durable forensic snapshot for the fatal-catch path.
-    // Awaited (not fire-and-forget) here because we're inside a regular
-    // try/catch and the `await` cannot prevent the rethrow below.
-    const fatalTraceId = getCurrentTraceId();
-    if (fatalTraceId) {
-      try {
-        await dumpPostmortem({
-          traceId: fatalTraceId,
-          chatId: options.chatId,
-          projectId: options.projectId,
-          request: {
-            userMessage: options.userMessage,
-            swarmEnabled: options.swarmEnabled !== false,
-            preset: options.preset,
-            currentPath: options.currentPath,
-          },
-          settings,
-          errorClassification: payload,
-          err: error,
-        });
-      } catch {
-        // dumpPostmortem already swallows internally; this catch is the
-        // outer belt-and-braces against a future regression of that
-        // contract.
-      }
-    }
+    // PM #17 / Sprint 3 — same surface contract as the streamText `onError`
+    // path (shared via reportTurnError): structured log + chat-error event +
+    // forensic postmortem. Here the postmortem is AWAITED — we're inside a
+    // regular try/catch and the await can't prevent the rethrow — then DAG
+    // cleanup + rethrow so the route handler returns a non-200.
+    await reportTurnError(
+      error,
+      {
+        chatId: options.chatId,
+        projectId: options.projectId,
+        request: {
+          userMessage: options.userMessage,
+          swarmEnabled: options.swarmEnabled !== false,
+          preset: options.preset,
+          currentPath: options.currentPath,
+        },
+        settings,
+      },
+      { logEvent: "agent_fatal_error", awaitPostmortem: true }
+    );
 
     if (mcpCleanup) {
       try { await mcpCleanup(); } catch { /* non-critical */ }
@@ -1609,6 +1163,11 @@ export async function runAgentText(options: {
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal
+    );
     const generated = await generateText({
       model,
       system: systemPrompt,
@@ -1616,6 +1175,7 @@ export async function runAgentText(options: {
       providerOptions,
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
@@ -1814,6 +1374,11 @@ export async function runSubordinateAgent(options: {
   });
 
   try {
+    const tokenGovernor = await buildTokenGovernor(
+      settings.chatModel,
+      resolveMaxOutputTokens(settings.chatModel),
+      options.abortSignal
+    );
     const result = await generateText({
       model,
       system: systemPrompt,
@@ -1821,6 +1386,7 @@ export async function runSubordinateAgent(options: {
       providerOptions,
       tools,
       maxRetries: 3,
+      prepareStep: tokenGovernor,
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),

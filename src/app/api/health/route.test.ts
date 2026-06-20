@@ -152,7 +152,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 15 subsystems by name in a stable order", async () => {
+  it("reports all 16 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -185,6 +185,9 @@ describe("GET /api/health — happy path", () => {
       // only; live liveness happens on call_mcp_tool invocation. Probing
       // every health call would spawn N processes / hit external networks.
       "mcp_servers",
+      // Audit fix #2 — full-data/ backup freshness. A silently-stopped backup
+      // is otherwise invisible (false safety); this surfaces last-backup age.
+      "data_backup",
     ]);
   });
 });

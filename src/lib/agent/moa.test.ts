@@ -380,6 +380,31 @@ describe("runMoAEnsemble — Aggregator must NOT receive consecutive user messag
   }, 30_000);
 });
 
+describe("Follow-up A3b — proposers + aggregator attach the in-flight token governor", () => {
+  it("every proposer and the aggregator generateText call carries a prepareStep function", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(new Error("force fallback to MOA_PROPOSERS"));
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as any);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do the thing",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // 5 fallback proposers + 1 synthesis aggregator — ALL must be governed.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    for (const call of mockedGenerateText.mock.calls) {
+      const args = call[0] as { prepareStep?: unknown };
+      expect(
+        typeof args.prepareStep,
+        "A3b: every proposer + aggregator generateText must attach " +
+          "createTokenGovernor so in-loop payload growth is pruned between steps."
+      ).toBe("function");
+    }
+  }, 30_000);
+});
+
 describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", () => {
   // The Router runs on `utilityModel` (often a cheap model). When the user
   // has explicitly pinned the "Force Swarm" toggle in the UI, the Router's

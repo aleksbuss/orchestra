@@ -8,6 +8,7 @@ import {
   withFileLock,
   safeWriteFile,
 } from "@/lib/storage/fs-utils";
+import { stampSchemaVersion, warnIfFutureSchema } from "@/lib/storage/schema-version";
 
 const DATA_DIR = getDataDir();
 const CHATS_DIR = path.join(DATA_DIR, "chats");
@@ -134,7 +135,7 @@ async function flushNow(chatId: string): Promise<void> {
   try {
     const filePath = chatFilePath(chatId);
     await withFileLock(filePath, async () => {
-      await safeWriteFile(filePath, JSON.stringify(entry.chat, null, 2));
+      await safeWriteFile(filePath, JSON.stringify(stampSchemaVersion(entry.chat), null, 2));
     });
     await updateIndexItem(entry.chat);
     publishUiSyncEvent({
@@ -479,6 +480,10 @@ export async function getChat(chatId: string): Promise<Chat | null> {
     try {
       const content = await fs.readFile(filePath, "utf-8");
       const parsedRaw = JSON.parse(content);
+      // Defensive load — warn loudly if this chat was written by a newer build
+      // (a save here would drop fields it doesn't understand). ChatSchema below
+      // strips the schemaVersion envelope, so it never enters the domain object.
+      warnIfFutureSchema(parsedRaw, `chat ${chatId}`);
       const parseResult = ChatSchema.safeParse(parsedRaw);
 
       if (!parseResult.success) {

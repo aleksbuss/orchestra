@@ -184,11 +184,29 @@ function contentTokenLength(content: unknown): number {
 }
 
 /**
- * BPE token count of a string. Falls back to the old char/3.5 heuristic if the
- * tokenizer throws on a pathological input — never let estimation crash the run.
+ * Above this many characters, skip exact BPE and use the char heuristic.
+ *
+ * BPE cost is O(length); a single 200 KB tool-result dump costs one full encode
+ * per governor step (memoized per message, but still one encode). Two reasons the
+ * exact count is pointless past this size: (1) the payload is already far over any
+ * real context window, so it WILL be pruned/compacted/capped regardless of the
+ * exact number; (2) `capToolResultSize` truncates string tool-results to 24 KB
+ * before they reach the model anyway. The char heuristic OVER-counts vs BPE
+ * (~chars/3.5 vs ~chars/4), i.e. it errs toward MORE pressure — the safe
+ * direction (prune earlier, never overflow). This also keeps estimation bounded
+ * under v8 coverage instrumentation, where a 40 KB encode can exceed a 15 s
+ * per-test timeout.
+ */
+const EXACT_BPE_CHAR_CAP = 20_000;
+
+/**
+ * BPE token count of a string. Uses the char heuristic for oversized strings
+ * (see `EXACT_BPE_CHAR_CAP`) and falls back to it if the tokenizer throws on a
+ * pathological input — never let estimation crash or stall the run.
  */
 function countTokens(text: string): number {
   if (!text) return 0;
+  if (text.length > EXACT_BPE_CHAR_CAP) return Math.ceil(text.length / 3.5);
   try {
     return encode(text).length;
   } catch {

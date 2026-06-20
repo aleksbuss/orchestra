@@ -24,6 +24,8 @@ import {
 } from "@/lib/agent/disagreement";
 import { createModel } from "@/lib/providers/llm-provider";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
+import { createTokenGovernor } from "@/lib/agent/token-governor";
+import { resolveContextWindow } from "@/lib/providers/context-window";
 import type { AppSettings } from "@/lib/types";
 import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
 import { agentSemaphore } from "./semaphore";
@@ -523,6 +525,23 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           proposerSignal = AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
         }
 
+        // PM #66 ceiling, lifted out so it feeds BOTH the output cap and the
+        // in-flight governor's reserve (Follow-up A3b).
+        const proposerMaxOutput = Math.min(
+          proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048,
+          4096
+        );
+        // Follow-up A3b — proposers are tool-loops too (Skeptic/researcher with
+        // search_web take up to 3 steps), so they need the SAME in-flight token
+        // governor as the main agent path: prune the payload BETWEEN steps so
+        // accreting tool results can't overflow the proposer model's real window.
+        // The per-tool output cap already rides on the loop guard; this adds the
+        // cross-step message-pruning the guard can't do. Resolved per-proposer
+        // because tiers (PM #48) can land proposers on different models/windows.
+        const proposerContextWindow = await resolveContextWindow(proposerConfig, {
+          abortSignal,
+        });
+
         const result = await generateText({
           model: workerModel,
           // PM #42 — system prompt is augmented with the Fact-Check Mandate
@@ -531,6 +550,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // verbatim.
           system: augmentedSystemPrompt,
           messages,
+          prepareStep: createTokenGovernor({
+            contextWindow: proposerContextWindow,
+            reservedOutputTokens: proposerMaxOutput,
+          }),
           // PM #48 — temperature/maxTokens read from the RESOLVED config
           // (proposerConfig), not workerConfig. A tier slot can override
           // both alongside the model id.
@@ -544,7 +567,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // (raised 2048 → 4096 so genuinely long drafts aren't truncated),
           // defaulting to 2048 when unset. The final-answer paths (aggregator,
           // bypass, revisor) are uncapped — they're 1×, not N×.
-          maxOutputTokens: Math.min(proposerConfig.maxTokens ?? workerConfig.maxTokens ?? 2048, 4096),
+          maxOutputTokens: proposerMaxOutput,
           tools: guardedProposerTools,
           // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
           // from generateText; the old `maxSteps: …` here was silently ignored
@@ -851,6 +874,17 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   console.log(`[MoA] Starting aggregation with model: ${brainConfig.provider}/${brainConfig.model} (${aggregatorPrompt.length} chars)`);
 
+  // Follow-up A3b — govern the aggregator payload too. The aggregatorPrompt
+  // concatenates the original request + every proposer draft (+ a disagreement
+  // marker), which can dwarf the brain model's window. The governor is a no-op
+  // under budget and pair-safe above it; it's mostly future-proofing here
+  // (single-message, tool-less today) but keeps the contract uniform across
+  // every tool-loop/LLM callsite in the MoA path.
+  const aggregatorMaxOutput = resolveMaxOutputTokens(brainConfig);
+  const aggregatorContextWindow = await resolveContextWindow(brainConfig, {
+    abortSignal,
+  });
+
   try {
     const aggResult = await generateText({
       model: brainModel,
@@ -863,8 +897,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // The aggregatorPrompt already contains the original userMessage.
         { role: "user", content: aggregatorPrompt },
       ],
+      prepareStep: createTokenGovernor({
+        contextWindow: aggregatorContextWindow,
+        reservedOutputTokens: aggregatorMaxOutput,
+      }),
       temperature: 0.3,
-      maxOutputTokens: resolveMaxOutputTokens(brainConfig),
+      maxOutputTokens: aggregatorMaxOutput,
       abortSignal,
     });
 

@@ -221,6 +221,28 @@ export interface MoAResult {
  *   1. Fan-out: Run N proposers in parallel
  *   2. Fan-in:  Aggregate results with a brain model
  */
+/**
+ * Build a context-window resolver memoized for a single ensemble run (audit fix
+ * #4). Keyed by provider|model|baseUrl; stores the in-flight PROMISE so that
+ * concurrent proposers sharing a config await ONE probe instead of racing N.
+ */
+export function createWindowResolver(
+  abortSignal?: AbortSignal
+): (config: { provider: string; model?: string; baseUrl?: string }) => Promise<number> {
+  const cache = new Map<string, Promise<number>>();
+  return (config) => {
+    const key = `${config.provider}|${config.model ?? ""}|${
+      (config as { baseUrl?: string }).baseUrl ?? ""
+    }`;
+    let p = cache.get(key);
+    if (!p) {
+      p = resolveContextWindow(config, { abortSignal });
+      cache.set(key, p);
+    }
+    return p;
+  };
+}
+
 export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const totalStart = Date.now();
   const {
@@ -234,6 +256,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     abortSignal,
     forceSwarm,
   } = options;
+
+  // Audit fix #4 — memoize context-window resolution for THIS ensemble run.
+  // resolveContextWindow probes live Ollama (/api/ps) per call; without this,
+  // N proposers + the aggregator fire up to N+1 redundant probes per turn,
+  // usually for the SAME config. Shared per provider|model|baseUrl.
+  const resolveWindow = createWindowResolver(abortSignal);
 
   // ── Step 1: Resolve model configs ──────────────────────────────────
   const workerConfig = resolveWorkerKey(
@@ -538,9 +566,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // The per-tool output cap already rides on the loop guard; this adds the
         // cross-step message-pruning the guard can't do. Resolved per-proposer
         // because tiers (PM #48) can land proposers on different models/windows.
-        const proposerContextWindow = await resolveContextWindow(proposerConfig, {
-          abortSignal,
-        });
+        const proposerContextWindow = await resolveWindow(proposerConfig);
 
         const result = await generateText({
           model: workerModel,
@@ -881,9 +907,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // (single-message, tool-less today) but keeps the contract uniform across
   // every tool-loop/LLM callsite in the MoA path.
   const aggregatorMaxOutput = resolveMaxOutputTokens(brainConfig);
-  const aggregatorContextWindow = await resolveContextWindow(brainConfig, {
-    abortSignal,
-  });
+  const aggregatorContextWindow = await resolveWindow(brainConfig);
 
   try {
     const aggResult = await generateText({

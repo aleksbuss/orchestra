@@ -26,7 +26,6 @@ describe("PM #27 — MCP SSRF guard on HTTP transport URL", () => {
   // and the console.error overload set (which TS resolves as a tuple with
   // optional rest args). The mock is implementation-detail; we only read
   // the call args below.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let consoleErrorSpy: any;
 
   beforeEach(() => {

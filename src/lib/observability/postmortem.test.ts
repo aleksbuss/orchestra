@@ -288,7 +288,6 @@ describe("dumpPostmortem — defensive contracts", () => {
       request: { userMessage: "x", swarmEnabled: false },
       settings: sampleSettings(),
       errorClassification: sampleClassification,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       err: "plain string thrown" as any,
     });
     const pm = await loadPostmortem("T-string-err");

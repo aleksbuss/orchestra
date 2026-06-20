@@ -66,7 +66,6 @@ describe("createCallAgentTool — delegation contract", () => {
 
   it("converts a non-Error throw (string, number, undefined) into a returned string", async () => {
     const onDelegate = vi.fn(async () => {
-      // eslint-disable-next-line @typescript-eslint/only-throw-error
       throw "plain string thrown";
     });
     const t = createCallAgentTool(onDelegate) as unknown as ToolWithExecute;

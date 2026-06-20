@@ -61,7 +61,6 @@ describe("memorySave", () => {
   });
 
   it("returns a stringified non-Error throw without crashing", async () => {
-    // eslint-disable-next-line @typescript-eslint/only-throw-error
     mockedInsert.mockRejectedValue("plain throw");
     const out = await memorySave("text", "area", "main", fakeSettings());
     expect(out).toBe("Failed to save memory: plain throw");

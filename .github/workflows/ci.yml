@@ -27,6 +27,13 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Typecheck
+        # Standalone `tsc --noEmit`. `next build` only type-checks files in the
+        # app graph, so a type error in a *.test.ts (or any non-imported module)
+        # slips through CI without this — exactly how a bad cast in
+        # schema-version.test.ts reached a PR. Catch the whole tree here.
+        run: npm run typecheck
+
       - name: Unit tests + coverage thresholds (vitest)
         # Coverage gates live in vitest.config.ts. The job fails if any
         # per-module floor or the global floor regresses. Raising floors

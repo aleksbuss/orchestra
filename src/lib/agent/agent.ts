@@ -11,10 +11,6 @@ import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import type { ModelConfig } from "@/lib/types";
-import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
-import { classifyChatError } from "@/lib/observability/classify-error";
-import { getCurrentTraceId, log } from "@/lib/observability/logger";
-import { dumpPostmortem } from "@/lib/observability/postmortem";
 import { buildSystemPrompt, PLAIN_CHAT_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
@@ -61,6 +57,8 @@ import {
 } from "@/lib/agent/agent-messages";
 // §10 PR-1 — the model auto-fallback seam lives in agent-fallback.ts.
 import { attemptModelFallback } from "@/lib/agent/agent-fallback";
+// §10 — the shared turn-error reporting (onError ≡ fatal-catch) lives in agent-stream.ts.
+import { reportTurnError } from "@/lib/agent/agent-stream";
 // Re-export the public surface so existing importers keep resolving from "./agent".
 export {
   unwrapSerializedResponseCall,
@@ -972,52 +970,20 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       }
     },
     onError: ({ error }) => {
-      // Called when the stream itself errors (network cut, provider timeout, etc.)
-      // This fires even when SSE disconnects mid-stream, so we guarantee DAG cleanup.
+      // Called when the stream itself errors (network cut, provider timeout,
+      // upstream 404, etc.) — fires even when SSE disconnects mid-stream, so we
+      // guarantee DAG cleanup here. The classify → structured log → chat-error
+      // SSE event → forensic postmortem plumbing is shared with the fatal catch
+      // via reportTurnError (agent-stream.ts); PM #17 lives in that shared path.
       //
-      // PM #17 / Sprint 3 — this is the path that previously left the user
-      // staring at a blank chat pane. The Vercel SDK's `streamText` swallowed
-      // the upstream 404 (no endpoints support tool use) into the stream
-      // and the frontend never rendered anything. Now we ALSO publish a
-      // structured `chat-error` event so the UI knows what happened.
-      //
-      // 2026-05 — added auto-fallback: when the failure shape matches
-      // "model deprecated / no tool support", try to pick a replacement
-      // model from the same provider, persist it to settings, and
-      // surface a friendly `model_fallback` notification instead of a
-      // hard error. The user's next message uses the new model
-      // automatically. We intentionally do NOT retry the current turn
-      // (would mean double LLM cost and complex stream replay).
-      const payload = classifyChatError(error, getCurrentTraceId());
-      log.error("agent_stream_error", {
-        chatId: options.chatId,
-        projectId: options.projectId,
-        kind: payload.kind,
-        message: payload.message,
-        err: error instanceof Error ? error : new Error(String(error)),
-      });
-
-      // Fire-and-forget — we want the rest of onError to run synchronously
-      // (DAG cleanup, postmortem dump, sync events) while the fallback
-      // lookup happens in the background. If fallback succeeds, it
-      // publishes its own `model_fallback` chat-error event AFTER the
-      // PM #17 error event, so the UI sees both: "something failed" and
-      // then "we switched models for next time".
-      void attemptModelFallback(error, settings, options.chatId, options.projectId);
-
-      publishChatErrorEvent({
-        chatId: options.chatId,
-        projectId: options.projectId,
-        payload,
-      });
-      // Sprint 5 — durable forensic snapshot. Best-effort, never throws.
-      // The .catch is belt-and-braces around a function whose own contract
-      // already guarantees no-throw; we keep it so a regression in the
-      // contract can't poison the SSE stream's onError path.
-      const traceId = getCurrentTraceId();
-      if (traceId) {
-        void dumpPostmortem({
-          traceId,
+      // PM #17 — publish the structured error FIRST (synchronously, inside
+      // reportTurnError), THEN kick off the background model-fallback. Fallback
+      // is fire-and-forget and async, so its own `model_fallback` event always
+      // lands AFTER the error event the UI must render immediately. We do NOT
+      // retry the current turn (double LLM cost + complex stream replay).
+      void reportTurnError(
+        error,
+        {
           chatId: options.chatId,
           projectId: options.projectId,
           request: {
@@ -1027,10 +993,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             currentPath: options.currentPath,
           },
           settings,
-          errorClassification: payload,
-          err: error,
-        }).catch(() => undefined);
-      }
+        },
+        { logEvent: "agent_stream_error", awaitPostmortem: false }
+      );
+      void attemptModelFallback(error, settings, options.chatId, options.projectId);
       publishOrchestratorFinished(
         options.chatId,
         options.projectId,
@@ -1048,49 +1014,26 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
   return result;
 
   } catch (error) {
-    // PM #17 / Sprint 3 — same surface contract as the `onError` path above:
-    // (1) structured log line carrying the trace-id, (2) structured chat
-    // error event so the UI shows something actionable, (3) DAG cleanup,
-    // (4) re-throw so the route handler can return a non-200.
-    const payload = classifyChatError(error, getCurrentTraceId());
-    log.error("agent_fatal_error", {
-      chatId: options.chatId,
-      projectId: options.projectId,
-      kind: payload.kind,
-      message: payload.message,
-      err: error instanceof Error ? error : new Error(String(error)),
-    });
-    publishChatErrorEvent({
-      chatId: options.chatId,
-      projectId: options.projectId,
-      payload,
-    });
-    // Sprint 5 — durable forensic snapshot for the fatal-catch path.
-    // Awaited (not fire-and-forget) here because we're inside a regular
-    // try/catch and the `await` cannot prevent the rethrow below.
-    const fatalTraceId = getCurrentTraceId();
-    if (fatalTraceId) {
-      try {
-        await dumpPostmortem({
-          traceId: fatalTraceId,
-          chatId: options.chatId,
-          projectId: options.projectId,
-          request: {
-            userMessage: options.userMessage,
-            swarmEnabled: options.swarmEnabled !== false,
-            preset: options.preset,
-            currentPath: options.currentPath,
-          },
-          settings,
-          errorClassification: payload,
-          err: error,
-        });
-      } catch {
-        // dumpPostmortem already swallows internally; this catch is the
-        // outer belt-and-braces against a future regression of that
-        // contract.
-      }
-    }
+    // PM #17 / Sprint 3 — same surface contract as the streamText `onError`
+    // path (shared via reportTurnError): structured log + chat-error event +
+    // forensic postmortem. Here the postmortem is AWAITED — we're inside a
+    // regular try/catch and the await can't prevent the rethrow — then DAG
+    // cleanup + rethrow so the route handler returns a non-200.
+    await reportTurnError(
+      error,
+      {
+        chatId: options.chatId,
+        projectId: options.projectId,
+        request: {
+          userMessage: options.userMessage,
+          swarmEnabled: options.swarmEnabled !== false,
+          preset: options.preset,
+          currentPath: options.currentPath,
+        },
+        settings,
+      },
+      { logEvent: "agent_fatal_error", awaitPostmortem: true }
+    );
 
     if (mcpCleanup) {
       try { await mcpCleanup(); } catch { /* non-critical */ }

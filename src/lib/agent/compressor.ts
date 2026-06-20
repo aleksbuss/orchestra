@@ -1,4 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
+import { encode } from "gpt-tokenizer/encoding/cl100k_base";
 import { createModel } from "@/lib/providers/llm-provider";
 import type { AppSettings, ChatMessage } from "@/lib/types";
 
@@ -12,6 +13,52 @@ You MUST preserve:
 
 Remove all conversational filler (e.g., "hello", "let me do that", "here is the result").
 Format your output as a concise markdown list of facts and states.`;
+
+/**
+ * Sprint A4 — sliding-window + anchors partition for pre-flight compaction.
+ *
+ * Splits a chat history into three byte-for-byte slices:
+ *  - `anchors`  — leading `system` messages (task framing / system context).
+ *                 Pinned to the live context VERBATIM; never evicted.
+ *  - `recent`   — the last `keepRecent` non-anchor messages. Kept VERBATIM.
+ *  - `evicted`  — the middle tail. Archived to RAG (verbatim + summary), then
+ *                 dropped from the live context.
+ *
+ * For a short history (`messages.length <= anchors + keepRecent`) `evicted` is
+ * EMPTY — the caller skips archival entirely, which also kills the old
+ * negative-slice footgun (a 2-message paste must not emit a bogus archive event
+ * nor an empty RAG insert).
+ */
+export function partitionForCompaction(
+  messages: ChatMessage[],
+  keepRecent: number
+): { anchors: ChatMessage[]; evicted: ChatMessage[]; recent: ChatMessage[] } {
+  let anchorEnd = 0;
+  while (anchorEnd < messages.length && messages[anchorEnd].role === "system") {
+    anchorEnd++;
+  }
+  const anchors = messages.slice(0, anchorEnd);
+  const rest = messages.slice(anchorEnd);
+
+  const keep = Math.max(0, keepRecent);
+  const recentStart = Math.max(0, rest.length - keep);
+  const evicted = rest.slice(0, recentStart);
+  const recent = rest.slice(recentStart);
+
+  return { anchors, evicted, recent };
+}
+
+/**
+ * Sprint A4 — render messages to a byte-for-byte archive string for RAG. Unlike
+ * `compressChatHistory` (an LLM paraphrase), this preserves exact artifacts —
+ * stack traces, file contents, API keys — so they stay retrievable verbatim
+ * after compaction.
+ */
+export function formatVerbatimArchive(messages: ChatMessage[]): string {
+  return messages
+    .map((m) => `[${m.role.toUpperCase()}]: ${m.content}`)
+    .join("\n\n");
+}
 
 export async function compressChatHistory(
   messages: ChatMessage[],
@@ -52,33 +99,66 @@ export async function compressChatHistory(
 }
 
 /**
- * Heuristic to estimate token count since we lack tiktoken in browser/edge easily.
- * Roughly 3.5 to 4 characters per token for English/Code.
+ * Estimate the token count of a message array.
  *
- * Sprint A1 (context-management track): `content` on a `ModelMessage` is NOT
- * always a string. Tool-call / tool-result / multimodal turns carry an ARRAY of
- * parts (see `convertChatMessagesToModelMessages` in agent-messages.ts). The old
- * `(m.content as string)?.length` returned the ARRAY LENGTH (e.g. `1` for a
- * single 50 KB tool-result), so a tool-loop that read large files was estimated
- * at near-zero tokens and never triggered compaction — the root cause of the
- * mid-loop context-overflow crashes. We now sum the character length of every
- * part. The /3.5 divisor stays a rough English/code heuristic; swapping in a real
- * BPE tokenizer (and per-language calibration) is a deliberate follow-up.
+ * Sprint "real tokenizer" (context-management track): replaces the old
+ * `Math.ceil(chars / 3.5)` heuristic with a real BPE tokenizer
+ * (`gpt-tokenizer`, OpenAI `cl100k_base` — pure JS, edge-safe, no native deps).
+ *
+ * Sprint A1 invariant (KEPT): `content` on a `ModelMessage` is NOT always a
+ * string — tool-call / tool-result / multimodal turns carry an ARRAY of parts.
+ * The old `(m.content as string)?.length` counted the ARRAY LENGTH (`1` for a
+ * 50 KB tool-result), so a file-reading tool-loop estimated near-zero tokens and
+ * never compacted — the root mid-loop-overflow bug. We still traverse every part
+ * and tokenize its text/serialized payload.
+ *
+ * Two deliberate caveats:
+ *  - `cl100k_base` is exact for OpenAI only; Llama/Gemini/Qwen tokenize denser,
+ *    especially on non-Latin scripts and code. We multiply by `SAFETY_MARGIN`
+ *    so the PRE-FLIGHT estimate never UNDER-counts (under-counting = late
+ *    compaction = overflow; over-counting only compacts a little early).
+ *  - For GROUND TRUTH, callers should prefer the provider-reported `usage`
+ *    (already surfaced in `onStepFinish`); this estimate is for the pre-flight /
+ *    in-flight-governor path where no usage is available yet.
+ *
+ * Per-message results are memoized in a `WeakMap` keyed on the message object,
+ * because the in-flight governor (`token-governor.ts`) calls this repeatedly over
+ * overlapping suffixes of the SAME message objects while sliding the window — a
+ * naive re-encode each call would be O(n²) over the (potentially large) payload.
  */
+const SAFETY_MARGIN = 1.15;
+
+const messageTokenCache = new WeakMap<object, number>();
+
 export function estimateTokenCount(messages: ModelMessage[]): number {
-  let count = 0;
+  let total = 0;
   for (const m of messages) {
-    count += contentCharLength(m.content);
+    total += messageTokens(m);
   }
-  return Math.ceil(count / 3.5);
+  return total;
+}
+
+function messageTokens(message: ModelMessage): number {
+  if (message != null && typeof message === "object") {
+    const cached = messageTokenCache.get(message);
+    if (cached !== undefined) return cached;
+  }
+  const raw = contentTokenLength(message?.content);
+  // Margin applied per message; empty content ⇒ 0 (ceil(0 * margin) = 0), which
+  // preserves the "empty/null content ⇒ 0 tokens" contract.
+  const withMargin = Math.ceil(raw * SAFETY_MARGIN);
+  if (message != null && typeof message === "object") {
+    messageTokenCache.set(message, withMargin);
+  }
+  return withMargin;
 }
 
 /**
- * Character count of a `ModelMessage["content"]`, robust to both the string form
- * and the array-of-parts form (text / tool-call / tool-result / file / image).
+ * Token count of a `ModelMessage["content"]`, robust to both the string form and
+ * the array-of-parts form (text / tool-call / tool-result / file / image).
  */
-function contentCharLength(content: unknown): number {
-  if (typeof content === "string") return content.length;
+function contentTokenLength(content: unknown): number {
+  if (typeof content === "string") return countTokens(content);
   if (!Array.isArray(content)) return 0;
 
   let total = 0;
@@ -87,32 +167,45 @@ function contentCharLength(content: unknown): number {
     const p = part as Record<string, unknown>;
     if (typeof p.text === "string") {
       // { type: "text", text }
-      total += p.text.length;
+      total += countTokens(p.text);
     } else if (p.type === "tool-call") {
       // { type: "tool-call", toolName, input }
-      total += stringLen(p.toolName) + serializedLen(p.input);
+      total += countTokens(asString(p.toolName)) + countTokens(serialize(p.input));
     } else if (p.type === "tool-result") {
       // { type: "tool-result", toolName, output: { type, value } }
-      total += stringLen(p.toolName) + serializedLen(p.output);
+      total += countTokens(asString(p.toolName)) + countTokens(serialize(p.output));
     } else {
-      // Unknown/multimodal part (image/file/etc.) — fall back to its serialized
-      // size so large inline payloads still register as context pressure.
-      total += serializedLen(part);
+      // Unknown/multimodal part (image/file/etc.) — tokenize its serialized form
+      // so large inline payloads still register as context pressure.
+      total += countTokens(serialize(part));
     }
   }
   return total;
 }
 
-function stringLen(v: unknown): number {
-  return typeof v === "string" ? v.length : 0;
+/**
+ * BPE token count of a string. Falls back to the old char/3.5 heuristic if the
+ * tokenizer throws on a pathological input — never let estimation crash the run.
+ */
+function countTokens(text: string): number {
+  if (!text) return 0;
+  try {
+    return encode(text).length;
+  } catch {
+    return Math.ceil(text.length / 3.5);
+  }
 }
 
-function serializedLen(v: unknown): number {
-  if (v == null) return 0;
-  if (typeof v === "string") return v.length;
+function asString(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+function serialize(v: unknown): string {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
   try {
-    return JSON.stringify(v).length;
+    return JSON.stringify(v);
   } catch {
-    return 0;
+    return "";
   }
 }

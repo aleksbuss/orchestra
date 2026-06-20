@@ -90,6 +90,27 @@ describe("governMessages — Stage 2: recency window safety", () => {
     expect(out[out.length - 1]).toEqual({ role: "user", content: "latest question" });
   });
 
+  // Sprint A4 — the slide can leave two same-role messages adjacent. Strict
+  // models (Gemma, Anthropic — §1 MoA "no consecutive user messages") reject
+  // that, so the window must be coalesced before it goes back to the SDK.
+  it("merges consecutive same-role messages the slide leaves adjacent", () => {
+    const messages: ModelMessage[] = [
+      { role: "user", content: big(40000) }, // evicted by the slide
+      { role: "user", content: "alpha" },
+      { role: "user", content: "beta" },
+    ];
+    const out = governMessages(messages, 2000);
+
+    // No two adjacent messages share a role — the strict-model invariant.
+    for (let i = 1; i < out.length; i++) {
+      expect(out[i].role).not.toBe(out[i - 1].role);
+    }
+    // The two recent user turns were coalesced, not dropped.
+    const merged = out.map((m) => m.content).join(" ");
+    expect(merged).toContain("alpha");
+    expect(merged).toContain("beta");
+  });
+
   it("never begins the kept window on an orphaned tool-result", () => {
     const messages: ModelMessage[] = [
       { role: "assistant", content: big(40000) }, // forces the slide boundary forward

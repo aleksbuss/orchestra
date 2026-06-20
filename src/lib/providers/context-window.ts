@@ -1,4 +1,5 @@
 import { combineWithTimeout } from "@/lib/util/abort-signal";
+import { getOpenRouterContextWindow } from "@/lib/cost/openrouter-pricing";
 
 /**
  * Sprint A2 — single source of truth for "how many tokens fit in this model's
@@ -176,6 +177,16 @@ export async function resolveContextWindow(
   if (isLocal) {
     const probed = await probeOllamaContextWindow(query, opts?.abortSignal);
     if (probed != null) return probed;
+  }
+
+  // OpenRouter exposes each model's EXACT `context_length` in its live `/models`
+  // catalog (cached in openrouter-pricing.ts). Prefer it over the static family
+  // map — the map is a coarse per-family guess, while this is the authoritative
+  // per-model window. Empty until the first fetch/disk-warm lands, in which case
+  // we fall through to the family map (which also matches OpenRouter-prefixed ids).
+  if (query.provider === "openrouter" && query.model) {
+    const exact = getOpenRouterContextWindow(query.model);
+    if (exact != null && exact > 0) return exact;
   }
 
   const fromMap = lookupStaticContextWindow(query.model ?? "");

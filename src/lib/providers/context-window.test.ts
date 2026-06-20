@@ -6,6 +6,10 @@ import {
   resolveContextWindow,
   COMPACTION_THRESHOLD_RATIO,
 } from "./context-window";
+import {
+  __setOpenRouterContextLengthForTest,
+  __resetOpenRouterPricingForTests,
+} from "@/lib/cost/openrouter-pricing";
 
 describe("lookupStaticContextWindow", () => {
   it.each([
@@ -70,6 +74,54 @@ describe("resolveContextWindow — cloud (no probe)", () => {
     const win = await resolveContextWindow({ provider: "openrouter", model: "weird/unknown-model" });
     expect(win).toBe(8000);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveContextWindow — OpenRouter exact window from live cache", () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  afterEach(() => {
+    fetchSpy.mockReset();
+    __resetOpenRouterPricingForTests();
+  });
+
+  it("prefers the cached per-model context_length over the static family map", async () => {
+    // Static map for the claude family = 200000; the live catalog reports this
+    // specific OpenRouter listing at 250000 — the exact value must win.
+    __setOpenRouterContextLengthForTest(
+      new Map([["anthropic/claude-3.5-sonnet", 250000]])
+    );
+    const win = await resolveContextWindow({
+      provider: "openrouter",
+      model: "anthropic/claude-3.5-sonnet",
+    });
+    expect(win).toBe(250000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the static family map when the model isn't cached", async () => {
+    __setOpenRouterContextLengthForTest(new Map([["some/other-model", 123000]]));
+    const win = await resolveContextWindow({
+      provider: "openrouter",
+      model: "anthropic/claude-3.5-sonnet",
+    });
+    expect(win).toBe(200000); // static map, not the unrelated cache entry
+  });
+
+  it("is case-insensitive on the model id", async () => {
+    __setOpenRouterContextLengthForTest(new Map([["vendor/model-x", 64000]]));
+    const win = await resolveContextWindow({
+      provider: "openrouter",
+      model: "Vendor/Model-X",
+    });
+    expect(win).toBe(64000);
+  });
+
+  it("ignores the cache for a non-openrouter provider", async () => {
+    // A coincidental id collision must NOT leak an OpenRouter window into a
+    // direct-provider lookup.
+    __setOpenRouterContextLengthForTest(new Map([["gpt-4o", 999999]]));
+    const win = await resolveContextWindow({ provider: "openai", model: "gpt-4o" });
+    expect(win).toBe(128000); // static map
   });
 });
 

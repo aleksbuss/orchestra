@@ -18,6 +18,8 @@ When working on this repository, you must strictly follow these rules:
 
 If you cannot answer "what does the request flow look like for the change I am about to make?" — go read `request-flow.md` before writing code.
 
+> **🚧 Active work (2026-06): the Context-Management track.** Sprints A1–A3 + the MoA loop-guard fix are committed (`e4b30f0`, `8a20839`). **Sprint A4 and three follow-up sprints REMAIN — see the "🧵 Context-Management Track (Sprints A1–A4)" section below for the exact, ready-to-execute actions.** If you are resuming this project's work, start there.
+
 ---
 
 ## 🛠 Tech Stack
@@ -511,6 +513,41 @@ Five files cross the §8 1500-line "MUST decompose next substantive PR" line. No
 - The lockfile pins the resolved URL + a SHA-512 integrity hash. CI installs and clean `npm install` work exactly the same as registry packages, with one caveat: **the build host must be able to reach `cdn.sheetjs.com` outbound**. Air-gapped / proxy-restricted environments need either a local mirror of the tarball or a pre-populated `npm cache`. Document this requirement in any deployment runbook.
 - **API surface used (verify still present before next bump):** `XLSX.read(buffer, { type: "buffer" })`, `workbook.SheetNames`, `workbook.Sheets[name]`, `XLSX.utils.sheet_to_csv(sheet, { FS, RS })` in [`src/lib/memory/loaders/xlsx-loader.ts`](src/lib/memory/loaders/xlsx-loader.ts). Tests also use `XLSX.utils.book_new`, `XLSX.utils.aoa_to_sheet`, `XLSX.utils.book_append_sheet`, `XLSX.write`.
 - **If you ever need to bump:** check `https://docs.sheetjs.com/docs/getting-started/installation/nodejs` for the latest CDN URL, install via `npm install <url>`, run the xlsx-loader test suite, run a non-ASCII round-trip (PM #18 Cyrillic/CJK/emoji) as the loader's regression guard.
+
+---
+
+## 🧵 Context-Management Track (Sprints A1–A4) — Status & Handoff
+
+A 2026-06 track that fixed **silent context-window overflow** (especially local/Ollama models) and the brittle model-name-regex window guess. New modules: [`context-window.ts`](src/lib/providers/context-window.ts), [`token-governor.ts`](src/lib/agent/token-governor.ts), [`tool-guard.ts`](src/lib/agent/tool-guard.ts). Commits: `e4b30f0` (A1–A3), `8a20839` (MoA loop-guard extraction).
+
+### ✅ Contracts now in force (DONE — do not regress)
+
+- **A1 — token estimation.** `estimateTokenCount` ([compressor.ts](src/lib/agent/compressor.ts)) MUST sum characters INSIDE array `content` (tool-call/tool-result/multimodal parts), NOT call `.length` on the array (that returns part-count → a 50 KB tool result estimated at ~0 tokens, the root of mid-loop overflow). The `runAgent` compaction gates on token pressure ONLY (no message-count guard); the cutoff uses `Math.max(0, len-8)` + an `olderMessages.length > 0` guard — a negative `slice(0, len-8)` keeps the FIRST n items, not none, and would emit bogus "Deep-archiving" events + empty RAG inserts.
+- **A2 — real context window.** The compaction limit comes from `resolveContextWindow(modelConfig)` ([context-window.ts](src/lib/providers/context-window.ts)), NEVER a substring-on-model-name regex (PM #17-style single source of truth). Ollama is probed live: `/api/ps` runtime `context_length` → Modelfile `parameters.num_ctx` → `OLLAMA_CONTEXT_LENGTH` env → 4096 default. **EMPIRICAL FACT (Ollama 0.30.10, this operator's box):** the trained ceiling from `/api/show` (`<arch>.context_length` = 32768 for qwen2.5) is NOT the runtime window (4096) — read `/api/ps`, not the ceiling. Cloud uses a conservative per-family map; unknown → 8000 (under-estimate is safe). Compaction fires at `compactionThresholdFor()` = 75% of the resolved window.
+- **A3 — in-flight token governor.** Every tool-loop `generateText`/`streamText` MUST attach `prepareStep: createTokenGovernor({ contextWindow, reservedOutputTokens })` ([token-governor.ts](src/lib/agent/token-governor.ts)) so the payload is pruned (pair-safe `pruneMessages` → recency window) BETWEEN steps — pre-flight compaction runs once and cannot catch in-loop growth. The per-tool output cap (`capToolResultSize`, applied inside `applyGlobalToolLoopGuard`) truncates a single oversized result head+tail. The 4 `agent.ts` callsites are wired; **MoA proposers are NOT yet governed** (see follow-up below).
+- **MoA loop-guard.** `applyGlobalToolLoopGuard` lives in [tool-guard.ts](src/lib/agent/tool-guard.ts) (§4); both `agent.ts` and `moa.ts` wrap their ToolSets through it. Audit: `grep -rn applyGlobalToolLoopGuard src/lib/agent/`.
+
+### 🔜 Remaining sprints (actionable, priority order)
+
+**Sprint A4 — non-destructive compaction + role hardening.** *Goal: stop LLM-summarization from destroying exact strings (stack traces, file contents) during pre-flight compaction, and stop the in-flight Stage-2 slide from emitting provider-illegal sequences.*
+1. In `runAgent`'s compaction block ([agent.ts](src/lib/agent/agent.ts), search `Deep-archiving`): change strategy from "LLM-summarize older → RAG" to **sliding-window + anchors** — keep system context + the most-recent-K messages VERBATIM; LLM-summarize ONLY the evicted tail (which already goes to RAG via `insertMemory`). Exact artifacts (file contents, errors) must stay retrievable verbatim, not paraphrased.
+2. In [token-governor.ts](src/lib/agent/token-governor.ts) `slideToRecentWindow`: after slicing, MERGE consecutive same-role messages (or drop one) so strict models (Gemma/Anthropic — §1 MoA "no consecutive user messages") don't reject the sequence. It currently only drops a leading `tool` message.
+3. Tests: extend `compressor.test.ts` (verbatim anchor preserved; an exact string survives compaction) + `token-governor.test.ts` (no consecutive same-role after a slide).
+4. Verify: full suite + boot `npm run dev`, run a long chat that exceeds the window on a small Ollama model (qwen2.5 = 4096 runtime).
+
+**Follow-up A3b — govern MoA proposers + aggregator.** Wire `prepareStep: createTokenGovernor(...)` into the proposer `generateText` ([moa.ts](src/lib/agent/moa.ts), ~`tools: guardedProposerTools`) and the aggregator call. Resolve the window via `resolveContextWindow(proposerConfig / aggregatorConfig)`. Proposers already have the output cap (via the guard) but NOT the message-pruning governor.
+
+**Sprint — real tokenizer.** Replace the `/3.5` heuristic in `estimateTokenCount` ([compressor.ts](src/lib/agent/compressor.ts)) with a BPE tokenizer (`gpt-tokenizer` — edge-safe, no native deps). KEEP the array-content traversal (A1). Caveat: a single tokenizer is exact for ONE family only (it is OpenAI BPE; Llama/Gemini/Qwen differ) — prefer provider-reported `usage` (already in `onStepFinish`) for ground-truth where available, heuristic+margin for pre-flight. Re-tune `COMPACTION_THRESHOLD_RATIO` and the governor budget if the estimate tightens. Update the Russian/code round-trip tests to assert closer-to-real counts.
+
+**Sprint — OpenRouter exact windows.** Extend the OpenRouter model cache ([openrouter-pricing.ts](src/lib/cost/openrouter-pricing.ts) / `data/cache/openrouter-pricing.json`) to also store each model's `context_length` (the `/api/v1/models` payload already carries it), and have `resolveContextWindow` read it for the `openrouter` provider BEFORE the static family map. Honor the PM #71 `globalThis`-singleton rule for boot-warmed cache state.
+
+### How to verify any context-track change
+- `npm run typecheck` + `npx vitest run` (full suite must stay green; targeted: `compressor`, `context-window`, `token-governor`, `tool-guard`, `loop-guard`).
+- **Live Ollama (if changing A2):** the operator runs Ollama 0.30.10 locally with `qwen2.5:latest` (runtime 4096) and `qwen2.5-large:latest` (Modelfile `num_ctx` 48000). `curl -s http://localhost:11434/api/ps` after a generation shows the real runtime `context_length`. A throwaway live test against the REAL module is the decisive check (delete it after — it hits the network).
+- Boot `npm run dev` and run a real chat that exceeds the window — unit tests do NOT catch PM #4/#5-class wire bugs.
+
+### ⚠️ Working-tree note for the next session
+There is uncommitted **model-wizards WIP** (`budget-banner.tsx`, `chat-panel.tsx`, `message-bubble.tsx`, `theme-switcher.tsx`, `store/app-store.ts`) on branch `qa/sprint3-model-wizards` — it is NOT part of the context-management track and was intentionally left unstaged. Commit it separately; do not bundle it with context-track commits.
 
 ---
 

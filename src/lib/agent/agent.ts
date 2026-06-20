@@ -34,7 +34,12 @@ import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { createCallAgentTool } from "@/lib/swarm/tools";
 import { getSwarmSystemPrompt } from "@/lib/swarm/prompts";
 import type { SwarmRole } from "@/lib/swarm/types";
-import { compressChatHistory, estimateTokenCount } from "@/lib/agent/compressor";
+import {
+  compressChatHistory,
+  estimateTokenCount,
+  partitionForCompaction,
+  formatVerbatimArchive,
+} from "@/lib/agent/compressor";
 import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
@@ -70,6 +75,13 @@ export type { TurnContinuationResult };
 
 const MAX_TOOL_STEPS_PER_TURN = 30;
 const MAX_TOOL_STEPS_SUBORDINATE = 15;
+
+/**
+ * Sprint A4 — number of most-recent messages kept VERBATIM in the live context
+ * during pre-flight compaction (the sliding window). Everything older than this
+ * (and not a leading system anchor) is evicted to RAG.
+ */
+const KEEP_RECENT_MESSAGES = 8;
 
 // ── Swarm DAG Completion Guard ────────────────────────────────────────────────
 // Guarantees that the orchestrator node always transitions out of "running"
@@ -594,25 +606,24 @@ export async function runAgent(options: RunAgentOptions) {
 
     // Sprint A1: gate compaction on token pressure ONLY. The old
     // `&& chat.messages.length > 12` guard let a moderate (9–12 message) chat
-    // that genuinely exceeds the limit sail past compaction. Removing it would,
-    // however, expose a negative-slice footgun, so the archival body below is
-    // guarded explicitly — see the cutoff note.
+    // that genuinely exceeds the limit sail past compaction.
     if (estimatedTokens > contextLimit) {
-      // Keep the last 8 messages fresh; archive everything older. `Math.max(0)`
-      // is load-bearing: `chat.messages.length - 8` is NEGATIVE for short
-      // histories, and `slice(0, -n)` keeps the FIRST length−n items (counting
-      // from the tail), NOT none — so without the clamp a 7-message over-limit
-      // chat would archive 6 and keep 1, and a 2-message paste would emit a
-      // bogus "Deep-archiving" event + insert an EMPTY RAG memory (a wasted
-      // embed call). Clamped, "≤ 8 messages" ⇒ olderMessages empty ⇒ skip.
-      const cutoff = Math.max(0, chat.messages.length - 8);
-      const olderMessages = chat.messages.slice(0, cutoff);
-      const newerMessages = chat.messages.slice(cutoff);
+      // Sprint A4 — sliding-window + anchors. Keep leading SYSTEM anchors (task
+      // framing) and the most-recent-K messages VERBATIM in the live context;
+      // only the middle tail is evicted. That tail is archived to RAG TWICE:
+      //   (1) VERBATIM — exact artifacts (stack traces, file contents, API keys)
+      //       must stay byte-for-byte retrievable, never paraphrased away. This
+      //       is the core A4 fix: LLM-summarization alone destroyed exact strings.
+      //   (2) Dense LLM summary — cheap narrative continuity for the Router/RAG.
+      // `partitionForCompaction` returns an EMPTY `evicted` for short histories
+      // (≤ anchors + K), so the guard below also kills the old negative-slice
+      // footgun that emitted bogus "Deep-archiving" events + empty RAG inserts.
+      const { anchors, evicted, recent } = partitionForCompaction(
+        chat.messages,
+        KEEP_RECENT_MESSAGES
+      );
 
-      // Nothing old enough to archive — don't fake an archive event or pollute
-      // RAG with an empty summary. (The genuine single-giant-paste fix —
-      // compacting the current oversized turn itself — is Sprint A3/A4.)
-      if (olderMessages.length > 0) {
+      if (evicted.length > 0) {
         console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
         publishUiSyncEvent({
           topic: "chat",
@@ -621,19 +632,43 @@ export async function runAgent(options: RunAgentOptions) {
           reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
         });
 
-        const summary = await compressChatHistory(olderMessages, settings, options.projectId, options.abortSignal);
-
-        // Phase 2: RAG Vector Database Archival
         const memorySubdir = options.projectId ? `${options.projectId}` : "main";
+        const archivedAt = new Date().toISOString();
+
+        // (1) Verbatim archive — exact strings survive compaction unparaphrased.
         try {
-          await insertMemory(`Archived Chat History [${new Date().toISOString()}]:\n${summary}`, "Auto-Archive", memorySubdir, settings, undefined, options.abortSignal);
-          console.log(`[Memory] History successfully vector-archived.`);
+          await insertMemory(
+            `Archived Chat History (verbatim) [${archivedAt}]:\n${formatVerbatimArchive(evicted)}`,
+            "Auto-Archive",
+            memorySubdir,
+            settings,
+            undefined,
+            options.abortSignal
+          );
         } catch (err) {
-          console.error(`[Memory] Failed to vector-archive history:`, err);
+          console.error(`[Memory] Failed to vector-archive verbatim history:`, err);
         }
 
+        // (2) Dense summary — narrative continuity. Paraphrase is acceptable here
+        // ONLY because the verbatim copy above is the source of truth for exact text.
+        const summary = await compressChatHistory(evicted, settings, options.projectId, options.abortSignal);
+        try {
+          await insertMemory(
+            `Archived Chat History (summary) [${archivedAt}]:\n${summary}`,
+            "Auto-Archive",
+            memorySubdir,
+            settings,
+            undefined,
+            options.abortSignal
+          );
+          console.log(`[Memory] History successfully vector-archived.`);
+        } catch (err) {
+          console.error(`[Memory] Failed to vector-archive history summary:`, err);
+        }
+
+        // Live context = anchors + recent window, both kept VERBATIM.
         const updated = await updateChat(options.chatId, (c) => {
-          c.messages = newerMessages;
+          c.messages = [...anchors, ...recent];
           return c;
         });
         if (updated) chat = updated;

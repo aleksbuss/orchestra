@@ -1,5 +1,6 @@
 import { pruneMessages, type ModelMessage, type PrepareStepFunction } from "ai";
 import { estimateTokenCount } from "@/lib/agent/compressor";
+import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 
 /**
  * Sprint A3 — in-flight token governor.
@@ -96,7 +97,12 @@ function slideToRecentWindow(messages: ModelMessage[], budget: number): ModelMes
   while (start < messages.length - 1 && messages[start]?.role === "tool") {
     start++;
   }
-  return messages.slice(start);
+  // Sprint A4 — slicing mid-conversation (or Stage-1's empty-message removal)
+  // can leave two same-role messages adjacent (e.g. a user paste right after the
+  // user turn that preceded a dropped assistant/tool exchange). Strict models
+  // (Gemma, Anthropic — §1 MoA "no consecutive user messages") reject that
+  // sequence, so coalesce consecutive same-role messages before returning.
+  return mergeConsecutiveSameRole(messages.slice(start));
 }
 
 /**

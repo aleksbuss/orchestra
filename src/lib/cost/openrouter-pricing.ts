@@ -64,10 +64,17 @@ interface OpenRouterModelEntry {
     prompt?: string;
     completion?: string;
   };
+  // Per-model context window. Top-level `context_length` is the canonical field;
+  // `top_provider.context_length` is the active provider's effective window
+  // (occasionally smaller). We prefer the top-level value and fall back. Used by
+  // `resolveContextWindow` to get an EXACT OpenRouter window instead of guessing
+  // from the static family map (context-window.ts).
+  context_length?: number | null;
   // OpenRouter exposes the per-model output ceiling here. Used to auto-size
   // `maxOutputTokens` per selected model (see model-output-limits.ts).
   top_provider?: {
     max_completion_tokens?: number | null;
+    context_length?: number | null;
   };
 }
 
@@ -82,6 +89,10 @@ interface CacheFileShape {
   // so older cache files (pre-feature) load cleanly; persisting it means the
   // dynamic source survives a warm-cache boot (no network fetch).
   maxOutput?: Record<string, number>;
+  // Per-model context window (`context_length`). Same optional-for-back-compat
+  // posture as `maxOutput` — survives a warm-cache boot so `resolveContextWindow`
+  // has exact OpenRouter windows before the first network fetch lands.
+  contextLength?: Record<string, number>;
 }
 
 const OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models";
@@ -105,11 +116,22 @@ interface PricingStore {
   pricing: Map<string, ModelPricing>;
   fetchedAt: number | null;
   maxOutput: Map<string, number>;
+  contextLength: Map<string, number>;
 }
 const PRICING_STORE_KEY = Symbol.for("orchestra.openrouter-pricing.store");
 function store(): PricingStore {
   const g = globalThis as unknown as Record<symbol, PricingStore | undefined>;
-  return (g[PRICING_STORE_KEY] ??= { pricing: new Map(), fetchedAt: null, maxOutput: new Map() });
+  const s = (g[PRICING_STORE_KEY] ??= {
+    pricing: new Map(),
+    fetchedAt: null,
+    maxOutput: new Map(),
+    contextLength: new Map(),
+  });
+  // Defensive backfill: a store created by an older bundle (dev HMR, where the
+  // Symbol.for store survives a reload) may predate a newly-added map field.
+  s.maxOutput ??= new Map();
+  s.contextLength ??= new Map();
+  return s;
 }
 
 function dataDir(): string {
@@ -157,13 +179,18 @@ export async function fetchOpenRouterPricing(options: {
   const entries = Array.isArray(json?.data) ? json.data : [];
   const map = new Map<string, ModelPricing>();
   const maxOut = new Map<string, number>();
+  const ctxLen = new Map<string, number>();
   for (const entry of entries) {
     if (!entry?.id) continue;
     const id = entry.id.toLowerCase();
-    // Capture the output ceiling BEFORE the pricing guard so free models
-    // (no pricing) still contribute their max_completion_tokens.
+    // Capture the output ceiling + context window BEFORE the pricing guard so
+    // free models (no pricing) still contribute them.
     const mo = entry.top_provider?.max_completion_tokens;
     if (typeof mo === "number" && mo > 0) maxOut.set(id, mo);
+    // Prefer the canonical top-level context_length; fall back to the active
+    // provider's effective window if the top-level field is absent.
+    const cl = entry.context_length ?? entry.top_provider?.context_length;
+    if (typeof cl === "number" && cl > 0) ctxLen.set(id, cl);
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
@@ -173,6 +200,7 @@ export async function fetchOpenRouterPricing(options: {
     });
   }
   store().maxOutput = maxOut;
+  store().contextLength = ctxLen;
   return map;
 }
 
@@ -230,6 +258,14 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     }
     if (mo.size > 0) store().maxOutput = mo;
   }
+  // Same for the per-model context window.
+  if (parsed.contextLength && typeof parsed.contextLength === "object") {
+    const cl = new Map<string, number>();
+    for (const [id, v] of Object.entries(parsed.contextLength)) {
+      if (typeof v === "number" && v > 0) cl.set(id.toLowerCase(), v);
+    }
+    if (cl.size > 0) store().contextLength = cl;
+  }
   return { pricing: map, fetchedAt };
 }
 
@@ -253,6 +289,8 @@ export async function saveCachedOpenRouterPricing(
     // Persist the per-model output ceilings so a warm-cache boot keeps the
     // dynamic source populated (free models too — they aren't in `pricing`).
     maxOutput: Object.fromEntries(store().maxOutput),
+    // Persist the per-model context windows for the same warm-cache reason.
+    contextLength: Object.fromEntries(store().contextLength),
   };
   await safeWriteFile(cachePath, JSON.stringify(payload, null, 2));
 }
@@ -402,6 +440,8 @@ export function getCachedOpenRouterPricing(
 export function __resetOpenRouterPricingForTests(): void {
   store().pricing = new Map();
   store().fetchedAt = null;
+  store().maxOutput = new Map();
+  store().contextLength = new Map();
 }
 
 /**
@@ -428,6 +468,23 @@ export function getOpenRouterMaxOutput(modelId: string): number | undefined {
 /** Test-only: seed the OpenRouter max-output map without a network fetch. */
 export function __setOpenRouterMaxOutputForTest(map: Map<string, number>): void {
   store().maxOutput = new Map(
+    Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
+  );
+}
+
+/**
+ * Per-model context window from the live OpenRouter `/models` cache
+ * (`context_length`). Undefined until the first fetch/disk-warm lands —
+ * `resolveContextWindow` falls back to the static family map meanwhile.
+ */
+export function getOpenRouterContextWindow(modelId: string): number | undefined {
+  if (!modelId) return undefined;
+  return store().contextLength.get(modelId.toLowerCase());
+}
+
+/** Test-only: seed the OpenRouter context-window map without a network fetch. */
+export function __setOpenRouterContextLengthForTest(map: Map<string, number>): void {
+  store().contextLength = new Map(
     Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
   );
 }

@@ -60,6 +60,21 @@ export function formatVerbatimArchive(messages: ChatMessage[]): string {
     .join("\n\n");
 }
 
+/**
+ * Audit fix #3 — the evicted compaction tail is always archived VERBATIM, but
+ * the extra dense LLM summary (`compressChatHistory` = an `utilityModel`
+ * round-trip + a 2nd embed) only earns its cost above this many tokens. Below
+ * it the verbatim copy already IS the summary, so a frequently-compacting
+ * small-window model (Ollama 4096) isn't taxed with an LLM call + a duplicate
+ * RAG record on every compaction.
+ */
+export const SUMMARY_MIN_EVICTED_TOKENS = 2000;
+
+/** Whether an eviction of `evictedTokens` warrants the extra dense LLM summary. */
+export function shouldSummarizeEviction(evictedTokens: number): boolean {
+  return evictedTokens >= SUMMARY_MIN_EVICTED_TOKENS;
+}
+
 export async function compressChatHistory(
   messages: ChatMessage[],
   settings: AppSettings,

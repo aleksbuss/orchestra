@@ -29,6 +29,7 @@ import {
   estimateTokenCount,
   partitionForCompaction,
   formatVerbatimArchive,
+  shouldSummarizeEviction,
 } from "@/lib/agent/compressor";
 import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
@@ -536,21 +537,32 @@ export async function runAgent(options: RunAgentOptions) {
           console.error(`[Memory] Failed to vector-archive verbatim history:`, err);
         }
 
-        // (2) Dense summary — narrative continuity. Paraphrase is acceptable here
-        // ONLY because the verbatim copy above is the source of truth for exact text.
-        const summary = await compressChatHistory(evicted, settings, options.projectId, options.abortSignal);
-        try {
-          await insertMemory(
-            `Archived Chat History (summary) [${archivedAt}]:\n${summary}`,
-            "Auto-Archive",
-            memorySubdir,
-            settings,
-            undefined,
-            options.abortSignal
-          );
-          console.log(`[Memory] History successfully vector-archived.`);
-        } catch (err) {
-          console.error(`[Memory] Failed to vector-archive history summary:`, err);
+        // (2) Dense summary — narrative continuity. GATED (audit fix #3): the
+        // summary is an extra LLM call (compressChatHistory) + a second embed.
+        // For a SMALL eviction the verbatim copy above already IS the summary,
+        // so we skip it — a small-window model (Ollama 4096) compacts often and
+        // shouldn't pay an LLM round-trip + duplicate RAG record each time. Only
+        // a substantial tail (where a dense paraphrase actually compresses many
+        // messages) earns the summary. Paraphrase is acceptable ONLY because the
+        // verbatim copy is the source of truth for exact text.
+        const evictedTokens = estimateTokenCount(convertChatMessagesToModelMessages(evicted));
+        if (shouldSummarizeEviction(evictedTokens)) {
+          const summary = await compressChatHistory(evicted, settings, options.projectId, options.abortSignal);
+          try {
+            await insertMemory(
+              `Archived Chat History (summary) [${archivedAt}]:\n${summary}`,
+              "Auto-Archive",
+              memorySubdir,
+              settings,
+              undefined,
+              options.abortSignal
+            );
+            console.log(`[Memory] History successfully vector-archived (verbatim + summary).`);
+          } catch (err) {
+            console.error(`[Memory] Failed to vector-archive history summary:`, err);
+          }
+        } else {
+          console.log(`[Memory] History vector-archived (verbatim only — evicted ${evictedTokens} tokens below summary threshold).`);
         }
 
         // Live context = anchors + recent window, both kept VERBATIM.

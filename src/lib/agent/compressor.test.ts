@@ -18,6 +18,8 @@ import {
   estimateTokenCount,
   partitionForCompaction,
   formatVerbatimArchive,
+  shouldSummarizeEviction,
+  SUMMARY_MIN_EVICTED_TOKENS,
 } from "./compressor";
 import { generateText } from "ai";
 import { encode } from "gpt-tokenizer/encoding/cl100k_base";
@@ -117,6 +119,17 @@ describe("partitionForCompaction (Sprint A4 sliding-window + anchors)", () => {
     expect(anchors).toHaveLength(0);
     expect(evicted.map((m) => m.id)).toEqual(["u1", "u2"]);
     expect(recent.map((m) => m.id)).toEqual(["u3"]);
+  });
+});
+
+describe("shouldSummarizeEviction (audit fix #3 — gate the extra LLM summary)", () => {
+  it("skips the summary for a small eviction (verbatim already suffices)", () => {
+    expect(shouldSummarizeEviction(0)).toBe(false);
+    expect(shouldSummarizeEviction(SUMMARY_MIN_EVICTED_TOKENS - 1)).toBe(false);
+  });
+  it("summarizes a substantial eviction (a dense paraphrase actually compresses)", () => {
+    expect(shouldSummarizeEviction(SUMMARY_MIN_EVICTED_TOKENS)).toBe(true);
+    expect(shouldSummarizeEviction(SUMMARY_MIN_EVICTED_TOKENS * 5)).toBe(true);
   });
 });
 

@@ -31,6 +31,7 @@
  */
 
 import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
+import { ensureDataBackupScheduled } from "@/lib/storage/backup";
 import { enforceSingleProcessOrExit } from "@/lib/util/multi-process-guard";
 import { boundedBootProbe } from "@/lib/util/boot-probe";
 
@@ -48,6 +49,11 @@ enforceSingleProcessOrExit();
 import "@/lib/storage/chat-store";
 
 await ensureCronSchedulerStarted();
+
+// Local-first data safety — a full-`data/` backup on boot + daily, rotated.
+// data/ has no external redundancy; this is the only guard against a bad write
+// / disk failure / `rm -rf data/` (PM #62). Opt-out: ORCHESTRA_BACKUP_DISABLED=true.
+ensureDataBackupScheduled();
 
 // PM #43 — fire-and-forget local-backend probe. The result is informative,
 // not load-bearing: even if every probe times out, Orchestra still works

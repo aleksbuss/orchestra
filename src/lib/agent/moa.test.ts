@@ -12,9 +12,12 @@
  *      proposers; this constant is the floor for what gets shipped.
  *   2. Bypass path (`requiresSwarm: false`) — internal Router optimization
  *      per PM #9 / CLAUDE.md note. When the Router decides bypass, the
- *      ensemble must call the brain model exactly once, NOT fan out, and
- *      return drafts: []. A regression here would silently fan out on
- *      every "thanks" message and burn tokens (the inverse PM #9 case).
+ *      ensemble must NOT fan out AND must NOT pre-generate any answer — it
+ *      returns `{ bypassed: true, text: "", drafts: [] }` so runAgent's single
+ *      final stream answers the turn. The ensemble output is never terminal,
+ *      so a throwaway pre-generation here was vestigial double work. A
+ *      regression that fans out burns tokens on every "thanks" (the inverse
+ *      PM #9 case); one that pre-generates re-introduces the double-gen waste.
  *   3. **Aggregator user-message constraint** — the Aggregator MUST NOT be
  *      fed `safeHistory` because consecutive `user` messages crash strict
  *      models like Gemma (PM #2). The aggregator call's `messages` array
@@ -218,7 +221,7 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
     expect(ids).not.toContain("p5_tail"); // evicted to keep ≤ 5
   });
 
-  it("requiresSwarm=false → no injection (the swarm doesn't run; nothing to enforce)", async () => {
+  it("requiresSwarm=false → bypass signal, NO pre-generation (deferred to single-agent stream)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: {
         requiresSwarm: false,
@@ -226,7 +229,6 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
         personas: [],
       },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "hi back" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -235,19 +237,21 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
       settings: fakeSettings(),
     });
 
-    // Bypass path — only the single direct-answer generateText fired, no
-    // proposers, no aggregator. Nothing to inject into.
+    // Bypass — the ensemble produces NO consensus and pre-generates NOTHING;
+    // runAgent's final single-agent stream answers the turn. The only LLM call
+    // is the Router's generateObject; generateText must NOT fire.
+    expect(result.bypassed).toBe(true);
+    expect(result.text).toBe("");
     expect(result.drafts).toEqual([]);
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    expect(mockedGenerateText).not.toHaveBeenCalled();
   });
 });
 
 describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
-  it("calls the brain model exactly once and returns no drafts", async () => {
+  it("does NOT pre-generate — returns a bypass signal, zero generateText calls", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "hi back" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -256,16 +260,19 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       settings: fakeSettings(),
     });
 
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    // The ensemble output is never terminal — runAgent runs a final stream
+    // afterward — so bypass pre-generates NOTHING: no brain call, no drafts,
+    // empty text, and an explicit `bypassed` flag for the caller's guard.
+    expect(mockedGenerateText).not.toHaveBeenCalled();
+    expect(result.bypassed).toBe(true);
+    expect(result.text).toBe("");
     expect(result.drafts).toEqual([]);
-    expect(result.text).toBe("hi back");
   });
 
   it("does NOT fan out — the Router's decision overrides any preset implication", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "ok" } as any);
 
     await runMoAEnsemble({
       chatId: "c1",
@@ -278,16 +285,17 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       preset: "custom",
     });
 
-    // Exactly one generateText call = the bypass call. If the ensemble had
-    // fanned out we'd see 1 + N calls (one per proposer + aggregator).
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    // Zero generateText calls on bypass. Fan-out would be N+1 (proposers +
+    // aggregator); the old vestigial pre-generation would be 1. Neither is
+    // correct anymore — the single-agent stream in runAgent answers the turn.
+    expect(mockedGenerateText).not.toHaveBeenCalled();
   });
 
-  it("falls back gracefully when the bypass call throws — no fan-out fallback either", async () => {
+  it("still folds the Router's token usage into cumulativeUsage on bypass (PM #36)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
+      usage: { inputTokens: 40, outputTokens: 12 },
     } as any);
-    mockedGenerateText.mockRejectedValueOnce(new Error("upstream timeout"));
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -296,13 +304,10 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       settings: fakeSettings(),
     });
 
-    // The current contract is "return error string, do not fan out as
-    // recovery." The contract avoids burning 5x tokens on a model that's
-    // already failing. If a future change adds fallback fan-out, this test
-    // is the place to update intentionally — not silently.
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
-    expect(result.text).toMatch(/error/i);
-    expect(result.drafts).toEqual([]);
+    // The Router call spent tokens even though we bypassed; they must still
+    // reach the per-chat budget banner via cumulativeUsage.
+    expect(result.bypassed).toBe(true);
+    expect(result.cumulativeUsage).toBeDefined();
   });
 });
 
@@ -449,11 +454,12 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
 
   it("forceSwarm=false (the default) still respects the Router's bypass decision", async () => {
     // Negative-space guard: the forceSwarm flag must not accidentally flip
-    // the default behavior. Existing bypass logic stays exactly as before.
+    // the default behavior. Bypass must NOT fan out — and (post Sprint 1) must
+    // NOT pre-generate either: it returns a bypass signal so runAgent's single
+    // final stream answers the turn.
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "direct answer" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -463,7 +469,8 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
       forceSwarm: false,
     });
 
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    expect(mockedGenerateText).not.toHaveBeenCalled();
+    expect(result.bypassed).toBe(true);
     expect(result.drafts).toEqual([]);
   });
 

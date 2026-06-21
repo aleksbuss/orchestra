@@ -199,6 +199,17 @@ export interface MoAOptions {
 export interface MoAResult {
   /** Final aggregated text */
   text: string;
+  /**
+   * True when the Router decided `requiresSwarm: false` (and the user did not
+   * Force-Swarm), so the ensemble produced NO consensus and intentionally did
+   * NOT pre-generate an answer. The caller (`runAgent`) must treat this as
+   * "no consensus to inject" and let its normal single-agent stream answer the
+   * turn directly — with the full system prompt, RAG memory, tools, and
+   * streaming. Generating a throwaway direct answer here used to be vestigial
+   * double work: the ensemble's output is NEVER terminal (runAgent always runs
+   * a final tool-capable streamText afterward and re-answers).
+   */
+  bypassed?: boolean;
   /** Individual proposer drafts for debugging/logging */
   drafts: { proposerId: string; role: string; text: string; latencyMs: number }[];
   /** Aggregation latency */
@@ -360,59 +371,31 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       topic: "chat",
       chatId,
       projectId: projectId ?? null,
-      reason: `[MoA] Auto-Routing: Task is direct. Swarm bypassed to save latency.`,
+      reason: `[MoA] Auto-Routing: Task is direct. Swarm bypassed — answering with the single agent.`,
     });
 
-    console.log(`[MoA] Swarm bypassed for direct query.`);
-    const brainConfig = resolveWorkerKey(
-      getBrainConfig(preset ?? "custom", settings.chatModel),
-      settings
-    );
-    const brainModel = createModel(brainConfig, { projectId, currentPath });
-    
-    try {
-      const aggStart = Date.now();
-      const directResult = await generateText({
-        model: brainModel,
-        system: "You are an AI assistant. Answer the user's query directly and efficiently.",
-        messages: [
-          ...safeHistory.slice(-6),
-          { role: "user", content: userMessage },
-        ],
-        temperature: brainConfig.temperature ?? 0.5,
-        maxOutputTokens: resolveMaxOutputTokens(brainConfig),
-        abortSignal,
-      });
-      // PM #36 — fold Router + direct-answer usage into the per-chat banner.
-      let bypassUsage = addUsageToCumulative(
+    // The ensemble's output is NEVER terminal: `runAgent` ALWAYS runs a final
+    // tool-capable streamText after this returns. Pre-generating a throwaway
+    // "direct answer" here only to inject it back as a (mislabeled, 0-agent)
+    // "consensus" was vestigial double work — one whole brain-model generation
+    // wasted on every bypassed turn. Return a bypass signal and defer to the
+    // single-agent stream, which answers with the FULL system prompt, RAG
+    // memory, tools, and streaming (none of which the throwaway call had).
+    console.log(`[MoA] Swarm bypassed — deferring to the single-agent stream (no redundant pre-generation).`);
+    return {
+      text: "",
+      bypassed: true,
+      drafts: [],
+      aggregationLatencyMs: 0,
+      totalLatencyMs: Date.now() - totalStart,
+      // PM #36 — the Router call still spent tokens; keep them in the banner.
+      cumulativeUsage: addUsageToCumulative(
         undefined,
         routerConfig.provider,
         routerConfig.model,
         dpgResult.usage
-      );
-      bypassUsage = addUsageToCumulative(
-        bypassUsage,
-        brainConfig.provider,
-        brainConfig.model,
-        directResult.usage
-      );
-      return {
-        text: directResult.text?.trim() || "(empty response)",
-        drafts: [],
-        aggregationLatencyMs: Date.now() - aggStart,
-        totalLatencyMs: Date.now() - totalStart,
-        cumulativeUsage: bypassUsage,
-      };
-    } catch (err) {
-      console.error("[MoA] Direct bypass failed:", err);
-      // Let it fall through to standard swarm on failure, or return error? We'll return error.
-      return {
-        text: `[Error: ${err instanceof Error ? err.message : String(err)}]`,
-        drafts: [],
-        aggregationLatencyMs: 0,
-        totalLatencyMs: Date.now() - totalStart,
-      };
-    }
+      ),
+    };
   }
 
   const dynamicProposers = dpgResult.personas;

@@ -175,6 +175,30 @@ ${draftBlock}
 Now produce the final synthesized response.`;
 }
 
+/**
+ * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). Assemble
+ * the block appended to the orchestrator system prompt on the collapsed synthesis
+ * path: the ported synthesis `directive`, the optional PM #39 disagreement
+ * `marker`, then the numbered expert drafts. The numbering/role-label format
+ * mirrors `buildAggregatorPrompt` so the collapsed synthesizer sees the same
+ * draft shape the standalone aggregator did. The drafts go in the SYSTEM prompt
+ * (not a second user message) — a consecutive `user` turn crashes strict models
+ * (PM #2). Pure + exported for unit testing.
+ */
+export function buildInlineSynthesisInjection(
+  directive: string,
+  drafts: { role: string; text: string }[],
+  disagreementMarker: string
+): string {
+  const draftBlock = drafts
+    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
+    .join("\n\n");
+  const marker = disagreementMarker.trim()
+    ? `\n\n${disagreementMarker.trim()}`
+    : "";
+  return `\n\n${directive.trim()}${marker}\n\n## Expert Drafts to Synthesize\n\n${draftBlock}`;
+}
+
 // ── MoA Ensemble Runner ─────────────────────────────────────────────────
 
 export interface MoAOptions {
@@ -210,6 +234,31 @@ export interface MoAResult {
    * a final tool-capable streamText afterward and re-answers).
    */
   bypassed?: boolean;
+  /**
+   * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). When
+   * set, the default synthesis aggregator did NOT run: `runAgent`'s final
+   * tool-capable `streamText` must synthesize these drafts inline (ONE brain
+   * generation instead of two). `text` is "" on this path; the synthesized
+   * answer comes from the stream. Carries everything the relocated trace
+   * capture needs in `onFinish` (the drafts are already in `text` form, so the
+   * stream produces the final text the trace records).
+   *
+   * Populated ONLY on the collapsed path (`mode === "synthesis"` && reflection
+   * OFF && ≥2 successful drafts && `settings.aggregator.inlineSynthesis`).
+   * Every other path keeps returning a finished `text`.
+   */
+  synthesisHandoff?: {
+    /** Successful proposer drafts to synthesize (role + text drive the prompt). */
+    drafts: { proposerId: string; role: string; text: string }[];
+    /** PM #39 disagreement marker — "" when consensus. Prepended to the directive. */
+    disagreementMarker: string;
+    /**
+     * Trace-memory signals for the relocated capture in `onFinish`. `finalText`
+     * is supplied there from the streamed synthesis; `totalLatencyMs` here
+     * covers the MoA portion only (proposers + disagreement), not the stream.
+     */
+    signals: TraceSignals;
+  };
   /** Individual proposer drafts for debugging/logging */
   drafts: { proposerId: string; role: string; text: string; latencyMs: number }[];
   /** Aggregation latency */

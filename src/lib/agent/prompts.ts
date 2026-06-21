@@ -80,6 +80,39 @@ export const PLAIN_CHAT_TOOL_OVERRIDE =
   "output any tool-call markup, XML-like tags, or function-call syntax; just write the answer.";
 
 /**
+ * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). The
+ * load-bearing synthesis rules (ported from `AGGREGATOR_SYSTEM_PROMPT`) that get
+ * appended to the orchestrator system prompt on the collapsed synthesis path, so
+ * the final tool-capable `streamText` synthesizes the proposer drafts inline.
+ * Operator-tunable via `src/prompts/synthesis-inline.md`; this constant is the
+ * fallback when the file is missing (mirrors `buildSystemPrompt`'s system.md
+ * fallback). Kept exported so the contract is greppable and unit-testable.
+ */
+export const DEFAULT_SYNTHESIS_INLINE_DIRECTIVE =
+  "## Mixture-of-Agents — Synthesize the Expert Drafts\n\n" +
+  "Several specialized expert agents analyzed the user's request in parallel. " +
+  'Their drafts are provided below under "## Expert Drafts to Synthesize". Your ' +
+  "final answer MUST be a synthesis of those drafts — a single, high-quality reply " +
+  "that goes beyond any individual draft. Critically evaluate them: some content may " +
+  "be biased, incomplete, or wrong; do NOT simply replicate or vote-aggregate them. " +
+  "Preserve technical detail and code blocks, start directly with the answer (no " +
+  "meta-commentary), resolve factual conflicts using your own knowledge and tools, " +
+  "mirror the user's expected format, and silently correct errors. If a " +
+  '"<<DISAGREEMENT_DETECTED>>" marker appears below, follow its instructions exactly. ' +
+  "You retain your tools during synthesis — use them only to materially improve the " +
+  "answer, then deliver the result through your normal `response` mechanism.";
+
+/**
+ * Load the operator-tunable inline-synthesis directive from
+ * `src/prompts/synthesis-inline.md`, falling back to
+ * {@link DEFAULT_SYNTHESIS_INLINE_DIRECTIVE} when the file is absent or empty.
+ */
+export async function loadSynthesisInlineDirective(): Promise<string> {
+  const fromFile = (await loadPrompt("synthesis-inline")).trim();
+  return fromFile || DEFAULT_SYNTHESIS_INLINE_DIRECTIVE;
+}
+
+/**
  * Build the complete system prompt for the agent
  */
 export async function buildSystemPrompt(options: {

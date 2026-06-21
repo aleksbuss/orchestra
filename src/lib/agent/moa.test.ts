@@ -67,7 +67,12 @@ vi.mock("@/lib/tools/search-engine", () => ({
     !!(s?.enabled && s.provider !== "none"),
 }));
 
-import { runMoAEnsemble, MOA_PROPOSERS, AGGREGATOR_SYSTEM_PROMPT } from "./moa";
+import {
+  runMoAEnsemble,
+  MOA_PROPOSERS,
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildInlineSynthesisInjection,
+} from "./moa";
 import type { AppSettings } from "@/lib/types";
 import { generateText, generateObject } from "ai";
 
@@ -627,6 +632,44 @@ async function stopsAtStep(stopWhen: unknown, stepCount: number): Promise<boolea
   if (typeof cond !== "function") return false;
   return Boolean(await cond({ steps: Array.from({ length: stepCount }, () => ({})) }));
 }
+
+describe("Sprint 2 — buildInlineSynthesisInjection (aggregator-collapse system-prompt block)", () => {
+  const directive = "## Synthesize\nMerge the drafts.";
+  const drafts = [
+    { role: "architect", text: "Use a queue." },
+    { role: "skeptic", text: "Queues add latency." },
+  ];
+
+  it("numbers drafts and labels each with its expert role (mirrors buildAggregatorPrompt)", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "");
+    expect(block).toContain("1. [Expert role: architect]\nUse a queue.");
+    expect(block).toContain("2. [Expert role: skeptic]\nQueues add latency.");
+    expect(block).toContain("## Expert Drafts to Synthesize");
+  });
+
+  it("ports the directive verbatim into the block", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "");
+    expect(block).toContain(directive);
+  });
+
+  it("includes the PM #39 disagreement marker when present (prepended before the drafts)", () => {
+    const marker = "<<DISAGREEMENT_DETECTED>> Surface the conflict.";
+    const block = buildInlineSynthesisInjection(directive, drafts, marker);
+    expect(block).toContain(marker);
+    // Marker sits between the directive and the drafts header.
+    expect(block.indexOf(marker)).toBeGreaterThan(block.indexOf(directive));
+    expect(block.indexOf(marker)).toBeLessThan(
+      block.indexOf("## Expert Drafts to Synthesize")
+    );
+  });
+
+  it("omits the marker section entirely on consensus (empty / whitespace marker)", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "   ");
+    expect(block).not.toContain("<<DISAGREEMENT_DETECTED>>");
+    // No dangling blank marker line — directive flows straight to the header.
+    expect(block).toMatch(/Merge the drafts\.\n\n## Expert Drafts to Synthesize/);
+  });
+});
 
 describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-ignored no-op)", () => {
   // AI SDK v5+ removed `maxSteps` from generateText, so the prior

@@ -27,7 +27,6 @@ const eslintConfig = [
       // generated files and reports spurious warnings. See QA audit F-17.
       "coverage/**",
       "bundled-skills/**",
-      "scripts/**",
       // Vendored third-party code — not ours to lint.
       "src/lib/vendor/**",
       // Next.js auto-generated.

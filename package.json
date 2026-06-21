@@ -25,7 +25,7 @@
     "start": "next start",
     "lint": "eslint",
     "lint:strict": "eslint --max-warnings 0",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "verify": "npm run lint && npm run test && npm run build",
     "verify:strict": "npm run lint && npm run typecheck && npm run test && npm run audit:gate && npm run build",
     "audit:gate": "npm audit --audit-level=critical --omit=dev",

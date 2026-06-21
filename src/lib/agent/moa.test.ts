@@ -671,6 +671,117 @@ describe("Sprint 2 — buildInlineSynthesisInjection (aggregator-collapse system
   });
 });
 
+describe("Sprint 2 — inline-synthesis collapse gate (runMoAEnsemble)", () => {
+  // Stub DPG → fall back to the 5 static proposers, each returning a
+  // substantive draft. When the collapse fires it returns BEFORE the
+  // aggregator generateText, so the swarm path makes exactly 5 generateText
+  // calls (proposers) instead of 6 (proposers + aggregator).
+  function inlineSettings(over: {
+    mode?: "synthesis" | "tournament";
+    inlineSynthesis?: boolean;
+    tournamentJudgeCount?: number;
+  } = {}): AppSettings {
+    return {
+      ...fakeSettings(),
+      aggregator: { mode: "synthesis", inlineSynthesis: true, ...over },
+    };
+  }
+
+  it("inlineSynthesis ON + synthesis + reflection OFF → hands drafts up, SKIPS the aggregator", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({
+      text: "substantive proposer draft",
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: inlineSettings(),
+    });
+
+    // 5 proposers, NO aggregator call — the whole point of the collapse.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
+    expect(result.synthesisHandoff).toBeDefined();
+    expect(result.text).toBe("");
+    expect(result.aggregationLatencyMs).toBe(0);
+    expect(result.synthesisHandoff!.drafts).toHaveLength(5);
+    expect(result.synthesisHandoff!.drafts[0]).toEqual(
+      expect.objectContaining({
+        proposerId: expect.any(String),
+        role: expect.any(String),
+        text: expect.any(String),
+      })
+    );
+    expect(typeof result.synthesisHandoff!.disagreementMarker).toBe("string");
+    expect(result.synthesisHandoff!.signals.aggregatorMode).toBe("synthesis");
+    expect(result.synthesisHandoff!.signals.reflectionRounds).toBe(0);
+    // Router usage still folded for the budget banner (PM #36).
+    expect(result.cumulativeUsage).toBeDefined();
+  }, 30_000);
+
+  it("inlineSynthesis OFF (default) → aggregator runs, NO handoff (Sprint-1 behavior preserved)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: fakeSettings(), // no aggregator config → inlineSynthesis undefined
+    });
+
+    // 5 proposers + 1 aggregator = 6.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(result.synthesisHandoff).toBeUndefined();
+    expect(result.text).not.toBe("");
+  }, 30_000);
+
+  it("inlineSynthesis ON but reflection ENABLED → does NOT collapse (reflection path untouched)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({
+      text: "Aggregated final consensus answer assembled from the expert drafts.",
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: { ...inlineSettings(), reflection: { enabled: true } },
+    });
+
+    // Reflection gates the collapse OFF → the aggregator ran, no handoff.
+    expect(result.synthesisHandoff).toBeUndefined();
+    expect(result.text).not.toBe("");
+    // At least 5 proposers + 1 aggregator fired (reflection may add more).
+    expect(mockedGenerateText.mock.calls.length).toBeGreaterThanOrEqual(6);
+  }, 30_000);
+
+  it("inlineSynthesis ON but mode=tournament → does NOT collapse (tournament path excluded)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: inlineSettings({ mode: "tournament", tournamentJudgeCount: 1 }),
+    });
+
+    // mode !== "synthesis" → gate excluded, regardless of whether the
+    // tournament picked a winner or fell back to the synthesis aggregator.
+    expect(result.synthesisHandoff).toBeUndefined();
+  }, 30_000);
+});
+
 describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-ignored no-op)", () => {
   // AI SDK v5+ removed `maxSteps` from generateText, so the prior
   // `maxSteps: proposerTools ? 3 : 1` was IGNORED and tool proposers stopped

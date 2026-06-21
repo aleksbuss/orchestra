@@ -1,0 +1,13 @@
+{
+  // Type-checks Orchestra's NODE-SIDE code that the Next app `tsconfig.json`
+  // excludes: the `scripts/` tooling and the `tests/e2e/` Playwright specs.
+  // These are OUR code and must not be a coverage gap (PM #76 follow-up) — but
+  // they live outside the Next bundle, so they get their own pass instead of
+  // polluting the build config. Wired into `npm run typecheck` (runs both).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["scripts/**/*.ts", "tests/e2e/**/*.ts"],
+  "exclude": ["node_modules", "data", "data-backups"]
+}

@@ -121,6 +121,39 @@ describe("governMessages — Stage 2: recency window safety", () => {
     expect(out.length).toBeGreaterThan(0);
     expect(out[0]?.role).not.toBe("tool"); // the leading-tool guard fired
   });
+
+  // PM #76 follow-up — a pure recency slide used to drop the original task when a
+  // few near-cap results blew the budget. Stage 2 now anchors a CONCISE leading
+  // task (system run + first user turn) so the model can't "forget" it.
+  it("preserves a concise task anchor (first user turn) through the recency slide", () => {
+    const messages: ModelMessage[] = [
+      { role: "user", content: "TASK_MARKER_42: build the metrics dashboard" }, // small task anchor
+      { role: "assistant", content: big(40000) }, // huge middle — evicted by the slide
+      { role: "user", content: "and add a CSV export button" }, // recent turn
+    ];
+    const out = governMessages(messages, 2000);
+    const joined = out
+      .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content)))
+      .join(" ");
+    expect(joined).toContain("TASK_MARKER_42"); // task survived (without the anchor it slid off)
+    expect(joined).toContain("CSV export"); // recent turn survived too
+    // strict-model invariant: no two adjacent same-role messages.
+    for (let i = 1; i < out.length; i++) expect(out[i].role).not.toBe(out[i - 1].role);
+  });
+
+  it("does NOT anchor a huge first message (a paste is not a task pointer)", () => {
+    const messages: ModelMessage[] = [
+      { role: "user", content: big(40000) }, // huge first user = paste, must NOT be re-pinned
+      { role: "assistant", content: big(40000) },
+      { role: "user", content: "latest" },
+    ];
+    const out = governMessages(messages, 2000);
+    expect(out[out.length - 1]).toEqual({ role: "user", content: "latest" });
+    const totalChars = out
+      .map((m) => (typeof m.content === "string" ? m.content.length : 0))
+      .reduce((a, b) => a + b, 0);
+    expect(totalChars).toBeLessThan(40000); // the 40k paste was evicted, not pinned back in
+  });
 });
 
 describe("capToolResultSize", () => {

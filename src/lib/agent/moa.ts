@@ -820,6 +820,81 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // final answer (no synthesis). Falls back to synthesis if every
   // judge fails — better degraded output than no output.
   const aggregatorMode = settings.aggregator?.mode ?? "synthesis";
+
+  // ── Sprint 2: inline-synthesis collapse ────────────────────────────
+  // docs/moa-aggregator-collapse.md. When the operator opts in
+  // (`aggregator.inlineSynthesis`) AND this is the plain synthesis path
+  // (mode === "synthesis", reflection OFF, ≥2 successful drafts), SKIP the
+  // separate aggregator generateText entirely. Hand the drafts UP via
+  // `synthesisHandoff`; runAgent's final tool-capable stream — which always
+  // runs afterward — synthesizes them inline: ONE brain generation this turn
+  // instead of two (aggregator + stream). The collapsed synthesizer can also
+  // call tools mid-synthesis, which the standalone aggregator never could.
+  //
+  // Deliberately narrow: reflection (inherently multi-pass — needs a complete
+  // answer to critique) and tournament (returns a verbatim winner, no
+  // synthesis) are EXCLUDED. A tournament-fallback-to-synthesis keeps
+  // `aggregatorMode === "tournament"`, so it does NOT collapse here either —
+  // it runs the inline aggregator below as its last resort (safe).
+  //
+  // Default OFF (the flag is opt-in); until 2c flips it, this branch is never
+  // taken in production. `successfulDrafts.length >= 2` is guaranteed here (we
+  // returned early for 0 and 1 drafts) but stated explicitly to match the
+  // documented gate.
+  if (
+    settings.aggregator?.inlineSynthesis === true &&
+    aggregatorMode === "synthesis" &&
+    !settings.reflection?.enabled &&
+    successfulDrafts.length >= 2
+  ) {
+    const totalLatencyMs = Date.now() - totalStart;
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId,
+      nodeType: "system_node",
+      swarmNode: {
+        nodeId: aggregatorNodeId,
+        parentNodeId: routerNodeId,
+        role: "orchestrator",
+        taskSummary: "Synthesis handed to final stream",
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      },
+    });
+    console.log(
+      `[MoA] Inline-synthesis collapse: handing ${successfulDrafts.length} drafts to the final tool-capable stream → 1 brain generation this turn (aggregator skipped).`
+    );
+    // Trace signals for the relocated capture in runAgent's onFinish (the
+    // synthesized `finalText` only exists once the stream finishes). Latency
+    // here covers the MoA portion only — the stream's time is not included.
+    const signals: TraceSignals = {
+      proposerSuccessRatio:
+        drafts.length === 0 ? 0 : successfulDrafts.length / drafts.length,
+      disagreementDetected: disagreement.detected,
+      disagreementMaxDistance: disagreement.maxDistance,
+      reflectionRounds: 0,
+      reflectionHitCap: false,
+      totalLatencyMs,
+      aggregatorMode: "synthesis",
+    };
+    return {
+      text: "",
+      drafts,
+      synthesisHandoff: {
+        drafts: successfulDrafts.map((d) => ({
+          proposerId: d.proposerId,
+          role: d.role,
+          text: d.text,
+        })),
+        disagreementMarker,
+        signals,
+      },
+      aggregationLatencyMs: 0,
+      totalLatencyMs,
+      cumulativeUsage: moaUsage,
+    };
+  }
+
   const brainModel = createModel(brainConfig, { projectId, currentPath });
 
   if (aggregatorMode === "tournament") {

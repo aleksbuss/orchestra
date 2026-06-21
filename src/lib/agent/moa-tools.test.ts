@@ -18,6 +18,7 @@ import {
   detectProposerRole,
   FACT_CHECK_MANDATE,
   isSuccessfulDraft,
+  PROPOSER_NO_TOOLS_DIRECTIVE,
   selectProposerTools,
 } from "./moa";
 import type { MoAProposer } from "./moa";
@@ -141,23 +142,33 @@ describe("PM #42 — selectProposerTools", () => {
 describe("PM #42 — augmentProposerPromptForTools", () => {
   const basePrompt = "[GOAL] Be helpful. [RULES] Cite sources. [FORMAT] markdown";
 
-  it("tools include search_web → Fact-Check Mandate appended", () => {
+  it("tools include search_web → Fact-Check Mandate appended, NOT the no-tools directive", () => {
     const tools = selectProposerTools("reviewer", true, enabledSearch);
     const out = augmentProposerPromptForTools(basePrompt, tools);
     expect(out).toContain(basePrompt);
     expect(out).toContain(FACT_CHECK_MANDATE.trim());
+    // The tool-bearing branch must NOT also tell the proposer it has no tools.
+    expect(out).not.toContain(PROPOSER_NO_TOOLS_DIRECTIVE.trim());
   });
 
-  it("undefined tools → prompt unchanged", () => {
+  it("PM #77 — undefined tools → NO-TOOLS directive appended (so a tool-demanding prompt yields prose, not an empty draft)", () => {
     const out = augmentProposerPromptForTools(basePrompt, undefined);
-    expect(out).toBe(basePrompt);
+    expect(out).toContain(basePrompt);
+    expect(out).toContain(PROPOSER_NO_TOOLS_DIRECTIVE.trim());
   });
 
-  it("tools without search_web → prompt unchanged (mandate is search-specific)", () => {
-    // Empty toolset (defensive — not currently producible by selectProposerTools,
-    // but if a future caller passes a non-search ToolSet, the mandate must NOT fire).
+  it("PM #77 — empty toolset → NO-TOOLS directive appended (treated as tool-less)", () => {
     const out = augmentProposerPromptForTools(basePrompt, {} as never);
-    expect(out).toBe(basePrompt);
+    expect(out).toContain(basePrompt);
+    expect(out).toContain(PROPOSER_NO_TOOLS_DIRECTIVE.trim());
+    // Search-specific mandate must NOT fire on a tool-less proposer.
+    expect(out).not.toContain(FACT_CHECK_MANDATE.trim());
+  });
+
+  it("PM #77 — the no-tools directive forbids tool attempts AND empty answers", () => {
+    expect(PROPOSER_NO_TOOLS_DIRECTIVE).toMatch(/NO tools/i);
+    expect(PROPOSER_NO_TOOLS_DIRECTIVE).toMatch(/plain prose|in prose/i);
+    expect(PROPOSER_NO_TOOLS_DIRECTIVE).toMatch(/not return an empty|never an empty/i);
   });
 
   it("Fact-Check Mandate names the canonical verification triggers", () => {

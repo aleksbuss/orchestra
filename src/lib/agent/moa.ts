@@ -114,6 +114,7 @@ export {
   isSuccessfulDraft,
   FACT_CHECK_MANDATE,
   CODE_EXECUTION_MANDATE,
+  PROPOSER_NO_TOOLS_DIRECTIVE,
 } from "@/lib/agent/moa-proposer-tools";
 
 import {

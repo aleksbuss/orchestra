@@ -713,7 +713,19 @@ export async function runAgent(options: RunAgentOptions) {
       });
       turnExtraUsage = moaResult.cumulativeUsage;
 
-      if (moaResult.text && !moaResult.text.startsWith("All MoA proposer agents failed")) {
+      // The ensemble's output is ADVISORY context for the final stream below,
+      // never the terminal answer (the streamText further down always runs and
+      // re-answers). Inject a consensus ONLY when the ensemble actually
+      // produced one from real drafts. A `bypassed` result (Router judged the
+      // prompt trivial) carries no consensus — the single-agent stream answers
+      // it directly. The `drafts.length > 0` guard also stops the old latent
+      // bug of injecting a "0 expert agents" consensus from the bypass path.
+      if (
+        !moaResult.bypassed &&
+        moaResult.drafts.length > 0 &&
+        moaResult.text &&
+        !moaResult.text.startsWith("All MoA proposer agents failed")
+      ) {
         const truncatedConsensus = moaResult.text.length > 5000
           ? moaResult.text.substring(0, 5000) + "\n\n...[TRUNCATED FOR CONTEXT LIMITS]..."
           : moaResult.text;
@@ -728,7 +740,13 @@ ${truncatedConsensus}
 
 Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.map(d => `${d.proposerId}=${d.latencyMs}ms`).join(', ')}; aggregation: ${moaResult.aggregationLatencyMs}ms)`;
 
-        console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total)`);
+        // Measurement (Sprint 1 — quantifies the Sprint 2 double-generation
+        // target): the swarm path ran an aggregator generation AND a final
+        // stream follows below. This line makes the "two generations per swarm
+        // turn" visible in logs for before/after comparison.
+        console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total). A final tool-capable stream follows → 2 brain generations this turn (aggregator + stream).`);
+      } else if (moaResult.bypassed) {
+        console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);
       }
     } catch (err) {
       console.warn(`[MoA] Ensemble failed, continuing with single-agent mode:`, err);

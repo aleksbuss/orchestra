@@ -38,6 +38,21 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 76. Loop guard missed success-leg + A→B→A→B tool loops (only consecutive identical FAILURES were blocked)
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (an agent burns its entire per-turn step budget / Auto-Pilot iteration on a loop; weak models then hallucinate output format from the repeated-error context — "format degradation". Bounded per turn by `stopWhen: stepCountIs(MAX_TOOL_STEPS_PER_TURN)` and per Auto-Pilot by `MAX_AUTO_PILOT_ITERATIONS`, so not an unbounded P0 billing leak, but every loop wastes the whole budget.)
+**Symptoms:** The agent repeats `write_text_file(success) → code_execution(error) → write_text_file(success) → code_execution(error) …` indefinitely, or spams `write_text_file` with the EXACT same arguments, and the guard never intervenes. The repeated identical errors also crowd the context window, after which a weak model "forgets" the required output format.
+**Detection:** External code audit (Gemini 3 Pro, 2026-06) reproduced against `tool-guard.ts` mechanics; confirmed by reading the guard.
+**Root Cause:** `applyGlobalToolLoopGuard` (`tool-guard.ts`) only blocked an IMMEDIATELY-consecutive identical *deterministic failure* via `lastDeterministicFailure`, which is reset to `null` on ANY non-failing call. A successful leg (`write_text_file` returns `{success:true}`) wiped the failure memory, so the alternating `code_execution(error)` always looked "fresh" and never tripped the consecutive-identical check. Identical *successful* calls were tracked by nothing — `noProgressByCall` is gated on `isPollLikeCall` (the `process` poll/log tool only).
+**Resolution:** Added a universal repeat guard: a bounded ring `recentCallKeys` records every non-poll `(toolName + stableSerialize(args))` call; the guard blocks (without executing) when the same key recurs ≥ `REPEAT_BLOCK_THRESHOLD` (3) within `REPEAT_WINDOW` (8) calls. Catches identical-success spam AND A→B→A→B loops. Keyed on serialized args, so a legitimate fix-loop that CHANGES the content each pass is NOT flagged. Poll-like calls stay exempt (they own the no-progress backoff). The fast 2nd-consecutive-failure block is retained.
+**Context-bloat note (audit Claim 2, NOT implemented):** the audit also proposed mid-loop "garbage collection" — splicing old duplicate errors into a synthetic message. A measurement (5 near-duplicate lint errors → `governMessages`) showed this does NOT reproduce: `governMessages` Stage 1 (`pruneMessages` with `toolCalls: "before-last-2-messages"`) ALREADY drops old tool-call/result content pair-safely while preserving the system + user-task anchors (the task survived even on a 4096 window; 5 errors collapsed to 1). A naive splice would also break tool-call↔tool-result pairing → provider 400 (the class `pruneMessages` exists to avoid). Skipped as redundant + unsafe. Only residual gap: `slideToRecentWindow` (Stage 2) does not preserve anchors when a few near-cap-size results hit a tiny window — a future anchor-preservation tweak, not a dedup.
+**Regression Coverage:** [`tool-guard.test.ts`](src/lib/agent/tool-guard.test.ts) — "Sprint 1: universal repeat guard" describe block (identical-success spam blocked on the 3rd call, A→B→A→B blocked, changing-args fix-loop NOT blocked, poll exemption).
+**Doc Updates:** `CLAUDE.md` §4 (Loop Guard Middleware).
+**Rule:** The loop guard must detect repeats by `(tool + args)` recurrence over a sliding window, INDEPENDENT of success/failure. A success between two identical failing calls is NOT progress — never let it reset the loop-detection state.
+
+---
+
 ## 75. Boot-only pricing refresh guaranteed a "degraded" health status after 24h uptime
 **Date:** 2026-06
 **Status:** RESOLVED

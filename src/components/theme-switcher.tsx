@@ -2,12 +2,10 @@
 
 import * as React from "react";
 import { Moon, Sun } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 
 export function ThemeSwitcher() {
   const [isDark, setIsDark] = React.useState<boolean | null>(null);
-  const router = useRouter();
 
   React.useEffect(() => {
     // Read the current class on mount to prevent hydration mismatch
@@ -45,8 +43,9 @@ export function ThemeSwitcher() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ general: { darkMode: newDark } }),
       });
-      // Refresh to ensure server-rendered components align with the new preference
-      router.refresh();
+      // (Intentionally not calling router.refresh() here because the server
+      // no longer drives SSR dark mode; refreshing causes React to reconcile
+      // the root <html> tag and wipe the 'dark' class we just applied).
     } catch (e) {
       console.error("Failed to sync theme setting:", e);
       // Revert optimism if network failed (optional but good practice)

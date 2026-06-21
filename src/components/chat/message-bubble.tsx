@@ -158,7 +158,7 @@ function MessageBubbleImpl({ message }: MessageBubbleProps) {
       {/* Text content: Apple-style iMessage layout */}
       {visibleTextContent && isUser && (
         <div className="flex w-full justify-end py-1">
-          <div className="bg-gradient-to-br from-blue-500 to-indigo-500 text-white rounded-[20px] rounded-tr-[4px] px-4 py-2 shadow-sm max-w-[85%] sm:max-w-[75%]">
+          <div className="bg-gradient-to-br from-blue-500 to-indigo-500 text-white rounded-[20px] rounded-tr-[4px] px-4 py-2 shadow-sm max-w-[85%] sm:max-w-[75%] min-w-0 overflow-hidden break-words">
             <p className="whitespace-pre-wrap text-[15px] leading-relaxed">{visibleTextContent}</p>
           </div>
         </div>
@@ -169,7 +169,7 @@ function MessageBubbleImpl({ message }: MessageBubbleProps) {
           <div className="flex size-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 text-white shadow-sm mt-1">
             <AudioLines className="size-4" />
           </div>
-          <div className="glass-panel shadow-md backdrop-blur-3xl rounded-[24px] rounded-tl-[6px] px-5 py-4 max-w-[90%] sm:max-w-[85%] text-[15px] leading-relaxed">
+          <div className="glass-panel shadow-md backdrop-blur-3xl rounded-[24px] rounded-tl-[6px] px-5 py-4 max-w-[90%] sm:max-w-[85%] text-[15px] leading-relaxed min-w-0 overflow-hidden break-words">
             <div className="prose prose-base dark:prose-invert max-w-none text-inherit [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
               <MarkdownContent content={visibleTextContent} />
             </div>

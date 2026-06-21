@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 77. Tool-less MoA proposers returned empty drafts on tool-demanding prompts
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (narrow trigger — only when the user prompt explicitly demands a tool; the swarm degrades gracefully to fewer drafts. But "run this", "search that", "use X tool" are common, and dropping below 2 successful drafts blocks the inline-synthesis collapse / weakens synthesis.)
+**Symptoms:** Swarm proposers return `(empty draft)` (dropped by `isSuccessfulDraft`) when the user message demands a tool ("Use the code_execution tool to compute…", "Run the code", "Search for…"). Observed live: gemini-2.5-flash proposers went 3/4 empty on a "run the code" prompt; only the code-oriented persona answered (in text). The ensemble shrank to 1 draft → "Only 1 draft succeeded, skipping aggregation" → the inline-synthesis collapse (needs ≥2) could not fire.
+**Detection:** Live OpenRouter run, then reproduced with `runMoAEnsemble`: a tool-demanding prompt scored 1/3 successful drafts vs 3/3 for the same topic phrased plainly. **An initial "the extraction ignores the reasoning channel" hypothesis was DISPROVEN by a 2-line isolation probe** — gemini-2.5-flash AND deepseek-r1 both populate `.text` (reasoning channel empty, no truncation at the 2048 proposer cap). The real differentiator was the tool demand, not the model.
+**Root Cause:** Proposers run TOOL-LESS by default (search_web only with a configured key — PM #68; code_execution only on explicit opt-in — PM #50). `augmentProposerPromptForTools` (`moa-proposer-tools.ts`) returned the persona prompt UNCHANGED for tool-less proposers — it never told them they have no tools. A tool-demanding user message then led non-code personas (historian, skeptic/auditor) to emit an empty/refusal answer instead of a textual draft.
+**Resolution:** `augmentProposerPromptForTools` now appends `PROPOSER_NO_TOOLS_DIRECTIVE` for an undefined/empty toolset — the proposer-side mirror of PM #61's PLAIN_CHAT_TOOL_OVERRIDE: "you have no tools; do not attempt one; answer in prose; never return empty." Live re-run: 1/3 → 2/3 (the historian recovered from empty to a 1245-char prose draft). Not a 100% guarantee — a model can still occasionally empty a given persona — but proposer drafts are best-effort and the ensemble tolerates partial failure (needs ≥2).
+**Regression Coverage:** [`moa-tools.test.ts`](src/lib/agent/moa-tools.test.ts) — tool-less/empty toolset → directive appended; tool-bearing → mandate appended, directive NOT; directive-wording pin.
+**Doc Updates:** `CLAUDE.md` §1 (MoA).
+**Rule:** Any tool-LESS LLM call whose prompt might demand a tool needs an explicit "you have no tools, answer in prose, never empty" override (the proposer mirror of PLAIN_CHAT_TOOL_OVERRIDE). And: verify a bug hypothesis with an isolation repro BEFORE coding — the first "reasoning-channel" theory here was wrong, and a cheap probe caught it before a speculative fix shipped.
+
+---
+
 ## 76. Loop guard missed success-leg + A→B→A→B tool loops (only consecutive identical FAILURES were blocked)
 **Date:** 2026-06
 **Status:** RESOLVED

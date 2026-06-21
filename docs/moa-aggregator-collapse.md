@@ -1,6 +1,6 @@
 # Sprint 2 — Collapse the MoA aggregator into the final tool-capable stream
 
-**Status:** **2a + 2b SHIPPED** on `feat/moa-bypass-no-double-gen` (behind `settings.aggregator.inlineSynthesis`, **default OFF** — zero production change yet). Sprint 1 already removed the bypass path's vestigial generation. **Remaining: 2c** — run real swarm chats both ways, compare trace-quality scores + token counts, then flip the flag default ON and refresh the README MoA diagram.
+**Status:** **2a + 2b SHIPPED** on `feat/moa-bypass-no-double-gen` (behind `settings.aggregator.inlineSynthesis`, **default OFF** — zero production change yet). Sprint 1 already removed the bypass path's vestigial generation. **2c MEASUREMENT DONE (2026-06-22)** — quality held; latency −31%, completion tokens −16%, cost −3.8% over N=8 (see §10). **Remaining: the FLIP only** — set `inlineSynthesis` default ON + update gate test / README mermaid / this doc (and tournament collapse, deferred).
 
 **Decisions (resolved with the operator, 2026-06-21):** flag default **OFF → measure → flip in 2c**; synthesis directive lives in **`src/prompts/synthesis-inline.md`** (operator-tunable, `loadSynthesisInlineDirective()` falls back to `DEFAULT_SYNTHESIS_INLINE_DIRECTIVE`); tournament collapse **deferred** to a later micro-sprint.
 
@@ -118,10 +118,15 @@ Two PRs minimum (2a, then 2b+2c), per the §10 "re-exporter first" decomposition
 2. **Synthesis directive home.** ✅ **`src/prompts/synthesis-inline.md`** (operator-tunable). `loadSynthesisInlineDirective()` reads it and falls back to `DEFAULT_SYNTHESIS_INLINE_DIRECTIVE` when absent.
 3. **Tournament collapse.** ✅ **Deferred.** The gate is `aggregatorMode === "synthesis"`; tournament keeps its verbatim-winner delivery. Revisit as the "stream a fixed string" micro-sprint.
 
-## 10. 2c checklist (remaining)
+## 10. 2c checklist
 
-- [ ] Enable `aggregator.inlineSynthesis` locally; run a representative set of swarm chats with it ON and OFF (the Sprint-1 per-turn log line exposes the 2-gen baseline; the collapse log line — "1 brain generation this turn" — marks the ON path).
-- [ ] Compare trace-memory quality scores (captured per run) ON vs OFF; confirm synthesis quality holds.
-- [ ] Compare per-turn token counts / cost banner — expect a drop (aggregator generation removed).
-- [ ] If quality holds: flip `inlineSynthesis` default to ON, update the README "MoA pipeline" prose + mermaid diagram (doc-freshness §7), and note the flip here.
+**Measurement DONE (2026-06-22)** — live A/B, deepseek-v3 orchestrator + proposers over OpenRouter, N=3 then N=8 diverse prompts (REST / locking / OOP / iterative-Fibonacci code / DB-index / HTTP1.1-vs-2 / microservices-vs-monolith / CAP):
+
+- [x] Ran swarm chats ON and OFF. Collapse fired **8/8** on ON (log: "Inline-synthesis collapse: handing N drafts → 1 brain generation"); aggregator ran **8/8** on OFF (log: "Starting aggregation").
+- [x] Quality **HOLDS** — ON answers equivalent or marginally better across all prompts (incl. code/long-form/contentious; e.g. the collapsed code answer added a docstring + input validation). Trace-memory quality scores were a non-discriminator (signal-derived → 1.000 on both ON and OFF because proposers converged); quality was judged on the answers themselves.
+- [x] Token / cost / latency (N=8): **latency −31%** (40.6s→27.8s avg, every prompt faster — removing the serial aggregator step is the real win); **completion tokens −16%** (the aggregator generation removed); **cost only −3.8%** and **prompt tokens −1.1%** (the final stream's large system prompt dominates and is shared by both paths). Earlier live runs also confirmed the collapsed synthesizer can call tools mid-synthesis (deepseek called `code_execution`).
+
+**Remaining:**
+
+- [ ] **Flip `inlineSynthesis` default to ON** (quality held → recommended). Gate: `settings.aggregator?.inlineSynthesis === true` in `moa.ts` → `!== false`, OR add `aggregator.inlineSynthesis: true` to `DEFAULT_SETTINGS` (settings-store.ts, no `aggregator` today). Same PR: update the "inlineSynthesis OFF (default)" gate test in `moa.test.ts`, the README "MoA pipeline" prose + mermaid (doc-freshness §7), §9.1 above, and the CLAUDE.md next-session handoff note. NOTE: the trace-memory quality-score comparison the original plan named is a weak proxy (converging proposers max it to 1.000 on both arms) — judge by answers + the latency/token deltas instead.
 - [ ] (Later micro-sprint) tournament collapse via a stream-fixed-string mechanism.

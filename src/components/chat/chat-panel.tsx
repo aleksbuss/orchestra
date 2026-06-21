@@ -34,8 +34,9 @@ function chatMessagesToUIMessages(chatMessages: ChatMessage[]): UIMessage[] {
       result.push({
         id: m.id,
         role: "user",
+        content: m.content || "",
         parts: [{ type: "text" as const, text: m.content }],
-      });
+      } as UIMessage);
     } else if (m.role === "assistant") {
       const parts: UIMessage["parts"] = [];
 
@@ -64,8 +65,9 @@ function chatMessagesToUIMessages(chatMessages: ChatMessage[]): UIMessage[] {
         result.push({
           id: m.id,
           role: "assistant",
+          content: m.content || "",
           parts,
-        });
+        } as UIMessage);
       }
     }
     // Skip "tool" role messages - they are paired with assistant toolCalls above

@@ -1609,6 +1609,25 @@ export function isLocalProvider(config: ModelConfig): boolean {
 }
 
 /**
+ * Whether `config` can authenticate WITHOUT createModel/createEmbeddingModel
+ * throwing: a provider that doesn't require a key (local ollama/sglang/vllm), an
+ * explicit `apiKey`, or the provider's env key. Mirrors the guard inside both
+ * factories so a caller (e.g. `/api/health`) can detect a SILENTLY unusable
+ * model — an unconfigured embeddings model disables RAG memory search, MoA
+ * disagreement detection, and trace-memory with only a per-request log line.
+ */
+export function isModelKeyConfigured(config: {
+  provider: string;
+  apiKey?: string;
+}): boolean {
+  const providerDef = MODEL_PROVIDERS[config.provider];
+  if (!providerDef?.requiresApiKey) return true; // local / keyless provider
+  if (config.apiKey) return true;
+  const envKeyName = providerDef.envKey;
+  return envKeyName ? !!process.env[envKeyName] : false;
+}
+
+/**
  * Create an AI SDK language model from our ModelConfig
  */
 export function createModel(

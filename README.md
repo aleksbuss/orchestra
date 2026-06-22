@@ -6,7 +6,7 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-2760%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-2762%20passing-brightgreen)](#tests)
 [![Post-Mortems](https://img.shields.io/badge/post--mortems-79%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
@@ -38,7 +38,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 
 ## What makes Orchestra different
 
-Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The aggregator then synthesizes — and if the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the aggregator's output and applies a revisor pass when issues are flagged.
+Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The synthesis then runs **inline in the final tool-capable stream by default** — the standalone aggregator is collapsed away, so a swarm turn costs **one brain generation, not two**, and the synthesizer can call tools mid-synthesis (set `aggregator.inlineSynthesis: false` to opt back into a standalone aggregator). If the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the synthesis output and applies a revisor pass when issues are flagged (reflection and tournament modes use the standalone aggregator).
 
 If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (79 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
@@ -74,6 +74,8 @@ flowchart LR
     D --> OUT
     OUT --> CB[Cost banner<br/>tokens + USD]
 ```
+
+> **Inline-synthesis collapse (default since 2c, 2026-06).** The `Aggregator` stage above runs **inline in the final tool-capable stream** by default — one brain generation per turn instead of two, and the synthesizer can call tools mid-synthesis. Backed by an N=8 live A/B: quality held, latency −31%, completion tokens −16%. The **standalone aggregator** still runs on the reflection-enabled, tournament, and fewer-than-2-draft paths, and whenever `aggregator.inlineSynthesis: false`.
 
 ![The Swarm Activity panel, live — for a locking question the Router spun up a Database Architect, Concurrency Engineer, Performance Optimizer, and a code-guaranteed QA Auditor / Skeptic, then synthesized their drafts](docs/assets/orchestra-swarm-activity.png)
 

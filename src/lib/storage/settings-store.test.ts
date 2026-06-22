@@ -67,6 +67,16 @@ describe("DEFAULT_SETTINGS — internal consistency", () => {
     expect(DEFAULT_SETTINGS.auth.mustChangeCredentials).toBe(true);
     expect(DEFAULT_SETTINGS.auth.enabled).toBe(true);
   });
+
+  it("2c flip — MoA inline-synthesis collapse is the production default (ON)", async () => {
+    const { DEFAULT_SETTINGS } = await loadModule();
+    // This is the ONLY place the collapse default lives: the moa.ts gate reads
+    // `=== true`, so every getSettings() caller inherits ON from here while a
+    // direct settings object (e.g. a unit test) stays on the standalone
+    // aggregator unless it opts in. See docs/moa-aggregator-collapse.md.
+    expect(DEFAULT_SETTINGS.aggregator?.inlineSynthesis).toBe(true);
+    expect(DEFAULT_SETTINGS.aggregator?.mode).toBe("synthesis");
+  });
 });
 
 describe("getSettings — first read, no file on disk", () => {

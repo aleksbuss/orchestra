@@ -722,7 +722,7 @@ describe("Sprint 2 — inline-synthesis collapse gate (runMoAEnsemble)", () => {
     expect(result.cumulativeUsage).toBeDefined();
   }, 30_000);
 
-  it("inlineSynthesis OFF (default) → aggregator runs, NO handoff (Sprint-1 behavior preserved)", async () => {
+  it("inlineSynthesis ABSENT in the passed settings → gate keeps the aggregator (the production default ON lives in DEFAULT_SETTINGS, not the gate)", async () => {
     mockedGenerateObject.mockRejectedValueOnce(
       new Error("force fallback to MOA_PROPOSERS")
     );
@@ -732,10 +732,36 @@ describe("Sprint 2 — inline-synthesis collapse gate (runMoAEnsemble)", () => {
       chatId: "c1",
       userMessage: "design the cache layer",
       history: [],
-      settings: fakeSettings(), // no aggregator config → inlineSynthesis undefined
+      // fakeSettings() bypasses getSettings()/DEFAULT_SETTINGS, so the gate sees
+      // inlineSynthesis === undefined and keeps the standalone aggregator. In
+      // production every settings object carries the DEFAULT_SETTINGS `true` (see
+      // the settings-store default test), so the collapse IS the default there.
+      settings: fakeSettings(),
     });
 
     // 5 proposers + 1 aggregator = 6.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(result.synthesisHandoff).toBeUndefined();
+    expect(result.text).not.toBe("");
+  }, 30_000);
+
+  it("inlineSynthesis explicitly FALSE → aggregator runs, NO handoff (opt-out)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: {
+        ...fakeSettings(),
+        aggregator: { mode: "synthesis", inlineSynthesis: false },
+      },
+    });
+
+    // 5 proposers + 1 aggregator = 6 — explicit opt-out keeps the standalone aggregator.
     expect(mockedGenerateText).toHaveBeenCalledTimes(6);
     expect(result.synthesisHandoff).toBeUndefined();
     expect(result.text).not.toBe("");

@@ -823,9 +823,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const aggregatorMode = settings.aggregator?.mode ?? "synthesis";
 
   // ── Sprint 2: inline-synthesis collapse ────────────────────────────
-  // docs/moa-aggregator-collapse.md. When the operator opts in
-  // (`aggregator.inlineSynthesis`) AND this is the plain synthesis path
-  // (mode === "synthesis", reflection OFF, ≥2 successful drafts), SKIP the
+  // docs/moa-aggregator-collapse.md. By DEFAULT (2c flip — `DEFAULT_SETTINGS`
+  // ships `aggregator.inlineSynthesis: true`, so every getSettings() caller has
+  // it on) on the plain synthesis path (mode === "synthesis", reflection OFF,
+  // ≥2 successful drafts), SKIP the
   // separate aggregator generateText entirely. Hand the drafts UP via
   // `synthesisHandoff`; runAgent's final tool-capable stream — which always
   // runs afterward — synthesizes them inline: ONE brain generation this turn
@@ -838,10 +839,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // `aggregatorMode === "tournament"`, so it does NOT collapse here either —
   // it runs the inline aggregator below as its last resort (safe).
   //
-  // Default OFF (the flag is opt-in); until 2c flips it, this branch is never
-  // taken in production. `successfulDrafts.length >= 2` is guaranteed here (we
-  // returned early for 0 and 1 drafts) but stated explicitly to match the
-  // documented gate.
+  // Default ON since the 2c flip (2026-06-22), after the N=8 live A/B: quality
+  // held, latency −31%, completion tokens −16%. The default lives in
+  // `DEFAULT_SETTINGS` (settings-store.ts); the gate below reads `=== true`, so a
+  // settings object NOT built through getSettings() (e.g. a unit test passing
+  // `fakeSettings()` directly) does NOT collapse unless it sets the flag. Set
+  // `aggregator.inlineSynthesis: false` to opt OUT. `successfulDrafts.length >= 2`
+  // is guaranteed here (we returned early for 0 and 1 drafts) but stated
+  // explicitly to match the gate.
   if (
     settings.aggregator?.inlineSynthesis === true &&
     aggregatorMode === "synthesis" &&

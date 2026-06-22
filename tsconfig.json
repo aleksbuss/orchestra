@@ -47,6 +47,7 @@
     "reference",
     "bundled-skills",
     "data",
+    "data-backups",
     "tests/e2e",
     "scripts"
   ]

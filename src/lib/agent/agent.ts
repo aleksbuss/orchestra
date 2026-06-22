@@ -11,7 +11,11 @@ import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import type { ModelConfig } from "@/lib/types";
-import { buildSystemPrompt, PLAIN_CHAT_TOOL_OVERRIDE } from "@/lib/agent/prompts";
+import {
+  buildSystemPrompt,
+  PLAIN_CHAT_TOOL_OVERRIDE,
+  loadSynthesisInlineDirective,
+} from "@/lib/agent/prompts";
 import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
 import { createAgentTools } from "@/lib/tools/tool";
@@ -35,7 +39,12 @@ import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/co
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
-import { runMoAEnsemble } from "@/lib/agent/moa";
+import {
+  runMoAEnsemble,
+  buildInlineSynthesisInjection,
+  type MoAResult,
+} from "@/lib/agent/moa";
+import { captureSuccessfulTrace } from "@/lib/agent/trace-memory";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
 import { resolveWorkDirForProject } from "@/lib/storage/project-store";
 
@@ -696,6 +705,12 @@ export async function runAgent(options: RunAgentOptions) {
   // its own running sum via `moaResult.cumulativeUsage`; we hold it here and
   // merge it with the streamText `onFinish` usage at save time.
   let turnExtraUsage: import("@/lib/types").ChatUsage | undefined = undefined;
+  // Sprint 2 — set on the collapsed synthesis path (MoA handed drafts up instead
+  // of a finished consensus). When present, this final stream IS the synthesizer;
+  // the trace-memory capture relocates to onFinish, scored against the streamed
+  // synthesis text using the signals plumbed up here.
+  let synthesisHandoffForCapture: MoAResult["synthesisHandoff"] | undefined =
+    undefined;
 
   if (options.swarmEnabled !== false) {
     try {
@@ -713,7 +728,38 @@ export async function runAgent(options: RunAgentOptions) {
       });
       turnExtraUsage = moaResult.cumulativeUsage;
 
-      if (moaResult.text && !moaResult.text.startsWith("All MoA proposer agents failed")) {
+      // The ensemble's output is ADVISORY context for the final stream below,
+      // never the terminal answer (the streamText further down always runs and
+      // re-answers). Inject a consensus ONLY when the ensemble actually
+      // produced one from real drafts. A `bypassed` result (Router judged the
+      // prompt trivial) carries no consensus — the single-agent stream answers
+      // it directly. The `drafts.length > 0` guard also stops the old latent
+      // bug of injecting a "0 expert agents" consensus from the bypass path.
+      if (moaResult.synthesisHandoff) {
+        // Sprint 2 — COLLAPSED synthesis path (docs/moa-aggregator-collapse.md).
+        // The aggregator generateText did NOT run; the ensemble handed the
+        // proposer drafts UP. Inject them + the ported synthesis directive +
+        // the PM #39 disagreement marker into the system prompt so THIS final
+        // tool-capable stream synthesizes them inline — one brain generation.
+        // Trace capture relocates to onFinish (the synthesized text only exists
+        // once the stream finishes); we stash the handoff for it here.
+        const handoff = moaResult.synthesisHandoff;
+        const directive = await loadSynthesisInlineDirective();
+        systemPrompt += buildInlineSynthesisInjection(
+          directive,
+          handoff.drafts,
+          handoff.disagreementMarker
+        );
+        synthesisHandoffForCapture = handoff;
+        console.log(
+          `[MoA] Inline synthesis: injected ${handoff.drafts.length} expert drafts into the final stream's system prompt → 1 brain generation this turn.`
+        );
+      } else if (
+        !moaResult.bypassed &&
+        moaResult.drafts.length > 0 &&
+        moaResult.text &&
+        !moaResult.text.startsWith("All MoA proposer agents failed")
+      ) {
         const truncatedConsensus = moaResult.text.length > 5000
           ? moaResult.text.substring(0, 5000) + "\n\n...[TRUNCATED FOR CONTEXT LIMITS]..."
           : moaResult.text;
@@ -728,7 +774,13 @@ ${truncatedConsensus}
 
 Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.map(d => `${d.proposerId}=${d.latencyMs}ms`).join(', ')}; aggregation: ${moaResult.aggregationLatencyMs}ms)`;
 
-        console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total)`);
+        // Measurement (Sprint 1 — quantifies the Sprint 2 double-generation
+        // target): the swarm path ran an aggregator generation AND a final
+        // stream follows below. This line makes the "two generations per swarm
+        // turn" visible in logs for before/after comparison.
+        console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total). A final tool-capable stream follows → 2 brain generations this turn (aggregator + stream).`);
+      } else if (moaResult.bypassed) {
+        console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);
       }
     } catch (err) {
       console.warn(`[MoA] Ensemble failed, continuing with single-agent mode:`, err);
@@ -972,6 +1024,45 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         } catch (saveErr) {
           console.error("[Agent] Failed to save chat after turn:", saveErr);
           // Non-critical: don't block DAG finalization
+        }
+
+        // Sprint 2 — relocated trace-memory capture for the COLLAPSED synthesis
+        // path. On the normal path MoA captures the trace itself (it has the
+        // aggregator's finalText); collapsed, the synthesized text is THIS
+        // stream's output, so capture moves here. Best-effort + fire-and-forget
+        // (mirrors MoA's own capture): never blocks DAG finalization. The
+        // PM #61 unwrap makes a serialized `response`-tool answer record as
+        // prose rather than a JSON blob.
+        if (synthesisHandoffForCapture) {
+          const synthesizedText =
+            unwrapSerializedResponseCall(
+              getLastAssistantText(responseMessages)
+            ).trim() || (continuationText ?? "").trim();
+          if (synthesizedText) {
+            void captureSuccessfulTrace({
+              userPrompt: options.userMessage,
+              finalText: synthesizedText,
+              signals: synthesisHandoffForCapture.signals,
+              // The stream's model IS the synthesizer on this path — more
+              // accurate attribution than MoA's brainConfig would be.
+              brainConfig: resolvedModelConfig,
+              settings,
+              projectId: options.projectId,
+            })
+              .then((r) => {
+                if (r.captured) {
+                  console.log(
+                    `[MoA] Trace memory: captured inline-synthesis trace ${r.traceId} (score ${r.qualityScore.toFixed(3)}).`
+                  );
+                }
+              })
+              .catch((err) => {
+                console.warn(
+                  "[MoA] Trace-memory capture (inline synthesis) failed (non-fatal):",
+                  err instanceof Error ? err.message : err
+                );
+              });
+          }
         }
 
         finalizeDag("completed");

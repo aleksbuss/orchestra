@@ -16,6 +16,21 @@ import { capToolResultSize } from "@/lib/agent/token-governor";
 const POLL_NO_PROGRESS_BLOCK_THRESHOLD = 16;
 const POLL_BACKOFF_SCHEDULE_MS = [5000, 10000, 30000, 60000] as const;
 
+/**
+ * Universal repeat guard (Sprint 1 — tool-loop fix). Independent of
+ * success/failure: an agent that issues the SAME (tool + args) call
+ * ≥ REPEAT_BLOCK_THRESHOLD times within the last REPEAT_WINDOW calls is in a
+ * loop. This is the gap the old guard missed — `lastDeterministicFailure` only
+ * blocks an IMMEDIATELY-consecutive identical FAILURE, and a successful leg
+ * resets it to null. So `write(success) → execute(error) → write(success) →
+ * execute(error)` (the success-leg loop) AND identical success spam both
+ * escaped. Keyed on `stableSerialize(args)`, so a legitimate fix-loop that
+ * CHANGES the arguments each pass is NOT flagged. Poll-like calls are exempt —
+ * they own the separate no-progress backoff above (threshold 16, not 3).
+ */
+const REPEAT_WINDOW = 8;
+const REPEAT_BLOCK_THRESHOLD = 3;
+
 function toStableValue(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => toStableValue(item));
@@ -283,6 +298,8 @@ function normalizeNoProgressValue(value: unknown): unknown {
 export function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: string; parentNodeId?: string }): ToolSet {
   let lastDeterministicFailure: { callKey: string; signature: string } | null = null;
   const noProgressByCall = new Map<string, { hash: string; count: number }>();
+  // Bounded ring of recent (tool+args) call keys for the universal repeat guard.
+  const recentCallKeys: string[] = [];
   const wrappedTools: ToolSet = {};
 
   for (const [toolName, toolDef] of Object.entries(tools)) {
@@ -295,6 +312,26 @@ export function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: 
       ...toolDef,
       execute: async (input: unknown, options: ToolExecutionOptions) => {
         const callKey = `${toolName}:${stableSerialize(input)}`;
+
+        // Universal repeat guard (Sprint 1): block when the SAME (tool+args)
+        // call recurs ≥ threshold within the recent window — catches identical
+        // success spam AND A→B→A→B loops the success-leg reset let escape. Poll
+        // is exempt (it owns the no-progress backoff below). Record the attempt
+        // first so the count reflects everything the model tried this turn,
+        // including calls a more specific guard blocks afterward.
+        if (!isPollLikeCall(toolName, input)) {
+          recentCallKeys.push(callKey);
+          if (recentCallKeys.length > REPEAT_WINDOW) recentCallKeys.shift();
+          const repeatCount = recentCallKeys.filter((k) => k === callKey).length;
+          if (repeatCount >= REPEAT_BLOCK_THRESHOLD) {
+            return (
+              `[Loop guard] CRITICAL: you have issued this exact call ("${toolName}" with identical arguments) ${repeatCount} times within the last ${recentCallKeys.length} tool calls. ` +
+              `Repeating it will NOT change the result — this is a loop. This call was NOT executed.\n` +
+              `Stop and do ONE of: (a) use the result you already obtained, (b) change the arguments, or (c) take a different approach to the task.`
+            );
+          }
+        }
+
         const previousNoProgress = noProgressByCall.get(callKey);
         if (
           previousNoProgress &&

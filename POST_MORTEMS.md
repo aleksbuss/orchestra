@@ -38,6 +38,35 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 77. Tool-less MoA proposers returned empty drafts on tool-demanding prompts
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (narrow trigger — only when the user prompt explicitly demands a tool; the swarm degrades gracefully to fewer drafts. But "run this", "search that", "use X tool" are common, and dropping below 2 successful drafts blocks the inline-synthesis collapse / weakens synthesis.)
+**Symptoms:** Swarm proposers return `(empty draft)` (dropped by `isSuccessfulDraft`) when the user message demands a tool ("Use the code_execution tool to compute…", "Run the code", "Search for…"). Observed live: gemini-2.5-flash proposers went 3/4 empty on a "run the code" prompt; only the code-oriented persona answered (in text). The ensemble shrank to 1 draft → "Only 1 draft succeeded, skipping aggregation" → the inline-synthesis collapse (needs ≥2) could not fire.
+**Detection:** Live OpenRouter run, then reproduced with `runMoAEnsemble`: a tool-demanding prompt scored 1/3 successful drafts vs 3/3 for the same topic phrased plainly. **An initial "the extraction ignores the reasoning channel" hypothesis was DISPROVEN by a 2-line isolation probe** — gemini-2.5-flash AND deepseek-r1 both populate `.text` (reasoning channel empty, no truncation at the 2048 proposer cap). The real differentiator was the tool demand, not the model.
+**Root Cause:** Proposers run TOOL-LESS by default (search_web only with a configured key — PM #68; code_execution only on explicit opt-in — PM #50). `augmentProposerPromptForTools` (`moa-proposer-tools.ts`) returned the persona prompt UNCHANGED for tool-less proposers — it never told them they have no tools. A tool-demanding user message then led non-code personas (historian, skeptic/auditor) to emit an empty/refusal answer instead of a textual draft.
+**Resolution:** `augmentProposerPromptForTools` now appends `PROPOSER_NO_TOOLS_DIRECTIVE` for an undefined/empty toolset — the proposer-side mirror of PM #61's PLAIN_CHAT_TOOL_OVERRIDE: "you have no tools; do not attempt one; answer in prose; never return empty." Live re-run: 1/3 → 2/3 (the historian recovered from empty to a 1245-char prose draft). Not a 100% guarantee — a model can still occasionally empty a given persona — but proposer drafts are best-effort and the ensemble tolerates partial failure (needs ≥2).
+**Regression Coverage:** [`moa-tools.test.ts`](src/lib/agent/moa-tools.test.ts) — tool-less/empty toolset → directive appended; tool-bearing → mandate appended, directive NOT; directive-wording pin.
+**Doc Updates:** `CLAUDE.md` §1 (MoA).
+**Rule:** Any tool-LESS LLM call whose prompt might demand a tool needs an explicit "you have no tools, answer in prose, never empty" override (the proposer mirror of PLAIN_CHAT_TOOL_OVERRIDE). And: verify a bug hypothesis with an isolation repro BEFORE coding — the first "reasoning-channel" theory here was wrong, and a cheap probe caught it before a speculative fix shipped.
+
+---
+
+## 76. Loop guard missed success-leg + A→B→A→B tool loops (only consecutive identical FAILURES were blocked)
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P1 (an agent burns its entire per-turn step budget / Auto-Pilot iteration on a loop; weak models then hallucinate output format from the repeated-error context — "format degradation". Bounded per turn by `stopWhen: stepCountIs(MAX_TOOL_STEPS_PER_TURN)` and per Auto-Pilot by `MAX_AUTO_PILOT_ITERATIONS`, so not an unbounded P0 billing leak, but every loop wastes the whole budget.)
+**Symptoms:** The agent repeats `write_text_file(success) → code_execution(error) → write_text_file(success) → code_execution(error) …` indefinitely, or spams `write_text_file` with the EXACT same arguments, and the guard never intervenes. The repeated identical errors also crowd the context window, after which a weak model "forgets" the required output format.
+**Detection:** External code audit (Gemini 3 Pro, 2026-06) reproduced against `tool-guard.ts` mechanics; confirmed by reading the guard.
+**Root Cause:** `applyGlobalToolLoopGuard` (`tool-guard.ts`) only blocked an IMMEDIATELY-consecutive identical *deterministic failure* via `lastDeterministicFailure`, which is reset to `null` on ANY non-failing call. A successful leg (`write_text_file` returns `{success:true}`) wiped the failure memory, so the alternating `code_execution(error)` always looked "fresh" and never tripped the consecutive-identical check. Identical *successful* calls were tracked by nothing — `noProgressByCall` is gated on `isPollLikeCall` (the `process` poll/log tool only).
+**Resolution:** Added a universal repeat guard: a bounded ring `recentCallKeys` records every non-poll `(toolName + stableSerialize(args))` call; the guard blocks (without executing) when the same key recurs ≥ `REPEAT_BLOCK_THRESHOLD` (3) within `REPEAT_WINDOW` (8) calls. Catches identical-success spam AND A→B→A→B loops. Keyed on serialized args, so a legitimate fix-loop that CHANGES the content each pass is NOT flagged. Poll-like calls stay exempt (they own the no-progress backoff). The fast 2nd-consecutive-failure block is retained.
+**Context-bloat note (audit Claim 2, NOT implemented):** the audit also proposed mid-loop "garbage collection" — splicing old duplicate errors into a synthetic message. A measurement (5 near-duplicate lint errors → `governMessages`) showed this does NOT reproduce: `governMessages` Stage 1 (`pruneMessages` with `toolCalls: "before-last-2-messages"`) ALREADY drops old tool-call/result content pair-safely while preserving the system + user-task anchors (the task survived even on a 4096 window; 5 errors collapsed to 1). A naive splice would also break tool-call↔tool-result pairing → provider 400 (the class `pruneMessages` exists to avoid). Skipped as redundant + unsafe. The one residual gap — `slideToRecentWindow` (Stage 2) dropping the task on a tiny window — is now CLOSED by concise-anchor preservation: the slide keeps the leading system run + first user turn VERBATIM, capped at `ANCHOR_BUDGET_RATIO` (25%) of the budget so a huge first-message paste is NOT re-pinned (that would defeat the budget). Regression: the two "PM #76" cases in [`token-governor.test.ts`](src/lib/agent/token-governor.test.ts) (concise task survives the slide; huge paste is not anchored).
+**Regression Coverage:** [`tool-guard.test.ts`](src/lib/agent/tool-guard.test.ts) — "Sprint 1: universal repeat guard" describe block (identical-success spam blocked on the 3rd call, A→B→A→B blocked, changing-args fix-loop NOT blocked, poll exemption).
+**Doc Updates:** `CLAUDE.md` §4 (Loop Guard Middleware).
+**Rule:** The loop guard must detect repeats by `(tool + args)` recurrence over a sliding window, INDEPENDENT of success/failure. A success between two identical failing calls is NOT progress — never let it reset the loop-detection state.
+
+---
+
 ## 75. Boot-only pricing refresh guaranteed a "degraded" health status after 24h uptime
 **Date:** 2026-06
 **Status:** RESOLVED

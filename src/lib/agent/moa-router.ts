@@ -24,6 +24,7 @@ import { generateObject, type ModelMessage } from "ai";
 import { z } from "zod";
 import type { ModelConfig } from "@/lib/types";
 import { createModel } from "@/lib/providers/llm-provider";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import {
   detectProposerRole,
   MOA_PROPOSERS,
@@ -67,6 +68,17 @@ export async function generateDynamicSwarm(
     const routerModel = createModel(modelConfig, {});
     const { object, usage } = await generateObject({
       model: routerModel,
+      // Every other LLM call in the agent/MoA path caps output via
+      // resolveMaxOutputTokens(settings.<role>Model) (agent.ts, moa.ts). This
+      // call was the one exception, so `generateObject` requested the
+      // model's own default ceiling (e.g. 65535) — on an account near its
+      // OpenRouter credit limit that 402s outright, and the catch below
+      // unconditionally falls back to `requiresSwarm: true`. The Router then
+      // ALWAYS fans out the full proposer ensemble (more expensive than the
+      // failed Router call), silently defeating the "skip trivial prompts"
+      // bypass it exists to provide. Confirmed live during forceSwarm
+      // verification (2026-06).
+      maxOutputTokens: resolveMaxOutputTokens(modelConfig),
       schema: z.object({
         requiresSwarm: z.boolean().describe("Set to false ONLY IF the user's message is a simple conversational reply (e.g. 'thanks', 'hello') or a trivial task that a single AI agent can handle easily without needing a committee of diverse experts."),
         personas: z.array(z.object({

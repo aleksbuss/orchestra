@@ -23,9 +23,30 @@ export default function globalSetup(): void {
     );
   }
 
-  // Fresh isolated dir.
+  // PM #76 — backupRoot() (storage/backup.ts) derives from `getDataDir()/..`,
+  // so an isolated ORCHESTRA_DATA_DIR alone does NOT isolate backups (both
+  // `.e2e-data/..` and `data/..` resolve to the same `data-backups/`). The dev
+  // server boots for real during e2e and WILL run the boot backup, so this
+  // must be isolated explicitly via ORCHESTRA_BACKUP_DIR (set in
+  // playwright.config.ts), with the same refuse-if-it-collides guard.
+  const backupDir = process.env.ORCHESTRA_BACKUP_DIR;
+  const realBackupRoot = path.resolve(process.cwd(), "data-backups");
+  if (!backupDir) {
+    throw new Error(
+      "E2E global-setup: ORCHESTRA_BACKUP_DIR must be set (see playwright.config.ts) — " +
+        "without it, e2e backups land in the operator's real data-backups/."
+    );
+  }
+  if (path.resolve(backupDir) === realBackupRoot) {
+    throw new Error(
+      `E2E global-setup: ORCHESTRA_BACKUP_DIR resolves to the real backup dir (${realBackupRoot}) — refusing to run.`
+    );
+  }
+
+  // Fresh isolated dirs.
   fs.rmSync(dataDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(dataDir, "settings"), { recursive: true });
+  fs.rmSync(backupDir, { recursive: true, force: true });
 
   // Reuse the operator's real model/key config (read-only copy) when present, so
   // model-dependent specs have working providers locally. On CI there is no

@@ -353,4 +353,16 @@ describe("generateDynamicSwarm — prompt shape", () => {
       controller.signal
     );
   });
+
+  it("caps output via resolveMaxOutputTokens — every other agent/MoA LLM call does (live bug fix)", async () => {
+    // Without this, generateObject requests the model's own default ceiling
+    // (e.g. 65535) instead of the configured budget; on a low-credit
+    // OpenRouter account that 402s and silently forces requiresSwarm:true
+    // on EVERY turn (confirmed live during the forceSwarm verification).
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+    await generateDynamicSwarm("x", [], STUB_MODEL, false);
+    const callArgs = mockedGenerateObject.mock.calls[0][0] as any;
+    expect(typeof callArgs.maxOutputTokens).toBe("number");
+    expect(callArgs.maxOutputTokens).toBeGreaterThan(0);
+  });
 });

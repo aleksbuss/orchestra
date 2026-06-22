@@ -94,6 +94,55 @@ function stamp(d: Date): string {
  *
  * @param opts.now  inject the clock for deterministic test ordering.
  */
+// PM #78 — `data/` is LIVE while the backup runs: chat-store, queue-store, and
+// settings-store all write via `safeWriteFile` (temp-write + rename) on their
+// own schedule, completely unsynchronized with the backup's `fs.cp`. `fs.cp`
+// internally lists a directory, then `lstat`s/copies each entry — if a file is
+// renamed away in the gap between those two steps, `fs.cp` throws ENOENT and
+// the WHOLE copy aborts. Confirmed live: a boot backup raced a concurrent
+// `chat-index.<uuid>.json.tmp` → `chat-index.json` rename and threw
+// `ENOENT: ... lstat '.../chat-index.<uuid>.json.tmp'`.
+//
+// ROOT FIX = exclude `*.tmp` from the copy. The ONLY thing ever created-then-
+// removed is safeWriteFile's `<base>.<uuid><ext>.tmp` artifact (it is renamed
+// ONTO the real file); the real files are only ever ATOMICALLY rename-replaced,
+// so they never go absent. Dropping `*.tmp` kills the dominant race at the
+// source AND avoids copying worthless transient artifacts into the backup.
+//
+// The retry stays as defense-in-depth for any non-`.tmp` entry legitimately
+// deleted mid-copy — but retry ALONE is NOT sufficient: it has no backoff, so
+// under sustained churn of a hot file every attempt re-races the same window
+// (verified — 3 retries FAIL under tight-loop temp+rename churn while the
+// `.tmp` filter PASSES; the original "a retry is overwhelmingly likely to
+// succeed" held only at realistic ~80ms debounce cadence, not under load).
+const COPY_RETRY_ATTEMPTS = 3;
+
+async function copyDataDirWithRetry(dataDir: string, tmpDir: string): Promise<void> {
+  for (let attempt = 1; attempt <= COPY_RETRY_ATTEMPTS; attempt++) {
+    try {
+      await fs.cp(dataDir, tmpDir, {
+        recursive: true,
+        filter: (src) => {
+          // PM #78 — drop safeWriteFile's transient temp artifacts: they are
+          // created-then-renamed-away mid-copy (the ENOENT race) and are
+          // worthless in a backup. The real file they become is copied normally.
+          if (src.endsWith(".tmp")) return false;
+          const rel = path.relative(dataDir, src);
+          if (!rel) return true; // the data dir itself
+          const top = rel.split(path.sep)[0];
+          return !EXCLUDED_TOP_LEVEL.has(top);
+        },
+      });
+      return;
+    } catch (err) {
+      // Partial copy from the failed attempt must not linger into the retry.
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      const isEnoent = (err as NodeJS.ErrnoException)?.code === "ENOENT";
+      if (!isEnoent || attempt === COPY_RETRY_ATTEMPTS) throw err;
+    }
+  }
+}
+
 export async function createDataBackup(opts: { now?: Date } = {}): Promise<{ path: string } | null> {
   if (backupDisabled()) return null;
   const dataDir = getDataDir();
@@ -110,23 +159,9 @@ export async function createDataBackup(opts: { now?: Date } = {}): Promise<{ pat
   const finalDir = path.join(root, `${BACKUP_DIR_PREFIX}${stamp(now)}`);
   const tmpDir = path.join(root, `${TMP_DIR_PREFIX}${stamp(now)}-${process.pid}`);
 
-  try {
-    await fs.cp(dataDir, tmpDir, {
-      recursive: true,
-      filter: (src) => {
-        const rel = path.relative(dataDir, src);
-        if (!rel) return true; // the data dir itself
-        const top = rel.split(path.sep)[0];
-        return !EXCLUDED_TOP_LEVEL.has(top);
-      },
-    });
-    // Atomic publish: a reader never sees a half-populated `data-…` dir.
-    await fs.rename(tmpDir, finalDir);
-  } catch (err) {
-    // Clean the partial temp copy; don't leave crash-litter behind.
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-    throw err;
-  }
+  await copyDataDirWithRetry(dataDir, tmpDir);
+  // Atomic publish: a reader never sees a half-populated `data-…` dir.
+  await fs.rename(tmpDir, finalDir);
 
   await pruneBackups();
   return { path: finalDir };

@@ -20,6 +20,8 @@ import { knowledgeQuery } from "@/lib/tools/knowledge-query";
 import { searchWeb, isSearchUsable } from "@/lib/tools/search-engine";
 import { createWebTaskTool } from "@/lib/tools/web-task";
 import { createFetchWebpageTool } from "@/lib/tools/fetch-webpage";
+import { verifyWrittenSource } from "@/lib/tools/post-write-verify";
+import { recordFileWrite } from "@/lib/tools/write-rewrite-budget";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1125,6 +1127,16 @@ export function createAgentTools(
           };
         }
 
+        // Cross-turn rewrite-loop backstop (PM #80 follow-up): the per-turn loop
+        // guard resets each turn and cannot see a file rewritten across many
+        // "continue" turns. This caps rewrites of one file within a chat and
+        // refuses the write (without executing it) once the cap is hit, forcing
+        // a read/verify/ask instead of another blind full rewrite.
+        const rewriteBudget = recordFileWrite(context.chatId, resolvedPath);
+        if (rewriteBudget.action === "block") {
+          return { success: false, error: rewriteBudget.message };
+        }
+
         // Best-effort recovery snapshot of the previous content. snapshotBeforeWrite
         // is internally try/catch and returns null on any error — the write must
         // never be blocked by a snapshot bug. See `src/lib/storage/snapshots.ts`.
@@ -1141,12 +1153,32 @@ export function createAgentTools(
         await fs.writeFile(resolvedPath, content, "utf-8");
         const after = await fs.stat(resolvedPath);
 
+        // Grounding signal (PM #80): a syntax-only check on the content just
+        // written. `{ success: true, bytes }` alone tells the model the WRITE
+        // landed, not that the CODE is valid — so a model emitting corrupted
+        // source rewrites blindly forever. Attaching precise diagnostics + a
+        // "fix in place, don't rewrite" directive breaks that loop. null = a
+        // non-source/empty/oversized file or a checker error → no signal added.
+        const verification = await verifyWrittenSource(resolvedPath, content);
+
         return {
           success: true,
           path: resolvedPath,
           bytes: after.size,
           created: !existed,
           overwritten: existed,
+          ...(verification
+            ? verification.valid
+              ? { syntaxValid: true }
+              : {
+                  syntaxValid: false,
+                  syntaxErrors: verification.diagnostics,
+                  warning: verification.hint,
+                }
+            : {}),
+          ...(rewriteBudget.action === "warn"
+            ? { rewriteWarning: rewriteBudget.message }
+            : {}),
         };
       } catch (error) {
         return {

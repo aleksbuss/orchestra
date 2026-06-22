@@ -162,6 +162,46 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.text).toBe("and the rest of it.");
   });
 
+  // ── Step-cap PAUSE (operator-requested): a turn that exhausts its per-turn
+  // step budget without delivering an answer must emit a DETERMINISTIC "press
+  // Continue" notice, NOT a forced (masquerading-as-complete) model answer. ────
+  it("step-cap PAUSE: no answer + stepLimitReached → deterministic Continue notice, NO model call", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [searchToolCall(), searchToolResult()], // delivered nothing
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never, // would throw if the forced-answer path ran
+    });
+    expect(res.text).toContain("Reached the step limit");
+    expect(res.text).toContain("Continue");
+    expect(res.uiNotice).toContain("per-turn step limit");
+  });
+
+  it("step-cap PAUSE does NOT fire when an answer WAS delivered (even at the cap)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [responseToolCall("Actually finished.")],
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never,
+    });
+    expect(res.text).toBe(""); // delivered → no pause, no force
+  });
+
+  it("without stepLimitReached, a no-answer turn still FORCES a final answer (PM #69 unchanged)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      // No-deliverable input that passes the real generateText schema (a
+      // <thinking>-only turn strips to empty), so the FORCE path actually runs.
+      responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+      finishReason: "other",
+      stepLimitReached: false,
+      model: modelReturning("FORCED ANSWER") as never,
+    });
+    expect(res.text).toBe("FORCED ANSWER");
+  });
+
   it("on forced-generation failure: empty text + a uiNotice (never throws)", async () => {
     const res = await resolveTurnContinuation({
       ...base,

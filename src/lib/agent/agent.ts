@@ -77,8 +77,17 @@ export {
 };
 export type { TurnContinuationResult };
 
-const MAX_TOOL_STEPS_PER_TURN = 30;
-const MAX_TOOL_STEPS_SUBORDINATE = 15;
+// Per-turn tool-step budget. A SAFETY/cost bound on ONE generateText/streamText
+// loop — NOT a task-sizing target (a heavy task spans several user "Continue"s).
+// Raised 30→50 once the runaway protection got stronger (PM #76 loop guard, the
+// per-file rewrite budget, the token governor): the cap can be more generous
+// because identical/looping/oversized churn is now interrupted independently of
+// it. When a turn EXHAUSTS this budget without delivering an answer, the agent
+// emits a deterministic "reached step limit — press Continue" pause notice
+// instead of forcing a model-authored completion summary (which masqueraded as
+// "done"). See resolveTurnContinuation (agent-response.ts).
+const MAX_TOOL_STEPS_PER_TURN = 50;
+const MAX_TOOL_STEPS_SUBORDINATE = 25;
 
 /**
  * Sprint A4 — number of most-recent messages kept VERBATIM in the live context
@@ -946,11 +955,23 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             ? ((event as unknown as { finishReason?: string }).finishReason as string)
             : undefined;
 
+        // Did this turn END because it exhausted the per-turn step cap (vs
+        // finishing)? streamText's onFinish exposes the full `steps` array;
+        // reaching the cap with no delivered answer drives the deterministic
+        // "press Continue" pause notice (resolveTurnContinuation) instead of a
+        // forced completion summary that masquerades as "done".
+        const stepCount = Array.isArray((event as unknown as { steps?: unknown[] }).steps)
+          ? (event as unknown as { steps: unknown[] }).steps.length
+          : undefined;
+        const stepLimitReached =
+          stepCount !== undefined && stepCount >= MAX_TOOL_STEPS_PER_TURN;
+
         const responseMessages = event.response.messages;
-        // PM #36 (truncation continuation) + PM #69 (forced final answer) are
-        // both decided by resolveTurnContinuation — self-contained and
-        // unit-tested (final-answer-guard.test.ts). We publish any non-fatal
-        // operator notice it returns and bill its usage alongside streamUsage.
+        // PM #36 (truncation continuation) + PM #69 (forced final answer) +
+        // step-cap pause are all decided by resolveTurnContinuation —
+        // self-contained and unit-tested (final-answer-guard.test.ts). We publish
+        // any non-fatal operator notice it returns and bill its usage alongside
+        // streamUsage.
         const turnExtra = await resolveTurnContinuation({
           responseMessages,
           finishReason,
@@ -959,6 +980,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           baseMessages: messages,
           providerOptions,
           settings,
+          stepLimitReached,
           abortSignal: options.abortSignal,
         });
         const continuationText = turnExtra.text;

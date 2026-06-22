@@ -61,6 +61,16 @@ export const DEFAULT_SETTINGS: AppSettings = {
     passwordHash: DEFAULT_AUTH_PASSWORD_HASH,
     mustChangeCredentials: true,
   },
+  // 2c flip (2026-06-22) — the MoA inline-synthesis collapse is the production
+  // default (the standalone aggregator is skipped; the final tool-capable stream
+  // synthesizes the proposer drafts inline). Backed by the N=8 live A/B: quality
+  // held, latency −31%, completion tokens −16%. `mode` stays "synthesis" (the
+  // long-standing default). Operators opt out with `inlineSynthesis: false`, and
+  // reflection-on / tournament / <2-draft paths never collapse regardless.
+  aggregator: {
+    mode: "synthesis",
+    inlineSynthesis: true,
+  },
 };
 
 export async function getSettings(): Promise<AppSettings> {

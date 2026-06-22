@@ -3,6 +3,7 @@ import pkg from "../../../../package.json";
 import { agentSemaphore } from "@/lib/agent/semaphore";
 import { CACHE_TTL_MS } from "@/lib/cost/openrouter-pricing";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { isModelKeyConfigured } from "@/lib/providers/llm-provider";
 import { getBrokenChatFiles, getOrphanIndexEntries } from "@/lib/storage/chat-store";
 import { getDataDir, dataPath } from "@/lib/storage/data-dir";
 import {
@@ -294,6 +295,36 @@ export async function GET() {
       name: "embeddings_db",
       status: "warn",
       detail: `data/memory/ probe failed: ${err instanceof Error ? err.message : String(err)}. Search queries may return empty until resolved.`,
+    });
+  }
+
+  // 5b. Embeddings MODEL usable? `embeddings_db` above checks the on-disk
+  // vector store; this checks whether the configured embeddings MODEL can
+  // authenticate. When it can't, three features degrade with only a per-request
+  // log: RAG memory search (runAgent), MoA disagreement detection, and
+  // trace-memory. The embeddingsModel can be SET (e.g. google/...) yet have no
+  // key — a misconfiguration, not an opt-out — so this is a `warn`, not info.
+  try {
+    const settings = await getSettings();
+    const em = settings.embeddingsModel;
+    if (isModelKeyConfigured(em)) {
+      checks.push({
+        name: "embeddings_model",
+        status: "ok",
+        detail: `${em.provider}/${em.model} can authenticate.`,
+      });
+    } else {
+      checks.push({
+        name: "embeddings_model",
+        status: "warn",
+        detail: `Embeddings model ${em.provider}/${em.model} has NO usable key — RAG memory search, MoA disagreement detection, and trace-memory are SILENTLY DEGRADED. Add a key in Settings → API Keys, or switch to a local provider (ollama/sglang/vllm).`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: "embeddings_model",
+      status: "warn",
+      detail: `Could not read settings to check the embeddings model: ${err instanceof Error ? err.message : String(err)}.`,
     });
   }
 

@@ -80,12 +80,20 @@ const fakeSettings = (override: Partial<{
   model: string;
   baseUrl?: string;
   apiKey?: string;
+  embeddingsModel?: { provider: string; model: string; apiKey?: string };
 }> = {}) => ({
   chatModel: {
     provider: override.provider ?? "openrouter",
     model: override.model ?? "anthropic/claude-3-5-haiku",
     baseUrl: override.baseUrl,
     apiKey: override.apiKey ?? "test-key",
+  },
+  // Default to a LOCAL embeddings model (keyless → usable) so the happy path
+  // stays "healthy"; the embeddings_model warn test overrides with a keyless
+  // cloud model.
+  embeddingsModel: override.embeddingsModel ?? {
+    provider: "ollama",
+    model: "nomic-embed-text",
   },
 } as any);
 
@@ -152,7 +160,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 16 subsystems by name in a stable order", async () => {
+  it("reports all 17 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -167,6 +175,10 @@ describe("GET /api/health — happy path", () => {
       // because they're all about whether the storage backbone is intact.
       "disk_space",
       "embeddings_db",
+      // Sprint 1 — embeddings MODEL usability (is a key configured?), distinct
+      // from embeddings_db (the on-disk vectors). Warns when RAG memory search /
+      // MoA disagreement detection / trace-memory silently degrade.
+      "embeddings_model",
       // PM #30 — chat-file parse integrity surfaced through /api/health so the
       // operator sees "N chats failed to parse on rebuild" instead of silent
       // disappearance from the sidebar.
@@ -250,6 +262,40 @@ describe("GET /api/health — disk_space + embeddings_db (Sprint 5)", () => {
     const emb = body.subsystems.find((s) => s.name === "embeddings_db");
     expect(emb?.status).toBe("ok");
     expect(emb?.detail).toMatch(/1 subdir/);
+  });
+});
+
+describe("GET /api/health — embeddings_model usability (Sprint 1)", () => {
+  it("reports 'ok' when the embeddings model can authenticate (local provider)", async () => {
+    // fakeSettings defaults embeddingsModel to ollama (local, keyless → usable).
+    const body = await callHealth();
+    const emb = body.subsystems.find((s) => s.name === "embeddings_model");
+    expect(emb?.status).toBe("ok");
+    expect(emb?.detail).toMatch(/ollama\/nomic-embed-text/);
+  });
+
+  it("warns when the embeddings model has no usable key (RAG/disagreement/trace silently degrade)", async () => {
+    const savedKey = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      mockedSettings.mockResolvedValue(
+        fakeSettings({
+          embeddingsModel: {
+            provider: "openai",
+            model: "text-embedding-3-small",
+            apiKey: "",
+          },
+        })
+      );
+      const body = await callHealth();
+      const emb = body.subsystems.find((s) => s.name === "embeddings_model");
+      expect(emb?.status).toBe("warn");
+      expect(emb?.detail).toMatch(/SILENTLY DEGRADED/);
+      // a warn (no error elsewhere) degrades the overall status.
+      expect(body.status).not.toBe("healthy");
+    } finally {
+      if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+    }
   });
 });
 

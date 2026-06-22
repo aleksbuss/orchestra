@@ -231,6 +231,22 @@ export interface TurnContinuationResult {
 }
 
 /**
+ * Persisted, user-visible message when a turn PAUSES at the per-turn step cap.
+ * System-authored + deterministic ON PURPOSE: a model-authored "final answer"
+ * forced after a step-cap stop reliably masquerades as completion ("Sprint 3
+ * Complete ✅") and the operator can't tell a paused turn from a finished one.
+ */
+const STEP_LIMIT_PAUSE_MESSAGE =
+  "⏸ **Reached the step limit for this turn.** The agent used the maximum number " +
+  "of tool steps allowed in a single turn before finishing, so the work above may " +
+  "be incomplete — this is a pause, not a completion. Press **Continue** to resume " +
+  "from where it stopped.";
+
+/** Short transient-toast variant of the pause message. */
+const STEP_LIMIT_PAUSE_NOTICE =
+  "[Agent] Reached the per-turn step limit — press Continue to resume the unfinished work.";
+
+/**
  * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
  * finished turn, decide whether an EXTRA generation is needed and produce its
  * text + usage:
@@ -253,6 +269,12 @@ export async function resolveTurnContinuation(args: {
   providerOptions: Parameters<typeof generateText>[0]["providerOptions"];
   settings: AppSettings;
   abortSignal?: AbortSignal;
+  /**
+   * True when this turn ended because it EXHAUSTED the per-turn tool-step budget
+   * (`stepCountIs(MAX_TOOL_STEPS_PER_TURN)`) rather than finishing. Drives the
+   * deterministic pause notice instead of a forced (masquerading) completion.
+   */
+  stepLimitReached?: boolean;
 }): Promise<TurnContinuationResult> {
   const {
     responseMessages,
@@ -263,6 +285,7 @@ export async function resolveTurnContinuation(args: {
     providerOptions,
     settings,
     abortSignal,
+    stepLimitReached,
   } = args;
   const lastAssistantText = getLastAssistantText(responseMessages);
   const readUsage = (r: unknown) =>
@@ -300,6 +323,18 @@ export async function resolveTurnContinuation(args: {
   }
 
   if (!turnHasDeliverableAnswer(responseMessages)) {
+    // Step-cap PAUSE (operator-requested). The turn ran out of its per-turn tool
+    // budget without delivering an answer. Do NOT force a tool-less "final
+    // answer" here — that yields a model-authored completion summary that
+    // masquerades as "done". Return a DETERMINISTIC, system-authored pause
+    // notice so the operator knows the turn paused at a limit (not finished),
+    // and the work resumes on the next "Continue". No LLM call, no extra spend.
+    if (stepLimitReached) {
+      console.log(
+        `[Agent] Turn paused at the per-turn step limit (finishReason=${finishReason}); emitting Continue notice.`
+      );
+      return { text: STEP_LIMIT_PAUSE_MESSAGE, uiNotice: STEP_LIMIT_PAUSE_NOTICE };
+    }
     try {
       const forced = await generateText({
         model,

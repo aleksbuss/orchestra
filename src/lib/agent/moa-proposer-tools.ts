@@ -158,11 +158,40 @@ When verification succeeds, mention the verified fact concretely in your
 draft. When it fails or times out, state that explicitly ("I tried X
 via code_execution; it returned Y") rather than guessing.`;
 
+/**
+ * PM #77 — proposers run TOOL-LESS by default (search_web only when a key is
+ * configured; code_execution only on explicit opt-in). When the USER's prompt
+ * demands a tool ("use the code_execution tool", "run the code", "search for X")
+ * a tool-less proposer that ISN'T told it has no tools can return an EMPTY draft
+ * instead of reasoning textually — reproduced live: gemini-2.5-flash personas
+ * (historian, skeptic) went `(empty draft)` on a "run the code" prompt while the
+ * code-oriented persona answered in prose. Empty drafts are dropped by
+ * `isSuccessfulDraft`, silently shrinking the ensemble (and blocking the
+ * inline-synthesis collapse, which needs ≥2 drafts). This is the proposer-side
+ * mirror of PM #61's PLAIN_CHAT_TOOL_OVERRIDE: tell a tool-less proposer to
+ * answer in prose and never attempt a tool — and never return empty.
+ */
+export const PROPOSER_NO_TOOLS_DIRECTIVE = `
+
+[NO TOOLS THIS TURN]
+You have NO tools available — you cannot run code, execute commands, search the
+web, or call any function. If the request asks you to "use a tool", "run the
+code", "execute", or "search", do NOT attempt it and do NOT return an empty or
+refusal answer. Instead, reason it through yourself and answer in plain prose:
+state the result you would expect, show illustrative code or steps as TEXT, and
+give your expert draft. Another agent WITH tools verifies and runs things after
+you — your job is the written draft, never an empty one.`;
+
 export function augmentProposerPromptForTools(
   basePrompt: string,
   tools: ToolSet | undefined
 ): string {
-  if (!tools) return basePrompt;
+  // Tool-less proposer (the common case — no search key, no code opt-in): tell
+  // it explicitly so a tool-demanding user prompt yields a prose draft, not an
+  // empty one (PM #77).
+  if (!tools || Object.keys(tools).length === 0) {
+    return basePrompt + PROPOSER_NO_TOOLS_DIRECTIVE;
+  }
   let augmented = basePrompt;
   if ("search_web" in tools || "fetch_webpage" in tools) augmented += FACT_CHECK_MANDATE;
   if ("code_execution" in tools) augmented += CODE_EXECUTION_MANDATE;

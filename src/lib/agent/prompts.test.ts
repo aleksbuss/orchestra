@@ -82,7 +82,11 @@ vi.mock("fs/promises", async () => {
   };
 });
 
-import { buildSystemPrompt } from "./prompts";
+import {
+  buildSystemPrompt,
+  loadSynthesisInlineDirective,
+  DEFAULT_SYNTHESIS_INLINE_DIRECTIVE,
+} from "./prompts";
 
 beforeEach(() => {
   getProjectMock.mockReset();
@@ -352,5 +356,32 @@ describe("buildSystemPrompt — active goal tree", () => {
     getActiveGoalMock.mockResolvedValueOnce(null);
     const b = await buildSystemPrompt({});
     expect(b).not.toMatch(/## Active Goal Tree/);
+  });
+});
+
+describe("Sprint 2 — loadSynthesisInlineDirective (aggregator-collapse directive)", () => {
+  it("falls back to DEFAULT_SYNTHESIS_INLINE_DIRECTIVE when synthesis-inline.md is absent", async () => {
+    // beforeEach default: readFile rejects ENOENT for every prompt file.
+    const directive = await loadSynthesisInlineDirective();
+    expect(directive).toBe(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE);
+  });
+
+  it("uses the on-disk synthesis-inline.md when present (trimmed)", async () => {
+    readFileMock.mockImplementation(async (filePath: unknown) => {
+      const p = String(filePath);
+      if (p.endsWith("synthesis-inline.md")) return "\n## Custom Synthesis\nMerge.\n";
+      throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    });
+    const directive = await loadSynthesisInlineDirective();
+    expect(directive).toBe("## Custom Synthesis\nMerge.");
+  });
+
+  it("the default directive ports the load-bearing AGGREGATOR_SYSTEM_PROMPT rules", () => {
+    // These are the rules the collapsed synthesizer must still honor (PM #40).
+    expect(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE).toMatch(/critically evaluate/i);
+    expect(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE).toMatch(/NOT simply replicate|not simply replicate/);
+    expect(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE).toContain("<<DISAGREEMENT_DETECTED>>");
+    expect(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE).toMatch(/meta-commentary/i);
+    expect(DEFAULT_SYNTHESIS_INLINE_DIRECTIVE).toMatch(/Expert Drafts to Synthesize/);
   });
 });

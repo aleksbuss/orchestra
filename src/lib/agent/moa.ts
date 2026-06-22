@@ -114,6 +114,7 @@ export {
   isSuccessfulDraft,
   FACT_CHECK_MANDATE,
   CODE_EXECUTION_MANDATE,
+  PROPOSER_NO_TOOLS_DIRECTIVE,
 } from "@/lib/agent/moa-proposer-tools";
 
 import {
@@ -175,6 +176,30 @@ ${draftBlock}
 Now produce the final synthesized response.`;
 }
 
+/**
+ * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). Assemble
+ * the block appended to the orchestrator system prompt on the collapsed synthesis
+ * path: the ported synthesis `directive`, the optional PM #39 disagreement
+ * `marker`, then the numbered expert drafts. The numbering/role-label format
+ * mirrors `buildAggregatorPrompt` so the collapsed synthesizer sees the same
+ * draft shape the standalone aggregator did. The drafts go in the SYSTEM prompt
+ * (not a second user message) — a consecutive `user` turn crashes strict models
+ * (PM #2). Pure + exported for unit testing.
+ */
+export function buildInlineSynthesisInjection(
+  directive: string,
+  drafts: { role: string; text: string }[],
+  disagreementMarker: string
+): string {
+  const draftBlock = drafts
+    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
+    .join("\n\n");
+  const marker = disagreementMarker.trim()
+    ? `\n\n${disagreementMarker.trim()}`
+    : "";
+  return `\n\n${directive.trim()}${marker}\n\n## Expert Drafts to Synthesize\n\n${draftBlock}`;
+}
+
 // ── MoA Ensemble Runner ─────────────────────────────────────────────────
 
 export interface MoAOptions {
@@ -199,6 +224,42 @@ export interface MoAOptions {
 export interface MoAResult {
   /** Final aggregated text */
   text: string;
+  /**
+   * True when the Router decided `requiresSwarm: false` (and the user did not
+   * Force-Swarm), so the ensemble produced NO consensus and intentionally did
+   * NOT pre-generate an answer. The caller (`runAgent`) must treat this as
+   * "no consensus to inject" and let its normal single-agent stream answer the
+   * turn directly — with the full system prompt, RAG memory, tools, and
+   * streaming. Generating a throwaway direct answer here used to be vestigial
+   * double work: the ensemble's output is NEVER terminal (runAgent always runs
+   * a final tool-capable streamText afterward and re-answers).
+   */
+  bypassed?: boolean;
+  /**
+   * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). When
+   * set, the default synthesis aggregator did NOT run: `runAgent`'s final
+   * tool-capable `streamText` must synthesize these drafts inline (ONE brain
+   * generation instead of two). `text` is "" on this path; the synthesized
+   * answer comes from the stream. Carries everything the relocated trace
+   * capture needs in `onFinish` (the drafts are already in `text` form, so the
+   * stream produces the final text the trace records).
+   *
+   * Populated ONLY on the collapsed path (`mode === "synthesis"` && reflection
+   * OFF && ≥2 successful drafts && `settings.aggregator.inlineSynthesis`).
+   * Every other path keeps returning a finished `text`.
+   */
+  synthesisHandoff?: {
+    /** Successful proposer drafts to synthesize (role + text drive the prompt). */
+    drafts: { proposerId: string; role: string; text: string }[];
+    /** PM #39 disagreement marker — "" when consensus. Prepended to the directive. */
+    disagreementMarker: string;
+    /**
+     * Trace-memory signals for the relocated capture in `onFinish`. `finalText`
+     * is supplied there from the streamed synthesis; `totalLatencyMs` here
+     * covers the MoA portion only (proposers + disagreement), not the stream.
+     */
+    signals: TraceSignals;
+  };
   /** Individual proposer drafts for debugging/logging */
   drafts: { proposerId: string; role: string; text: string; latencyMs: number }[];
   /** Aggregation latency */
@@ -360,59 +421,31 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       topic: "chat",
       chatId,
       projectId: projectId ?? null,
-      reason: `[MoA] Auto-Routing: Task is direct. Swarm bypassed to save latency.`,
+      reason: `[MoA] Auto-Routing: Task is direct. Swarm bypassed — answering with the single agent.`,
     });
 
-    console.log(`[MoA] Swarm bypassed for direct query.`);
-    const brainConfig = resolveWorkerKey(
-      getBrainConfig(preset ?? "custom", settings.chatModel),
-      settings
-    );
-    const brainModel = createModel(brainConfig, { projectId, currentPath });
-    
-    try {
-      const aggStart = Date.now();
-      const directResult = await generateText({
-        model: brainModel,
-        system: "You are an AI assistant. Answer the user's query directly and efficiently.",
-        messages: [
-          ...safeHistory.slice(-6),
-          { role: "user", content: userMessage },
-        ],
-        temperature: brainConfig.temperature ?? 0.5,
-        maxOutputTokens: resolveMaxOutputTokens(brainConfig),
-        abortSignal,
-      });
-      // PM #36 — fold Router + direct-answer usage into the per-chat banner.
-      let bypassUsage = addUsageToCumulative(
+    // The ensemble's output is NEVER terminal: `runAgent` ALWAYS runs a final
+    // tool-capable streamText after this returns. Pre-generating a throwaway
+    // "direct answer" here only to inject it back as a (mislabeled, 0-agent)
+    // "consensus" was vestigial double work — one whole brain-model generation
+    // wasted on every bypassed turn. Return a bypass signal and defer to the
+    // single-agent stream, which answers with the FULL system prompt, RAG
+    // memory, tools, and streaming (none of which the throwaway call had).
+    console.log(`[MoA] Swarm bypassed — deferring to the single-agent stream (no redundant pre-generation).`);
+    return {
+      text: "",
+      bypassed: true,
+      drafts: [],
+      aggregationLatencyMs: 0,
+      totalLatencyMs: Date.now() - totalStart,
+      // PM #36 — the Router call still spent tokens; keep them in the banner.
+      cumulativeUsage: addUsageToCumulative(
         undefined,
         routerConfig.provider,
         routerConfig.model,
         dpgResult.usage
-      );
-      bypassUsage = addUsageToCumulative(
-        bypassUsage,
-        brainConfig.provider,
-        brainConfig.model,
-        directResult.usage
-      );
-      return {
-        text: directResult.text?.trim() || "(empty response)",
-        drafts: [],
-        aggregationLatencyMs: Date.now() - aggStart,
-        totalLatencyMs: Date.now() - totalStart,
-        cumulativeUsage: bypassUsage,
-      };
-    } catch (err) {
-      console.error("[MoA] Direct bypass failed:", err);
-      // Let it fall through to standard swarm on failure, or return error? We'll return error.
-      return {
-        text: `[Error: ${err instanceof Error ? err.message : String(err)}]`,
-        drafts: [],
-        aggregationLatencyMs: 0,
-        totalLatencyMs: Date.now() - totalStart,
-      };
-    }
+      ),
+    };
   }
 
   const dynamicProposers = dpgResult.personas;
@@ -788,6 +821,81 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // final answer (no synthesis). Falls back to synthesis if every
   // judge fails — better degraded output than no output.
   const aggregatorMode = settings.aggregator?.mode ?? "synthesis";
+
+  // ── Sprint 2: inline-synthesis collapse ────────────────────────────
+  // docs/moa-aggregator-collapse.md. When the operator opts in
+  // (`aggregator.inlineSynthesis`) AND this is the plain synthesis path
+  // (mode === "synthesis", reflection OFF, ≥2 successful drafts), SKIP the
+  // separate aggregator generateText entirely. Hand the drafts UP via
+  // `synthesisHandoff`; runAgent's final tool-capable stream — which always
+  // runs afterward — synthesizes them inline: ONE brain generation this turn
+  // instead of two (aggregator + stream). The collapsed synthesizer can also
+  // call tools mid-synthesis, which the standalone aggregator never could.
+  //
+  // Deliberately narrow: reflection (inherently multi-pass — needs a complete
+  // answer to critique) and tournament (returns a verbatim winner, no
+  // synthesis) are EXCLUDED. A tournament-fallback-to-synthesis keeps
+  // `aggregatorMode === "tournament"`, so it does NOT collapse here either —
+  // it runs the inline aggregator below as its last resort (safe).
+  //
+  // Default OFF (the flag is opt-in); until 2c flips it, this branch is never
+  // taken in production. `successfulDrafts.length >= 2` is guaranteed here (we
+  // returned early for 0 and 1 drafts) but stated explicitly to match the
+  // documented gate.
+  if (
+    settings.aggregator?.inlineSynthesis === true &&
+    aggregatorMode === "synthesis" &&
+    !settings.reflection?.enabled &&
+    successfulDrafts.length >= 2
+  ) {
+    const totalLatencyMs = Date.now() - totalStart;
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId,
+      nodeType: "system_node",
+      swarmNode: {
+        nodeId: aggregatorNodeId,
+        parentNodeId: routerNodeId,
+        role: "orchestrator",
+        taskSummary: "Synthesis handed to final stream",
+        status: "completed",
+        completedAt: new Date().toISOString(),
+      },
+    });
+    console.log(
+      `[MoA] Inline-synthesis collapse: handing ${successfulDrafts.length} drafts to the final tool-capable stream → 1 brain generation this turn (aggregator skipped).`
+    );
+    // Trace signals for the relocated capture in runAgent's onFinish (the
+    // synthesized `finalText` only exists once the stream finishes). Latency
+    // here covers the MoA portion only — the stream's time is not included.
+    const signals: TraceSignals = {
+      proposerSuccessRatio:
+        drafts.length === 0 ? 0 : successfulDrafts.length / drafts.length,
+      disagreementDetected: disagreement.detected,
+      disagreementMaxDistance: disagreement.maxDistance,
+      reflectionRounds: 0,
+      reflectionHitCap: false,
+      totalLatencyMs,
+      aggregatorMode: "synthesis",
+    };
+    return {
+      text: "",
+      drafts,
+      synthesisHandoff: {
+        drafts: successfulDrafts.map((d) => ({
+          proposerId: d.proposerId,
+          role: d.role,
+          text: d.text,
+        })),
+        disagreementMarker,
+        signals,
+      },
+      aggregationLatencyMs: 0,
+      totalLatencyMs,
+      cumulativeUsage: moaUsage,
+    };
+  }
+
   const brainModel = createModel(brainConfig, { projectId, currentPath });
 
   if (aggregatorMode === "tournament") {

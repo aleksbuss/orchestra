@@ -12,9 +12,12 @@
  *      proposers; this constant is the floor for what gets shipped.
  *   2. Bypass path (`requiresSwarm: false`) — internal Router optimization
  *      per PM #9 / CLAUDE.md note. When the Router decides bypass, the
- *      ensemble must call the brain model exactly once, NOT fan out, and
- *      return drafts: []. A regression here would silently fan out on
- *      every "thanks" message and burn tokens (the inverse PM #9 case).
+ *      ensemble must NOT fan out AND must NOT pre-generate any answer — it
+ *      returns `{ bypassed: true, text: "", drafts: [] }` so runAgent's single
+ *      final stream answers the turn. The ensemble output is never terminal,
+ *      so a throwaway pre-generation here was vestigial double work. A
+ *      regression that fans out burns tokens on every "thanks" (the inverse
+ *      PM #9 case); one that pre-generates re-introduces the double-gen waste.
  *   3. **Aggregator user-message constraint** — the Aggregator MUST NOT be
  *      fed `safeHistory` because consecutive `user` messages crash strict
  *      models like Gemma (PM #2). The aggregator call's `messages` array
@@ -64,7 +67,12 @@ vi.mock("@/lib/tools/search-engine", () => ({
     !!(s?.enabled && s.provider !== "none"),
 }));
 
-import { runMoAEnsemble, MOA_PROPOSERS, AGGREGATOR_SYSTEM_PROMPT } from "./moa";
+import {
+  runMoAEnsemble,
+  MOA_PROPOSERS,
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildInlineSynthesisInjection,
+} from "./moa";
 import type { AppSettings } from "@/lib/types";
 import { generateText, generateObject } from "ai";
 
@@ -218,7 +226,7 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
     expect(ids).not.toContain("p5_tail"); // evicted to keep ≤ 5
   });
 
-  it("requiresSwarm=false → no injection (the swarm doesn't run; nothing to enforce)", async () => {
+  it("requiresSwarm=false → bypass signal, NO pre-generation (deferred to single-agent stream)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: {
         requiresSwarm: false,
@@ -226,7 +234,6 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
         personas: [],
       },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "hi back" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -235,19 +242,21 @@ describe("PM #37 — DPG output force-injects Skeptic when LLM omits it", () => 
       settings: fakeSettings(),
     });
 
-    // Bypass path — only the single direct-answer generateText fired, no
-    // proposers, no aggregator. Nothing to inject into.
+    // Bypass — the ensemble produces NO consensus and pre-generates NOTHING;
+    // runAgent's final single-agent stream answers the turn. The only LLM call
+    // is the Router's generateObject; generateText must NOT fire.
+    expect(result.bypassed).toBe(true);
+    expect(result.text).toBe("");
     expect(result.drafts).toEqual([]);
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    expect(mockedGenerateText).not.toHaveBeenCalled();
   });
 });
 
 describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
-  it("calls the brain model exactly once and returns no drafts", async () => {
+  it("does NOT pre-generate — returns a bypass signal, zero generateText calls", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "hi back" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -256,16 +265,19 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       settings: fakeSettings(),
     });
 
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    // The ensemble output is never terminal — runAgent runs a final stream
+    // afterward — so bypass pre-generates NOTHING: no brain call, no drafts,
+    // empty text, and an explicit `bypassed` flag for the caller's guard.
+    expect(mockedGenerateText).not.toHaveBeenCalled();
+    expect(result.bypassed).toBe(true);
+    expect(result.text).toBe("");
     expect(result.drafts).toEqual([]);
-    expect(result.text).toBe("hi back");
   });
 
   it("does NOT fan out — the Router's decision overrides any preset implication", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "ok" } as any);
 
     await runMoAEnsemble({
       chatId: "c1",
@@ -278,16 +290,17 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       preset: "custom",
     });
 
-    // Exactly one generateText call = the bypass call. If the ensemble had
-    // fanned out we'd see 1 + N calls (one per proposer + aggregator).
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    // Zero generateText calls on bypass. Fan-out would be N+1 (proposers +
+    // aggregator); the old vestigial pre-generation would be 1. Neither is
+    // correct anymore — the single-agent stream in runAgent answers the turn.
+    expect(mockedGenerateText).not.toHaveBeenCalled();
   });
 
-  it("falls back gracefully when the bypass call throws — no fan-out fallback either", async () => {
+  it("still folds the Router's token usage into cumulativeUsage on bypass (PM #36)", async () => {
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
+      usage: { inputTokens: 40, outputTokens: 12 },
     } as any);
-    mockedGenerateText.mockRejectedValueOnce(new Error("upstream timeout"));
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -296,13 +309,10 @@ describe("runMoAEnsemble — Router bypass path (requiresSwarm: false)", () => {
       settings: fakeSettings(),
     });
 
-    // The current contract is "return error string, do not fan out as
-    // recovery." The contract avoids burning 5x tokens on a model that's
-    // already failing. If a future change adds fallback fan-out, this test
-    // is the place to update intentionally — not silently.
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
-    expect(result.text).toMatch(/error/i);
-    expect(result.drafts).toEqual([]);
+    // The Router call spent tokens even though we bypassed; they must still
+    // reach the per-chat budget banner via cumulativeUsage.
+    expect(result.bypassed).toBe(true);
+    expect(result.cumulativeUsage).toBeDefined();
   });
 });
 
@@ -449,11 +459,12 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
 
   it("forceSwarm=false (the default) still respects the Router's bypass decision", async () => {
     // Negative-space guard: the forceSwarm flag must not accidentally flip
-    // the default behavior. Existing bypass logic stays exactly as before.
+    // the default behavior. Bypass must NOT fan out — and (post Sprint 1) must
+    // NOT pre-generate either: it returns a bypass signal so runAgent's single
+    // final stream answers the turn.
     mockedGenerateObject.mockResolvedValueOnce({
       object: { requiresSwarm: false, personas: [] },
     } as any);
-    mockedGenerateText.mockResolvedValueOnce({ text: "direct answer" } as any);
 
     const result = await runMoAEnsemble({
       chatId: "c1",
@@ -463,7 +474,8 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
       forceSwarm: false,
     });
 
-    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    expect(mockedGenerateText).not.toHaveBeenCalled();
+    expect(result.bypassed).toBe(true);
     expect(result.drafts).toEqual([]);
   });
 
@@ -620,6 +632,155 @@ async function stopsAtStep(stopWhen: unknown, stepCount: number): Promise<boolea
   if (typeof cond !== "function") return false;
   return Boolean(await cond({ steps: Array.from({ length: stepCount }, () => ({})) }));
 }
+
+describe("Sprint 2 — buildInlineSynthesisInjection (aggregator-collapse system-prompt block)", () => {
+  const directive = "## Synthesize\nMerge the drafts.";
+  const drafts = [
+    { role: "architect", text: "Use a queue." },
+    { role: "skeptic", text: "Queues add latency." },
+  ];
+
+  it("numbers drafts and labels each with its expert role (mirrors buildAggregatorPrompt)", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "");
+    expect(block).toContain("1. [Expert role: architect]\nUse a queue.");
+    expect(block).toContain("2. [Expert role: skeptic]\nQueues add latency.");
+    expect(block).toContain("## Expert Drafts to Synthesize");
+  });
+
+  it("ports the directive verbatim into the block", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "");
+    expect(block).toContain(directive);
+  });
+
+  it("includes the PM #39 disagreement marker when present (prepended before the drafts)", () => {
+    const marker = "<<DISAGREEMENT_DETECTED>> Surface the conflict.";
+    const block = buildInlineSynthesisInjection(directive, drafts, marker);
+    expect(block).toContain(marker);
+    // Marker sits between the directive and the drafts header.
+    expect(block.indexOf(marker)).toBeGreaterThan(block.indexOf(directive));
+    expect(block.indexOf(marker)).toBeLessThan(
+      block.indexOf("## Expert Drafts to Synthesize")
+    );
+  });
+
+  it("omits the marker section entirely on consensus (empty / whitespace marker)", () => {
+    const block = buildInlineSynthesisInjection(directive, drafts, "   ");
+    expect(block).not.toContain("<<DISAGREEMENT_DETECTED>>");
+    // No dangling blank marker line — directive flows straight to the header.
+    expect(block).toMatch(/Merge the drafts\.\n\n## Expert Drafts to Synthesize/);
+  });
+});
+
+describe("Sprint 2 — inline-synthesis collapse gate (runMoAEnsemble)", () => {
+  // Stub DPG → fall back to the 5 static proposers, each returning a
+  // substantive draft. When the collapse fires it returns BEFORE the
+  // aggregator generateText, so the swarm path makes exactly 5 generateText
+  // calls (proposers) instead of 6 (proposers + aggregator).
+  function inlineSettings(over: {
+    mode?: "synthesis" | "tournament";
+    inlineSynthesis?: boolean;
+    tournamentJudgeCount?: number;
+  } = {}): AppSettings {
+    return {
+      ...fakeSettings(),
+      aggregator: { mode: "synthesis", inlineSynthesis: true, ...over },
+    };
+  }
+
+  it("inlineSynthesis ON + synthesis + reflection OFF → hands drafts up, SKIPS the aggregator", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({
+      text: "substantive proposer draft",
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: inlineSettings(),
+    });
+
+    // 5 proposers, NO aggregator call — the whole point of the collapse.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
+    expect(result.synthesisHandoff).toBeDefined();
+    expect(result.text).toBe("");
+    expect(result.aggregationLatencyMs).toBe(0);
+    expect(result.synthesisHandoff!.drafts).toHaveLength(5);
+    expect(result.synthesisHandoff!.drafts[0]).toEqual(
+      expect.objectContaining({
+        proposerId: expect.any(String),
+        role: expect.any(String),
+        text: expect.any(String),
+      })
+    );
+    expect(typeof result.synthesisHandoff!.disagreementMarker).toBe("string");
+    expect(result.synthesisHandoff!.signals.aggregatorMode).toBe("synthesis");
+    expect(result.synthesisHandoff!.signals.reflectionRounds).toBe(0);
+    // Router usage still folded for the budget banner (PM #36).
+    expect(result.cumulativeUsage).toBeDefined();
+  }, 30_000);
+
+  it("inlineSynthesis OFF (default) → aggregator runs, NO handoff (Sprint-1 behavior preserved)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: fakeSettings(), // no aggregator config → inlineSynthesis undefined
+    });
+
+    // 5 proposers + 1 aggregator = 6.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(result.synthesisHandoff).toBeUndefined();
+    expect(result.text).not.toBe("");
+  }, 30_000);
+
+  it("inlineSynthesis ON but reflection ENABLED → does NOT collapse (reflection path untouched)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({
+      text: "Aggregated final consensus answer assembled from the expert drafts.",
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: { ...inlineSettings(), reflection: { enabled: true } },
+    });
+
+    // Reflection gates the collapse OFF → the aggregator ran, no handoff.
+    expect(result.synthesisHandoff).toBeUndefined();
+    expect(result.text).not.toBe("");
+    // At least 5 proposers + 1 aggregator fired (reflection may add more).
+    expect(mockedGenerateText.mock.calls.length).toBeGreaterThanOrEqual(6);
+  }, 30_000);
+
+  it("inlineSynthesis ON but mode=tournament → does NOT collapse (tournament path excluded)", async () => {
+    mockedGenerateObject.mockRejectedValueOnce(
+      new Error("force fallback to MOA_PROPOSERS")
+    );
+    mockedGenerateText.mockResolvedValue({ text: "draft" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design the cache layer",
+      history: [],
+      settings: inlineSettings({ mode: "tournament", tournamentJudgeCount: 1 }),
+    });
+
+    // mode !== "synthesis" → gate excluded, regardless of whether the
+    // tournament picked a winner or fell back to the synthesis aggregator.
+    expect(result.synthesisHandoff).toBeUndefined();
+  }, 30_000);
+});
 
 describe("PM #65 — proposer tool-loop uses stopWhen (maxSteps was a silently-ignored no-op)", () => {
   // AI SDK v5+ removed `maxSteps` from generateText, so the prior

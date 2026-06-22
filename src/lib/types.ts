@@ -208,6 +208,23 @@ export interface AppSettings {
      * keep the cost story sane.
      */
     tournamentJudgeModel?: ModelConfig;
+    /**
+     * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md).
+     * When true, the default synthesis path SKIPS the separate aggregator
+     * `generateText` and hands the proposer drafts UP to `runAgent`'s final
+     * tool-capable `streamText`, which synthesizes them inline — ONE brain
+     * generation per turn instead of two (aggregator + stream). The collapsed
+     * synthesizer can also call tools mid-synthesis (verify a claim, run code),
+     * which the standalone aggregator never could.
+     *
+     * Gated narrowly: only when `mode === "synthesis"`, reflection is OFF, and
+     * ≥2 proposer drafts succeeded. Reflection (inherently multi-pass) and
+     * tournament (verbatim winner, no synthesis) paths are untouched.
+     *
+     * Default OFF — opt-in. Measure via trace-memory quality scores, then flip
+     * the default in sub-sprint 2c.
+     */
+    inlineSynthesis?: boolean;
   };
   general: {
     darkMode: boolean;

@@ -32,6 +32,15 @@ const MAX_OUTPUT_RESERVE_RATIO = 0.3;
 const KEEP_RECENT_TOOL_WINDOW = "before-last-2-messages" as const;
 
 /**
+ * PM #76 follow-up — Stage 2 anchor cap. The recency slide preserves the leading
+ * system run + first user turn (the task) so the model can't "forget" what it's
+ * doing, but ONLY when that anchor is concise (≤ this fraction of the budget). A
+ * huge first message is a paste, not a task pointer — re-pinning it would defeat
+ * the budget, so above the cap we fall back to the pure recency slide.
+ */
+const ANCHOR_BUDGET_RATIO = 0.25;
+
+/**
  * Token budget for the INPUT side of a step = window minus headroom for the
  * model's own response. The output reserve is clamped to 30% of the window so a
  * misconfigured `maxOutputTokens` can't drive the budget to zero on a small
@@ -85,24 +94,49 @@ export function governMessages(messages: ModelMessage[], budget: number): ModelM
 }
 
 function slideToRecentWindow(messages: ModelMessage[], budget: number): ModelMessage[] {
+  // PM #76 follow-up — anchor the task. A pure recency slide can drop the leading
+  // system run AND the first user turn (the instruction the model is executing)
+  // when a few near-cap-size results blow the budget, after which a weak model
+  // "forgets" the task and hallucinates the output format. Preserve those anchors
+  // VERBATIM and slide only the middle — BUT only when the anchor is concise
+  // (≤ ANCHOR_BUDGET_RATIO of the budget); a huge first message is a paste, not a
+  // pointer, so above the cap we fall back to the original pure recency slide.
+  let anchorEnd = 0;
+  while (anchorEnd < messages.length && messages[anchorEnd]?.role === "system") {
+    anchorEnd++;
+  }
+  if (anchorEnd < messages.length && messages[anchorEnd]?.role === "user") {
+    anchorEnd++; // the first user turn = the original task
+  }
+  let anchors = messages.slice(0, anchorEnd);
+  if (estimateTokenCount(anchors) > Math.floor(budget * ANCHOR_BUDGET_RATIO)) {
+    anchors = []; // too big to anchor — pure recency slide (original behavior)
+    anchorEnd = 0;
+  }
+  const tail = messages.slice(anchorEnd);
+  // Budget left for the recent tail after reserving the (concise) anchors.
+  const tailBudget = Math.max(
+    ABSOLUTE_MIN_BUDGET,
+    budget - estimateTokenCount(anchors)
+  );
+
   let start = 0;
   while (
-    start < messages.length - 1 &&
-    estimateTokenCount(messages.slice(start)) > budget
+    start < tail.length - 1 &&
+    estimateTokenCount(tail.slice(start)) > tailBudget
   ) {
     start++;
   }
-  // Don't start on a tool-result — providers reject a tool result with no
-  // preceding tool call, and Stage 1 may have dropped that call.
-  while (start < messages.length - 1 && messages[start]?.role === "tool") {
+  // Don't start the recent window on a tool-result — providers reject a tool
+  // result with no preceding tool call, and Stage 1 may have dropped that call.
+  while (start < tail.length - 1 && tail[start]?.role === "tool") {
     start++;
   }
-  // Sprint A4 — slicing mid-conversation (or Stage-1's empty-message removal)
-  // can leave two same-role messages adjacent (e.g. a user paste right after the
-  // user turn that preceded a dropped assistant/tool exchange). Strict models
-  // (Gemma, Anthropic — §1 MoA "no consecutive user messages") reject that
-  // sequence, so coalesce consecutive same-role messages before returning.
-  return mergeConsecutiveSameRole(messages.slice(start));
+  // Sprint A4 — slicing mid-conversation (or joining the anchor to the kept
+  // window) can leave two same-role messages adjacent (e.g. the anchor user turn
+  // directly before a kept user turn). Strict models (Gemma, Anthropic — §1 MoA
+  // "no consecutive user messages") reject that, so coalesce before returning.
+  return mergeConsecutiveSameRole([...anchors, ...tail.slice(start)]);
 }
 
 /**

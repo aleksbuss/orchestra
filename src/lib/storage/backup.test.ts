@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
@@ -70,6 +70,24 @@ describe("createDataBackup", () => {
     expect(res!.path.startsWith(backupDir)).toBe(true);
   });
 
+  it("EXCLUDES safeWriteFile *.tmp artifacts (PM #78 — the ENOENT race source)", async () => {
+    await seedDataDir();
+    // A transient temp artifact exactly as safeWriteFile names it
+    // (`<base>.<uuid><ext>.tmp`) — present mid-rename when the backup runs.
+    await fs.writeFile(
+      path.join(dataDir, "chats", `chat-index.${"a1b2c3d4"}.json.tmp`),
+      '{"partial":true}'
+    );
+    const res = await createDataBackup();
+    expect(res).not.toBeNull();
+    // Real file copied; the .tmp artifact is NOT. Excluding it at the source is
+    // what removes the dominant ENOENT race — the retry is only a backstop, and
+    // alone it does not survive sustained churn of a hot file.
+    expect(await exists(path.join(res!.path, "chats", "c1.json"))).toBe(true);
+    const copiedChats = await fs.readdir(path.join(res!.path, "chats"));
+    expect(copiedChats.some((f) => f.endsWith(".tmp"))).toBe(false);
+  });
+
   it("returns null when backups are disabled (opt-out)", async () => {
     await seedDataDir();
     setEnv("ORCHESTRA_BACKUP_DISABLED", "true");
@@ -90,6 +108,59 @@ describe("createDataBackup", () => {
     const entries = await fs.readdir(backupDir);
     expect(entries.some((e) => e.startsWith(".tmp-"))).toBe(false);
     expect(entries.filter((e) => e.startsWith("data-"))).toHaveLength(1);
+  });
+});
+
+describe("createDataBackup — PM #78 ENOENT race against live safeWriteFile renames", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("retries and succeeds when fs.cp throws ENOENT once (transient source-file rename)", async () => {
+    await seedDataDir();
+    const realCp = fs.cp.bind(fs);
+    let calls = 0;
+    const spy = vi.spyOn(fs, "cp").mockImplementation(async (...args: Parameters<typeof fs.cp>) => {
+      calls++;
+      if (calls === 1) {
+        const err = new Error("ENOENT: no such file or directory, lstat 'chat-index.abc.json.tmp'");
+        (err as NodeJS.ErrnoException).code = "ENOENT";
+        throw err;
+      }
+      return realCp(...args);
+    });
+
+    const res = await createDataBackup();
+    expect(res).not.toBeNull();
+    expect(calls).toBe(2);
+    expect(await exists(path.join(res!.path, "chats", "c1.json"))).toBe(true);
+    spy.mockRestore();
+  });
+
+  it("gives up after exhausting retries on a persistent ENOENT", async () => {
+    await seedDataDir();
+    vi.spyOn(fs, "cp").mockImplementation(async () => {
+      const err = new Error("ENOENT: no such file or directory, lstat 'x'");
+      (err as NodeJS.ErrnoException).code = "ENOENT";
+      throw err;
+    });
+
+    await expect(createDataBackup()).rejects.toMatchObject({ code: "ENOENT" });
+    // No leftover .tmp- partial after the final failed attempt.
+    const entries = await fs.readdir(backupDir).catch(() => []);
+    expect(entries.some((e) => e.startsWith(".tmp-"))).toBe(false);
+  });
+
+  it("does NOT retry on a non-ENOENT error (e.g. EACCES) — fails fast", async () => {
+    await seedDataDir();
+    const spy = vi.spyOn(fs, "cp").mockImplementation(async () => {
+      const err = new Error("EACCES: permission denied");
+      (err as NodeJS.ErrnoException).code = "EACCES";
+      throw err;
+    });
+
+    await expect(createDataBackup()).rejects.toMatchObject({ code: "EACCES" });
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 

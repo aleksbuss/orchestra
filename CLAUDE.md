@@ -29,6 +29,10 @@ If you cannot answer "what does the request flow look like for the change I am a
 > 5. **gemini-2.5-flash residual proposer flakiness (PM #77 mitigated, not eliminated).** The no-tools directive recovered most empties (1/3→2/3 live), but the qa_auditor/skeptic persona can still occasionally return `(empty draft)` on tool-demanding prompts — model variance, not a regression. The "extraction ignores the reasoning channel" theory was DISPROVEN by isolation repro (gemini-2.5-flash and deepseek-r1 both populate `.text`) — see PM #77.
 > 6. **Untracked, intentionally unstaged:** `.obsidian/` (editor config — consider adding to `.gitignore`) and `tests/e2e/manual-check-model-wizard.spec.ts` (WIP). NOTE: the older "model-wizards WIP on `qa/sprint3-model-wizards`" note in the Context-Management Track section below is a DIFFERENT branch/track — unrelated to the work above.
 
+> **✅ DONE (2026-06-23) — `replace_in_file` Hardening & CRLF Protection.** 
+> Completely rewrote the `replace_in_file` tool implementation to fix Regex vulnerabilities (swapped `String.replace` for `split.join`), added Smart CRLF detection to prevent git diff pollution on Windows repos, and enforced `TEXT_FILE_WRITE_MAX_CHARS` limits. Added 11 exhaustive unit tests covering all paths including ENOENT, EACCES, syntax checking, and type checking. ALL tests pass (`npx vitest run src/lib/tools/replace-in-file.test.ts` and `npx tsc --noEmit`).
+> **Model Instruction:** When opening a new dialogue window, ALWAYS prefer `replace_in_file` over `write_text_file` for targeted partial edits to avoid token-limit truncations. You can verify its logic in `src/lib/tools/tool.ts` and tests in `src/lib/tools/replace-in-file.test.ts`.
+
 ---
 
 > **🚧 OPEN — completion-OVERCLAIM bug + UNPUSHED loop/stall fixes (handoff for a fresh empty-context session, 2026-06-22 "session B").** Self-contained: act on this without the prior chat.

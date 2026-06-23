@@ -1192,6 +1192,122 @@ export function createAgentTools(
     },
   });
 
+  tools.replace_in_file = tool({
+    description:
+      "Replace a specific string in an existing local UTF-8 text file. Prefer this over write_text_file when making targeted edits to large files to avoid truncating output.",
+    inputSchema: z.object({
+      file_path: z
+        .string()
+        .describe("Absolute path, or path relative to current project cwd."),
+      target_content: z
+        .string()
+        .min(1, "Target content cannot be empty.")
+        .describe("The exact string to be replaced. Must match exactly once in the file."),
+      replacement_content: z
+        .string()
+        .describe("The new string to replace the target_content with."),
+    }),
+    execute: async ({ file_path, target_content, replacement_content }) => {
+      try {
+        const resolvedPath = resolveOutgoingFilePath(context, file_path);
+        let existed = false;
+        try {
+          const before = await fs.stat(resolvedPath);
+          if (!before.isFile()) {
+            return {
+              success: false,
+              error: `Target exists and is not a regular file: ${resolvedPath}`,
+            };
+          }
+          existed = true;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") throw error;
+        }
+
+        if (!existed) {
+          return {
+            success: false,
+            error: `File does not exist: ${resolvedPath}. Use write_text_file to create new files.`,
+          };
+        }
+
+        const originalContent = await fs.readFile(resolvedPath, "utf-8");
+        
+        // Smart CRLF Detection & Adaptation
+        // This ensures git diffs remain clean in CRLF repos even if the LLM generates \n
+        const isCRLF = originalContent.includes("\r\n");
+        const normalizedTarget = isCRLF 
+          ? target_content.replace(/\r?\n/g, "\r\n") 
+          : target_content.replace(/\r\n/g, "\n");
+        const normalizedReplacement = isCRLF 
+          ? replacement_content.replace(/\r?\n/g, "\r\n") 
+          : replacement_content.replace(/\r\n/g, "\n");
+
+        const count = originalContent.split(normalizedTarget).length - 1;
+        if (count === 0) {
+          // If strict matching failed, try one more time as a fallback to see if it's an indentation or trailing space issue
+          // We won't auto-replace to be safe, but we give a better error message
+          return {
+            success: false,
+            error: `Target content not found in ${resolvedPath}. The target_content must match exactly. Check for trailing spaces or indentation differences.`,
+          };
+        } else if (count > 1) {
+          return {
+            success: false,
+            error: `Target content found ${count} times in ${resolvedPath}. The target_content must be unique. Please include more context to make it unique.`,
+          };
+        }
+
+        // Use split().join() instead of .replace() to avoid $& and $1 regex replacement vulnerabilities
+        const newContent = originalContent.split(normalizedTarget).join(normalizedReplacement);
+
+        if (newContent.length > TEXT_FILE_WRITE_MAX_CHARS) {
+          return {
+            success: false,
+            error: `Resulting content too large (${newContent.length} chars). Max allowed is ${TEXT_FILE_WRITE_MAX_CHARS}.`,
+          };
+        }
+
+        // Snapshot before overwrite
+        await snapshotBeforeWrite({
+          projectId: context.projectId ?? "none",
+          chatId: context.chatId,
+          filePath: resolvedPath,
+          reason: "replace_in_file modify",
+        });
+
+        await fs.writeFile(resolvedPath, newContent, "utf-8");
+        const after = await fs.stat(resolvedPath);
+
+        const verification = await verifyWrittenSource(resolvedPath, newContent);
+
+        return {
+          success: true,
+          path: resolvedPath,
+          bytes: after.size,
+          ...(verification
+            ? verification.valid
+              ? { syntaxValid: true }
+              : {
+                  syntaxValid: false,
+                  syntaxErrors: verification.diagnostics,
+                  warning: verification.hint,
+                }
+            : {}),
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to replace in text file.",
+        };
+      }
+    },
+  });
+
   tools.copy_file = tool({
     description:
       "Copy (duplicate) a local file from source_path to destination_path.",

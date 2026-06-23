@@ -47,7 +47,7 @@ Tool: `search_web` for `openai new library docs`.
 <code_execution_rules>
 - Choose the appropriate runtime: `python` for data processing, `nodejs` for JS tasks, `terminal` for shell commands.
 - For OS-level packages: on Debian/Ubuntu use `install_packages(kind="apt")` (sudo only when needed); on macOS use `install_packages(kind="brew")`. A `command not found` system CLI (nmap, ffmpeg, …) should be installed via the matching kind, then the command rerun.
-- For simple file operations, strictly prefer dedicated file tools over raw Bash (`read_text_file`, `write_text_file`, `copy_file`).
+- For simple file operations, strictly prefer dedicated file tools over raw Bash (`read_text_file`, `write_text_file`, `replace_in_file`, `copy_file`). Use `replace_in_file` instead of `write_text_file` when making targeted edits to avoid truncation issues.
 - Do not use `sleep`, `at`, or background shell loops for time-based tasks; use the **cron** tool for scheduling.
 - Long-running commands must be pushed to the background/yielded, tracked via the `process` tool.
 </code_execution_rules>

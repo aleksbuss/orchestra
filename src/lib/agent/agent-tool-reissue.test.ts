@@ -4,6 +4,8 @@
  * / empty / throw), driving the REAL generateText with a MockLanguageModelV3.
  */
 import { describe, it, expect, beforeEach } from "vitest";
+import { tool } from "ai";
+import { z } from "zod";
 import type { ModelMessage, ToolSet } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
@@ -103,6 +105,39 @@ describe("PM #81 — attemptToolReissue (real generateText + mock model)", () =>
   it("returns null on an empty generation", async () => {
     const res = await attemptToolReissue({ ...baseArgs, model: modelReturning("") as never });
     expect(res).toBeNull();
+  });
+
+  it("KEEPS a re-issue that executed a tool but produced no final text", async () => {
+    // The re-issue NATIVELY calls the tool (the write runs), then stops without
+    // any closing text. That executed work must be persisted, not discarded — a
+    // defect found in the deep audit: a null here loses the write from history +
+    // billing and triggers a redundant forced generation.
+    const echo = tool({
+      description: "echo",
+      inputSchema: z.object({}),
+      execute: async () => "ok",
+    });
+    const model = new MockLanguageModelV3({
+      doGenerate: async ({ prompt }) => {
+        const sawToolResult = (prompt as Array<{ role: string }>).some((m) => m.role === "tool");
+        return {
+          content: sawToolResult
+            ? [] // executed the tool, emits NO final text
+            : [{ type: "tool-call", toolCallId: "e1", toolName: "echo", input: JSON.stringify({}) }],
+          finishReason: sawToolResult ? "stop" : "tool-calls",
+          usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
+          warnings: [],
+        } as unknown as LanguageModelV3GenerateResult;
+      },
+    });
+    const res = await attemptToolReissue({
+      ...baseArgs,
+      tools: { echo } as unknown as ToolSet,
+      model: model as never,
+    });
+    expect(res).not.toBeNull();
+    expect(res?.text).toBe(""); // no final text …
+    expect(res?.responseMessages.some((m) => m.role === "tool")).toBe(true); // … but the tool ran
   });
 
   it("returns null (never throws) when the model errors", async () => {

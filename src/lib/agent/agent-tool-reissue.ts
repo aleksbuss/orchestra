@@ -91,7 +91,12 @@ export const REISSUE_CORRECTION =
 export interface ToolReissueResult {
   /** The re-issue's response messages (native tool call + result + final text). */
   responseMessages: ModelMessage[];
-  /** The delivered answer text (empty string means "did not deliver"). */
+  /**
+   * The delivered answer text. May be "" when the re-issue EXECUTED a tool but
+   * produced no final text — the caller still persists `responseMessages` and
+   * lets resolveTurnContinuation force the answer. A null return (not this) is
+   * the "nothing useful happened" signal.
+   */
   text: string;
   usage?: RawUsage;
 }
@@ -137,11 +142,20 @@ export async function attemptToolReissue(args: {
     const responseToolText = getLastResponseToolText(responseMessages).trim();
     const text =
       responseToolText || stripThinkingTags(getLastAssistantText(responseMessages)).trim();
+    // A re-issue that EXECUTED a native tool (call → tool-result message) is real
+    // progress worth persisting even if it produced no final text — the caller
+    // persists these messages and resolveTurnContinuation then forces the answer.
+    // Without this, the executed write would be discarded (lost from history AND
+    // unbilled) and a redundant forced generation would run. A tool message
+    // (role "tool") only exists when a native call actually ran.
+    const executedTool = responseMessages.some((m) => m.role === "tool");
 
-    // The correction can degrade AGAIN into markup. Treat that (and an empty
-    // result) as "did not deliver" so the caller falls back to a plain answer.
-    if (!text) return null;
-    if (!responseToolText && extractHallucinatedToolCall(text)) return null;
+    // Nothing useful happened: empty output, OR degraded into markup again with
+    // no tool executed. Either way the caller falls back to a plain answer.
+    if (!text && !executedTool) return null;
+    if (!responseToolText && !executedTool && extractHallucinatedToolCall(text)) {
+      return null;
+    }
 
     return {
       responseMessages,

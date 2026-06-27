@@ -87,7 +87,8 @@ export function unwrapSerializedResponseCall(text: string): string {
  *   - Qwen/Hermes:   `<tool_call>{"name":"t","arguments":{…}}</tool_call>`
  *   - Functionary:   `<function=t>{…}</function>` or `<function=t><parameter=k>v</parameter>`
  *   - Mistral:       `[TOOL_CALLS]{…}` / `[TOOL_CALLS][{…}]`
- *   - bare JSON:     `{"name":"t","arguments":{…}}`
+ *   - bare JSON:     `{"name":"response",…}` ONLY (PM #61) — see branch 4 for why
+ *                    action tools require markup, never ambiguous bare JSON.
  * Orchestra only ever parsed the `response`-tool JSON shape
  * (`unwrapSerializedResponseCall`), so ANY other such call was persisted
  * verbatim — the user saw XML garbage and the intended action never ran.
@@ -212,12 +213,17 @@ export function extractHallucinatedToolCall(
     if (call) return { ...call, raw: trimmed };
   }
 
-  // 4) bare JSON blob that is wholly a tool call: {"name":"t","arguments":{…}}.
-  //    Require an explicit args container so arbitrary JSON objects that merely
-  //    carry a `name` field do NOT match (would suppress a legitimate answer).
+  // 4) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
+  //    Bare JSON is too ambiguous to treat as an ACTION-tool call: a legitimate
+  //    final answer can BE bare JSON (e.g. "reply with only the tool-call JSON,
+  //    no prose"), and the detect/suppress path would then DELETE that answer.
+  //    For `response` a false match is harmless — it just recovers the message
+  //    as prose. So bare JSON matches `response` only; every other tool requires
+  //    the unambiguous markup of branches 1–3 (where surrounding prose breaks the
+  //    `^…$` anchor, so a teaching example never matches).
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
     const call = parseCallObject(trimmed);
-    if (call) {
+    if (call && call.name === "response") {
       let parsed: unknown = null;
       try {
         parsed = JSON.parse(trimmed);

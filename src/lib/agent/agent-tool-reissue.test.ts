@@ -14,6 +14,9 @@ import {
   recordReissueAttempt,
   resetReissueBudget,
   attemptToolReissue,
+  recordChatDegradation,
+  isChatDegraded,
+  resetChatDegradation,
 } from "./agent-tool-reissue";
 
 describe("PM #81 — re-issue circuit breaker (recordReissueAttempt)", () => {
@@ -143,5 +146,34 @@ describe("PM #81 — attemptToolReissue (real generateText + mock model)", () =>
   it("returns null (never throws) when the model errors", async () => {
     const res = await attemptToolReissue({ ...baseArgs, model: modelThrowing() as never });
     expect(res).toBeNull();
+  });
+});
+
+describe("PM #82 — degradation signal (recordChatDegradation / isChatDegraded)", () => {
+  beforeEach(() => resetChatDegradation());
+
+  it("is false for an unseen chat", () => {
+    expect(isChatDegraded("x")).toBe(false);
+  });
+
+  it("flags a chat after a printed-as-text tool call", () => {
+    recordChatDegradation("x");
+    expect(isChatDegraded("x")).toBe(true);
+    expect(isChatDegraded("y")).toBe(false);
+  });
+
+  it("reset clears one chat, then all", () => {
+    recordChatDegradation("a");
+    recordChatDegradation("b");
+    resetChatDegradation("a");
+    expect(isChatDegraded("a")).toBe(false);
+    expect(isChatDegraded("b")).toBe(true);
+    resetChatDegradation();
+    expect(isChatDegraded("b")).toBe(false);
+  });
+
+  it("is a no-op for a missing chatId", () => {
+    recordChatDegradation(undefined);
+    expect(isChatDegraded(undefined)).toBe(false);
   });
 });

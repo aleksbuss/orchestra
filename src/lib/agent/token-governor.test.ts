@@ -7,6 +7,7 @@ import {
   capToolResultSize,
 } from "./token-governor";
 import { estimateTokenCount } from "./compressor";
+import { MAX_RELIABLE_CONTEXT_WINDOW } from "@/lib/providers/context-window";
 
 const big = (chars: number) => "x".repeat(chars);
 
@@ -29,11 +30,18 @@ describe("computeGovernorBudget", () => {
   it("reserves output headroom, clamped to 30% of the window", () => {
     // maxOutput 2048 would over-reserve on a 4096 window → clamp to 30% (1228)
     expect(computeGovernorBudget(4096, 2048)).toBe(4096 - 1228);
-    // maxOutput 4096 is under 30% of 200000 → reserve it in full
-    expect(computeGovernorBudget(200000, 4096)).toBe(200000 - 4096);
+    // maxOutput 4096 is under 30% of 100000 (under the cap) → reserve in full
+    expect(computeGovernorBudget(100000, 4096)).toBe(100000 - 4096);
   });
   it("never drops below the absolute floor", () => {
     expect(computeGovernorBudget(1000, 100000)).toBe(1000);
+  });
+  it("clamps an over-advertised window to the reliable cap before budgeting (PM #82)", () => {
+    // A 1M advertised window must NOT yield a ~1M budget — the governor would
+    // then never prune (the root cause of the long-context loop). It collapses
+    // to the reliable cap minus the reserve, same as a 200k window.
+    expect(computeGovernorBudget(1048576, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
+    expect(computeGovernorBudget(200000, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
   });
 });
 

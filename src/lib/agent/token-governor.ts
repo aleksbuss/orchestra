@@ -1,6 +1,7 @@
 import { pruneMessages, type ModelMessage, type PrepareStepFunction } from "ai";
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
+import { effectiveContextWindow } from "@/lib/providers/context-window";
 
 /**
  * Sprint A3 — in-flight token governor.
@@ -50,11 +51,15 @@ export function computeGovernorBudget(
   contextWindow: number,
   reservedOutputTokens: number
 ): number {
+  // PM #82 — clamp to the model's RELIABLE working length first. An advertised
+  // 1M window would otherwise make the budget ~1M and the governor never prune,
+  // the same root cause that disables pre-flight compaction.
+  const window = effectiveContextWindow(contextWindow);
   const reserve = Math.min(
     Math.max(0, reservedOutputTokens),
-    Math.floor(contextWindow * MAX_OUTPUT_RESERVE_RATIO)
+    Math.floor(window * MAX_OUTPUT_RESERVE_RATIO)
   );
-  return Math.max(ABSOLUTE_MIN_BUDGET, contextWindow - reserve);
+  return Math.max(ABSOLUTE_MIN_BUDGET, window - reserve);
 }
 
 /**

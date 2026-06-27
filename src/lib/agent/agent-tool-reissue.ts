@@ -79,6 +79,39 @@ export function resetReissueBudget(chatId?: string): void {
   else attemptsByChat.clear();
 }
 
+/**
+ * PM #82 — chats where the model has printed a tool call as TEXT (the degradation
+ * symptom). A flagged chat compacts more aggressively on its next pre-flight pass
+ * to escape the long-context hallucination loop — a behavior-triggered backstop
+ * that needs no window number, so it catches any model/provider that degrades
+ * BELOW the static reliable-window cap. In-memory + per-process, evaporating on
+ * restart like the reissue budget. Self-limiting: the tighter threshold only
+ * fires when the chat is actually large, so a flag on a now-small chat is inert.
+ */
+const degradedChats = new Set<string>();
+
+/** Flag `chatId` as degraded (a tool call was printed as text). */
+export function recordChatDegradation(chatId?: string): void {
+  if (!chatId) return;
+  degradedChats.add(chatId);
+  while (degradedChats.size > MAX_TRACKED_CHATS) {
+    const oldest = degradedChats.values().next().value;
+    if (oldest === undefined) break;
+    degradedChats.delete(oldest);
+  }
+}
+
+/** Has this chat shown the printed-tool-call degradation symptom? */
+export function isChatDegraded(chatId?: string): boolean {
+  return chatId ? degradedChats.has(chatId) : false;
+}
+
+/** Clear the degradation flag — one chat, or all when no id is given (tests). */
+export function resetChatDegradation(chatId?: string): void {
+  if (chatId) degradedChats.delete(chatId);
+  else degradedChats.clear();
+}
+
 /** Deterministic, Orchestra-authored correction injected for the re-issue. */
 export const REISSUE_CORRECTION =
   "SYSTEM CORRECTION: Your previous message PRINTED a tool call as plain text " +

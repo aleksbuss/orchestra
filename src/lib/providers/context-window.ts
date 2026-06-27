@@ -26,6 +26,30 @@ import { getOpenRouterContextWindow } from "@/lib/cost/openrouter-pricing";
  */
 export const COMPACTION_THRESHOLD_RATIO = 0.75;
 
+/**
+ * PM #82 — the model's RELIABLE working length, which is NOT its advertised
+ * context window. A provider may advertise a giant window (OpenRouter reports
+ * `qwen/qwen3-coder` at 1,048,576 tokens) while the model degrades into printed
+ * `<tool_call>` markup — i.e. stops calling tools natively — at a small fraction
+ * of it (~100k observed). With the raw 1M window, compaction (`0.75 × 1M` = 786k)
+ * and the in-flight governor never fire, so a long agentic chat rots into an
+ * unbreakable hallucination loop. We therefore cap the EFFECTIVE window used by
+ * the prune-decision functions at a reliable ceiling: no current open model
+ * tool-calls dependably past this in a long loop, and over-advertised windows are
+ * the common case across providers. This is the cloud analogue of the Ollama
+ * "advertised 32768 vs runtime 4096" note above. Tunable; key constant.
+ *
+ * `effectiveContextWindow` is a pure `Math.min` so it is a NO-OP for any window
+ * already at/under the ceiling (32k families, local Ollama 4096) and bites ONLY
+ * over-advertised large windows — provider-agnostic by construction.
+ */
+export const MAX_RELIABLE_CONTEXT_WINDOW = 120000;
+
+/** Clamp an advertised window to the model's reliable working length (PM #82). */
+export function effectiveContextWindow(window: number): number {
+  return Math.min(window, MAX_RELIABLE_CONTEXT_WINDOW);
+}
+
 /** Ollama's built-in default `num_ctx` when nothing overrides it (v0.6+). */
 const OLLAMA_DEFAULT_NUM_CTX = 4096;
 
@@ -82,9 +106,13 @@ export function lookupStaticContextWindow(modelId: string): number | null {
   return null;
 }
 
-/** Token count at which compaction should fire for a given real window. */
+/**
+ * Token count at which compaction should fire for a given window. Clamps to the
+ * model's RELIABLE working length first (PM #82) — a 1M advertised window would
+ * otherwise put the threshold at 786k, far past where the model degrades.
+ */
 export function compactionThresholdFor(window: number): number {
-  return Math.floor(window * COMPACTION_THRESHOLD_RATIO);
+  return Math.floor(effectiveContextWindow(window) * COMPACTION_THRESHOLD_RATIO);
 }
 
 /**

@@ -41,7 +41,17 @@ export function stripThinkingTags(text: string): string {
  * unchanged (conservative — only unwraps when the WHOLE text is the call).
  */
 export function unwrapSerializedResponseCall(text: string): string {
-  if (!text || !text.includes("response")) return text;
+  if (!text) return text;
+  // PM #81 — the response call may arrive wrapped in RAW tool-call markup
+  // (`<tool_call>{…}</tool_call>`, `<function=response>{…}`, `[TOOL_CALLS]…`),
+  // not just a bare JSON blob. extractHallucinatedToolCall normalizes every
+  // shape; recover the inner message when the mis-emitted call is `response`.
+  const markupCall = extractHallucinatedToolCall(text);
+  if (markupCall && markupCall.name === "response") {
+    const recovered = readResponseMessage(markupCall.args);
+    if (recovered) return recovered;
+  }
+  if (!text.includes("response")) return text;
   let body = text.trim();
   // Strip a single surrounding ```json ... ``` (or bare ```) fence.
   const fence = body.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?```$/);
@@ -68,6 +78,165 @@ export function unwrapSerializedResponseCall(text: string): string {
           ? args.answer
           : null;
   return message && message.trim() ? message : text;
+}
+
+/**
+ * PM #81 — a tool call the model emitted as RAW TEXT instead of a native tool
+ * call. Degraded models (notably Qwen via Ollama/OpenRouter under long context)
+ * stop using the native tool-calling channel and PRINT the call as markup:
+ *   - Qwen/Hermes:   `<tool_call>{"name":"t","arguments":{…}}</tool_call>`
+ *   - Functionary:   `<function=t>{…}</function>` or `<function=t><parameter=k>v</parameter>`
+ *   - Mistral:       `[TOOL_CALLS]{…}` / `[TOOL_CALLS][{…}]`
+ *   - bare JSON:     `{"name":"t","arguments":{…}}`
+ * Orchestra only ever parsed the `response`-tool JSON shape
+ * (`unwrapSerializedResponseCall`), so ANY other such call was persisted
+ * verbatim — the user saw XML garbage and the intended action never ran.
+ *
+ * Returns the normalized `{ name, args, raw }` when the WHOLE trimmed text is a
+ * single such call, else null. Conservative on purpose: an answer that merely
+ * quotes `<tool_call>` inside surrounding prose must NOT match (a false positive
+ * would suppress a real answer), so the markup must DOMINATE the message — every
+ * branch below anchors with `^…$`.
+ */
+export interface HallucinatedToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  /** The matched markup span (for "does this dominate the message" checks). */
+  raw: string;
+}
+
+/** Strip ONE surrounding ```lang … ``` fence; no fence ⇒ returned unchanged. */
+function stripOneCodeFence(s: string): string {
+  const fence = s.match(/^```(?:[a-zA-Z0-9_-]+)?\s*\n?([\s\S]*?)\n?```$/);
+  return fence ? fence[1].trim() : s;
+}
+
+/** Read a final-answer string out of a `response`-call arg bag. */
+function readResponseMessage(args: Record<string, unknown>): string | null {
+  for (const key of ["message", "text", "answer", "response", "content"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+/**
+ * Parse a JSON tool-call object (or a single-element array of them) into
+ * `{ name, args }`. Handles the OpenAI nested `{ function: { name, arguments } }`
+ * shape and an `arguments` field that is itself a JSON STRING. Returns null when
+ * no tool name can be resolved.
+ */
+function parseCallObject(
+  jsonText: string
+): { name: string; args: Record<string, unknown> } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText.trim());
+  } catch {
+    return null;
+  }
+  if (Array.isArray(parsed)) parsed = parsed[0];
+  const rec = asRecord(parsed);
+  if (!rec) return null;
+
+  // OpenAI-style nesting: { type:"function", function:{ name, arguments } }.
+  const fnRec = asRecord(rec.function);
+  const name: unknown =
+    fnRec && typeof fnRec.name === "string"
+      ? fnRec.name
+      : (rec.name ?? rec.tool ?? rec.call ?? rec.function);
+  if (typeof name !== "string" || !name.trim()) return null;
+
+  const rawArgs =
+    (fnRec ? fnRec.arguments ?? fnRec.parameters : undefined) ??
+    rec.arguments ??
+    rec.input ??
+    rec.parameters;
+  let args: Record<string, unknown> = {};
+  if (typeof rawArgs === "string") {
+    // OpenAI serializes arguments as a JSON string.
+    try {
+      args = asRecord(JSON.parse(rawArgs)) ?? {};
+    } catch {
+      args = {};
+    }
+  } else {
+    args = asRecord(rawArgs) ?? {};
+  }
+  return { name: name.trim(), args };
+}
+
+export function extractHallucinatedToolCall(
+  text: string
+): HallucinatedToolCall | null {
+  if (!text) return null;
+  const trimmed = stripOneCodeFence(text.trim());
+  if (!trimmed) return null;
+
+  // 1) <tool_call>{…}</tool_call> (Qwen/Hermes); closing tag optional.
+  let m = trimmed.match(/^<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>)?\s*$/i);
+  if (m) {
+    const call = parseCallObject(m[1]);
+    if (call) return { ...call, raw: trimmed };
+  }
+
+  // 2) <function=NAME>{…}</function> | <function=NAME><parameter=k>v</parameter>…
+  m = trimmed.match(/^<function=([a-zA-Z0-9_.-]+)\s*>\s*([\s\S]*?)\s*(?:<\/function>)?\s*$/i);
+  if (m) {
+    const name = m[1];
+    const inner = m[2].trim();
+    let args: Record<string, unknown> = {};
+    let jsonInner: unknown = null;
+    try {
+      jsonInner = JSON.parse(inner);
+    } catch {
+      jsonInner = null;
+    }
+    const innerRec = asRecord(jsonInner);
+    if (innerRec) {
+      args = innerRec;
+    } else {
+      for (const p of inner.matchAll(
+        /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/gi
+      )) {
+        args[p[1]] = p[2];
+      }
+    }
+    return { name, args, raw: trimmed };
+  }
+
+  // 3) [TOOL_CALLS] / [TOOL_CALL] / [TOOL_REQUEST] <json> (Mistral-style).
+  m = trimmed.match(/^\[TOOL_(?:CALLS?|REQUEST)\]\s*([\s\S]+)$/i);
+  if (m) {
+    const call = parseCallObject(m[1]);
+    if (call) return { ...call, raw: trimmed };
+  }
+
+  // 4) bare JSON blob that is wholly a tool call: {"name":"t","arguments":{…}}.
+  //    Require an explicit args container so arbitrary JSON objects that merely
+  //    carry a `name` field do NOT match (would suppress a legitimate answer).
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    const call = parseCallObject(trimmed);
+    if (call) {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        parsed = null;
+      }
+      const rec = asRecord(parsed);
+      const hasArgsContainer = !!(
+        rec &&
+        ("arguments" in rec ||
+          "input" in rec ||
+          "parameters" in rec ||
+          asRecord(rec.function))
+      );
+      if (hasArgsContainer) return { ...call, raw: trimmed };
+    }
+  }
+
+  return null;
 }
 
 export function extractAssistantText(msg: ModelMessage): string {
@@ -219,7 +388,17 @@ export function shouldAutoContinueAssistant(
  */
 export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
   if (getLastResponseToolText(messages).trim()) return true;
-  return Boolean(stripThinkingTags(getLastAssistantText(messages)).trim());
+  const text = stripThinkingTags(getLastAssistantText(messages)).trim();
+  if (!text) return false;
+  // PM #81 — text that is ONLY a hallucinated tool call (raw `<tool_call>` markup,
+  // not a native call) delivered no real answer. A mis-emitted `response` call is
+  // still recoverable to prose by the persistence-layer unwrap, so it counts as
+  // delivered; any OTHER tool printed as markup (write_text_file, search_web…) is
+  // a failed action — return false so resolveTurnContinuation forces a clean
+  // final answer instead of persisting XML garbage to the user.
+  const hallucinated = extractHallucinatedToolCall(text);
+  if (hallucinated && hallucinated.name !== "response") return false;
+  return true;
 }
 
 export interface TurnContinuationResult {

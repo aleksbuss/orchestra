@@ -202,6 +202,35 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.text).toBe("FORCED ANSWER");
   });
 
+  it("PM #81: an action-tool hallucination forces a clean final answer (real wire)", async () => {
+    // The model printed a `write_text_file` call as RAW TEXT instead of a native
+    // tool call. turnHasDeliverableAnswer must classify this as NO delivery so
+    // the continuation regenerates a real answer instead of shipping XML garbage.
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [
+        assistantText(
+          '<tool_call>{"name":"write_text_file","arguments":{"file_path":"a.ts","content":"x"}}</tool_call>'
+        ),
+      ],
+      finishReason: "stop",
+      model: modelReturning("Here is the file content you asked for.") as never,
+    });
+    expect(res.text).toBe("Here is the file content you asked for.");
+  });
+
+  it("PM #81: a mis-emitted `response` markup is delivered (NOT regenerated)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [
+        assistantText('<tool_call>{"name":"response","arguments":{"message":"done"}}</tool_call>'),
+      ],
+      finishReason: "stop",
+      model: modelThrowing() as never, // would throw if a regeneration ran
+    });
+    expect(res.text).toBe(""); // recoverable → no forced regeneration
+  });
+
   it("on forced-generation failure: empty text + a uiNotice (never throws)", async () => {
     const res = await resolveTurnContinuation({
       ...base,

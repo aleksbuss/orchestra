@@ -56,17 +56,19 @@ describe("extractHallucinatedToolCall (PM #81)", () => {
     expect(extractHallucinatedToolCall(raw)?.name).toBe("search_web");
   });
 
-  it("parses the OpenAI nested {function:{name,arguments-string}} shape", () => {
+  it("parses the OpenAI nested {function:{name,arguments-string}} shape inside <tool_call>", () => {
+    // The OpenAI-nested object inside markup IS detected (markup is unambiguous);
+    // bare (no markup) it is NOT — see the conservatism block below.
     const raw =
-      '{"type":"function","function":{"name":"write_text_file","arguments":"{\\"file_path\\":\\"e.ts\\"}"}}';
+      '<tool_call>{"type":"function","function":{"name":"write_text_file","arguments":"{\\"file_path\\":\\"e.ts\\"}"}}</tool_call>';
     const call = extractHallucinatedToolCall(raw);
     expect(call?.name).toBe("write_text_file");
     expect(call?.args).toEqual({ file_path: "e.ts" });
   });
 
-  it("parses a bare JSON tool-call blob with an args container", () => {
-    const raw = '{"name":"search_web","arguments":{"query":"x"}}';
-    expect(extractHallucinatedToolCall(raw)?.name).toBe("search_web");
+  it("recovers a bare JSON `response` blob (PM #61) — the ONLY bare-JSON case", () => {
+    const raw = '{"name":"response","arguments":{"message":"hi"}}';
+    expect(extractHallucinatedToolCall(raw)?.name).toBe("response");
   });
 
   // --- conservatism: must NOT match legitimate output ---
@@ -83,6 +85,17 @@ describe("extractHallucinatedToolCall (PM #81)", () => {
 
   it("does NOT match a legitimate JSON answer without an args container", () => {
     expect(extractHallucinatedToolCall('{"city":"Riga","country":"LV"}')).toBeNull();
+  });
+
+  it("does NOT match a bare-JSON ACTION-tool call (would delete a legit JSON answer)", () => {
+    // A user can legitimately ask for "only the tool-call JSON, no prose". Bare
+    // JSON for an action tool must NOT be treated as a hallucination — only the
+    // unambiguous markup forms (or a bare `response`) are safe. False-negative by
+    // design (qwen3-coder degrades into <tool_call> markup, not bare JSON).
+    expect(
+      extractHallucinatedToolCall('{"name":"write_text_file","arguments":{"file_path":"a.ts"}}')
+    ).toBeNull();
+    expect(extractHallucinatedToolCall('{"name":"search_web","arguments":{"query":"x"}}')).toBeNull();
   });
 
   it("does NOT match an empty / whitespace string", () => {

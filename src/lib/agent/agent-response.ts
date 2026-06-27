@@ -401,6 +401,42 @@ export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
   return true;
 }
 
+/**
+ * PM #81 Sprint 2 — was this turn's only "answer" a hallucinated ACTION tool
+ * call printed as text (not the `response` tool, and no real answer delivered)?
+ * Returns the parsed call so the caller can re-issue it natively, else null.
+ * Mirrors turnHasDeliverableAnswer's logic: a real `response` tool result, or a
+ * mis-emitted `response` (unwrap recovers it), both count as delivered.
+ */
+export function detectActionHallucination(
+  messages: ModelMessage[]
+): HallucinatedToolCall | null {
+  if (getLastResponseToolText(messages).trim()) return null;
+  const text = stripThinkingTags(getLastAssistantText(messages)).trim();
+  if (!text) return null;
+  const call = extractHallucinatedToolCall(text);
+  return call && call.name !== "response" ? call : null;
+}
+
+/**
+ * PM #81 Sprint 2 — drop the trailing assistant message when its text is an
+ * action-tool hallucination, so the raw `<tool_call>` markup is NEVER persisted
+ * to the chat (the user must not see XML garbage). Only the LAST message is
+ * considered, and only when it is an assistant message whose stripped text is a
+ * non-`response` hallucinated call — everything else passes through untouched.
+ */
+export function stripHallucinatedTrailingText(
+  messages: ModelMessage[]
+): ModelMessage[] {
+  if (messages.length === 0) return messages;
+  const last = messages[messages.length - 1];
+  if (last.role !== "assistant") return messages;
+  const text = stripThinkingTags(extractAssistantText(last)).trim();
+  const call = extractHallucinatedToolCall(text);
+  if (call && call.name !== "response") return messages.slice(0, -1);
+  return messages;
+}
+
 export interface TurnContinuationResult {
   /** Extra assistant text to append (continuation tail or forced answer); "" when none needed. */
   text: string;

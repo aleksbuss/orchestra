@@ -56,8 +56,16 @@ import {
   getLastResponseToolText,
   turnHasDeliverableAnswer,
   resolveTurnContinuation,
+  detectActionHallucination,
+  stripHallucinatedTrailingText,
 } from "@/lib/agent/agent-response";
 import type { TurnContinuationResult } from "@/lib/agent/agent-response";
+// PM #81 Sprint 2 — active self-heal for hallucinated (printed-as-text) tool calls.
+import {
+  attemptToolReissue,
+  recordReissueAttempt,
+  resetReissueBudget,
+} from "@/lib/agent/agent-tool-reissue";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
 import {
@@ -966,12 +974,63 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         const stepLimitReached =
           stepCount !== undefined && stepCount >= MAX_TOOL_STEPS_PER_TURN;
 
-        const responseMessages = event.response.messages;
+        const rawResponseMessages = event.response.messages;
+
+        // PM #81 Sprint 2 — action-tool hallucination self-heal. A degraded model
+        // (qwen3-coder under long context) PRINTS a tool call as raw text instead
+        // of calling it natively; Orchestra never executed it and shipped XML to
+        // the user. Re-prompt WITH tools so the model re-issues the call for real,
+        // and SUPPRESS the raw markup so the user never sees it. Bounded by a
+        // chat-scoped retry budget (circuit breaker). Skipped at a step-cap pause
+        // and in plain-chat mode (no tools to re-issue with).
+        const hallucinatedCall =
+          useTools && !stepLimitReached
+            ? detectActionHallucination(rawResponseMessages)
+            : null;
+        let reissueUsage: import("@/lib/cost/accumulator").RawUsage | undefined;
+        let reissueMessages: ModelMessage[] = [];
+        if (hallucinatedCall) {
+          const budget = recordReissueAttempt(options.chatId);
+          console.warn(
+            `[Agent] PM #81 — model printed "${hallucinatedCall.name}" as text instead of ` +
+              `calling it (re-issue attempt ${budget.count}, allowed=${budget.allowed}).`
+          );
+          if (budget.allowed) {
+            const reissue = await attemptToolReissue({
+              model,
+              systemPrompt,
+              baseMessages: messages,
+              priorMessages: rawResponseMessages,
+              tools: effectiveTools,
+              providerOptions,
+              prepareStep: tokenGovernor,
+              settings,
+              abortSignal: options.abortSignal,
+            });
+            if (reissue) {
+              reissueMessages = reissue.responseMessages;
+              reissueUsage = reissue.usage;
+              resetReissueBudget(options.chatId); // delivered → reset for later turns
+            }
+          }
+        }
+
+        // When a hallucination was detected, drop its raw markup message (the
+        // user must not see XML) and append the re-issue's real messages, if any.
+        const responseMessages = hallucinatedCall
+          ? [
+              ...stripHallucinatedTrailingText(rawResponseMessages),
+              ...reissueMessages,
+            ]
+          : rawResponseMessages;
+
         // PM #36 (truncation continuation) + PM #69 (forced final answer) +
         // step-cap pause are all decided by resolveTurnContinuation —
         // self-contained and unit-tested (final-answer-guard.test.ts). We publish
         // any non-fatal operator notice it returns and bill its usage alongside
-        // streamUsage.
+        // streamUsage. A delivered re-issue makes responseMessages deliverable, so
+        // this is a no-op then; a FAILED re-issue (markup stripped, nothing added)
+        // is non-deliverable → it forces a plain final answer (the Sprint 1 path).
         const turnExtra = await resolveTurnContinuation({
           responseMessages,
           finishReason,
@@ -1031,15 +1090,16 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 (options.userMessage.length > 60 ? "..." : "");
             }
             // PM #36 — fold ALL of this turn's billing surfaces (main stream
-            // + auto-continuation + MoA bundle) into the running per-chat
-            // cumulative via the single accounting helper. Resolved chat-model
-            // identity comes from `resolvedModelConfig`; the continuation reuses
-            // the same model handle, so the pricing lookup is unambiguous.
+            // + auto-continuation + MoA bundle + PM #81 re-issue) into the
+            // running per-chat cumulative via the single accounting helper.
+            // Resolved chat-model identity comes from `resolvedModelConfig`; the
+            // continuation/re-issue reuse the same model handle, so the pricing
+            // lookup is unambiguous.
             chat.cumulativeUsage = foldTurnUsage(
               chat.cumulativeUsage,
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
-              { continuationUsage, turnExtraUsage }
+              { continuationUsage, reissueUsage, turnExtraUsage }
             );
             return chat;
           });

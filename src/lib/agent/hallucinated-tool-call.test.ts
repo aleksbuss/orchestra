@@ -12,6 +12,8 @@ import type { ModelMessage } from "ai";
 import {
   extractHallucinatedToolCall,
   turnHasDeliverableAnswer,
+  detectActionHallucination,
+  stripHallucinatedTrailingText,
 } from "./agent-response";
 
 describe("extractHallucinatedToolCall (PM #81)", () => {
@@ -114,5 +116,50 @@ describe("turnHasDeliverableAnswer + hallucinated calls (PM #81)", () => {
     expect(turnHasDeliverableAnswer([assistantMsg("All done — the file is written.")])).toBe(
       true
     );
+  });
+});
+
+describe("detectActionHallucination (PM #81 Sprint 2)", () => {
+  it("returns the call for an action-tool hallucination", () => {
+    const call = detectActionHallucination([
+      assistantMsg('<tool_call>{"name":"write_text_file","arguments":{"file_path":"a.ts"}}</tool_call>'),
+    ]);
+    expect(call?.name).toBe("write_text_file");
+  });
+
+  it("returns null for a mis-emitted `response` (recoverable to prose)", () => {
+    expect(
+      detectActionHallucination([
+        assistantMsg('<tool_call>{"name":"response","arguments":{"message":"hi"}}</tool_call>'),
+      ])
+    ).toBeNull();
+  });
+
+  it("returns null for a normal prose answer", () => {
+    expect(detectActionHallucination([assistantMsg("Here is the answer.")])).toBeNull();
+  });
+});
+
+describe("stripHallucinatedTrailingText (PM #81 Sprint 2)", () => {
+  it("drops the trailing action-tool markup message", () => {
+    const msgs = [
+      assistantMsg("earlier text"),
+      assistantMsg('<tool_call>{"name":"write_text_file","arguments":{"file_path":"a.ts"}}</tool_call>'),
+    ];
+    const out = stripHallucinatedTrailingText(msgs);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toBe(msgs[0]);
+  });
+
+  it("keeps a trailing normal answer", () => {
+    const msgs = [assistantMsg("All done.")];
+    expect(stripHallucinatedTrailingText(msgs)).toHaveLength(1);
+  });
+
+  it("keeps a trailing mis-emitted `response` markup (it is the answer)", () => {
+    const msgs = [
+      assistantMsg('<tool_call>{"name":"response","arguments":{"message":"hi"}}</tool_call>'),
+    ];
+    expect(stripHallucinatedTrailingText(msgs)).toHaveLength(1);
   });
 });

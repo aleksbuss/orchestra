@@ -487,6 +487,50 @@ export function stripHallucinatedTrailingText(
   return messages;
 }
 
+/** Placeholder swapped in for a historical printed-tool-call message (PM #82). */
+export const HALLUCINATED_HISTORY_PLACEHOLDER =
+  "[Orchestra removed a tool call that an earlier turn printed as text instead of " +
+  "executing. Issue tool calls through the native function-calling channel.]";
+
+/**
+ * PM #82 — neutralize printed-tool-call markup sitting in CHAT HISTORY. A degraded
+ * model that prints `<tool_call>`/`<function=…>` as text poisons its OWN future
+ * turns: those messages become few-shot examples it imitates, so the loop persists
+ * even after the per-turn suppression (PM #81, which only governs the LAST message)
+ * and even after compaction keeps them in the recent window. For every historical
+ * ASSISTANT message whose text IS an action-tool hallucination (NOT `response` — a
+ * printed answer carries content we keep), replace that text with a short neutral
+ * placeholder. Pair-safe: printed calls are TEXT (no `toolCallId`), so swapping
+ * them never orphans a native tool-call/result pair; non-text parts are preserved.
+ */
+export function neutralizeHallucinatedHistory(
+  messages: ModelMessage[]
+): ModelMessage[] {
+  return messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const text = stripThinkingTags(extractAssistantText(msg)).trim();
+    if (!text) return msg;
+    const call = extractHallucinatedToolCall(text);
+    if (!call || call.name === "response") return msg;
+
+    const content = msg.content;
+    if (typeof content === "string") {
+      return { ...msg, content: HALLUCINATED_HISTORY_PLACEHOLDER };
+    }
+    if (!Array.isArray(content)) return msg;
+    // Drop the text parts (they carry the markup), keep any non-text parts, and
+    // prepend a single placeholder so the turn still reads as a neutralized reply.
+    const nonText = content.filter(
+      (p) =>
+        !(typeof p === "object" && p !== null && "type" in p && p.type === "text")
+    );
+    return {
+      ...msg,
+      content: [{ type: "text", text: HALLUCINATED_HISTORY_PLACEHOLDER }, ...nonText],
+    } as ModelMessage;
+  });
+}
+
 export interface TurnContinuationResult {
   /** Extra assistant text to append (continuation tail or forced answer); "" when none needed. */
   text: string;

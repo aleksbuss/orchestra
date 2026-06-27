@@ -58,6 +58,7 @@ import {
   resolveTurnContinuation,
   detectActionHallucination,
   stripHallucinatedTrailingText,
+  neutralizeHallucinatedHistory,
 } from "@/lib/agent/agent-response";
 import type { TurnContinuationResult } from "@/lib/agent/agent-response";
 // PM #81 Sprint 2 — active self-heal for hallucinated (printed-as-text) tool calls.
@@ -65,6 +66,8 @@ import {
   attemptToolReissue,
   recordReissueAttempt,
   resetReissueBudget,
+  recordChatDegradation,
+  isChatDegraded,
 } from "@/lib/agent/agent-tool-reissue";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
@@ -103,6 +106,13 @@ const MAX_TOOL_STEPS_SUBORDINATE = 25;
  * (and not a leading system anchor) is evicted to RAG.
  */
 const KEEP_RECENT_MESSAGES = 8;
+
+/**
+ * PM #82 — fraction of the normal compaction threshold used for a chat flagged
+ * as degraded (it has printed a tool call as text). Halving the threshold forces
+ * an earlier, tighter compaction to break the long-context hallucination loop.
+ */
+const DEGRADED_COMPACTION_RATIO = 0.5;
 
 // ── Swarm DAG Completion Guard ────────────────────────────────────────────────
 // Guarantees that the orchestrator node always transitions out of "running"
@@ -515,13 +525,20 @@ export async function runAgent(options: RunAgentOptions) {
     const rawModelMessages = convertChatMessagesToModelMessages(chat.messages);
     const estimatedTokens = estimateTokenCount(rawModelMessages);
 
-    // Compaction fires at 75% of the resolved window (Sprint A2).
+    // Compaction fires at 75% of the resolved (reliable-capped) window (Sprint
+    // A2 + PM #82). A chat that has shown the printed-tool-call degradation
+    // symptom compacts at HALF that — a behavior-triggered backstop (PM #82) that
+    // escapes the long-context loop even when the model degrades BELOW the static
+    // reliable-window cap.
     const contextLimit = compactionThresholdFor(contextWindow);
+    const effectiveLimit = isChatDegraded(options.chatId)
+      ? Math.floor(contextLimit * DEGRADED_COMPACTION_RATIO)
+      : contextLimit;
 
     // Sprint A1: gate compaction on token pressure ONLY. The old
     // `&& chat.messages.length > 12` guard let a moderate (9–12 message) chat
     // that genuinely exceeds the limit sail past compaction.
-    if (estimatedTokens > contextLimit) {
+    if (estimatedTokens > effectiveLimit) {
       // Sprint A4 — sliding-window + anchors. Keep leading SYSTEM anchors (task
       // framing) and the most-recent-K messages VERBATIM in the live context;
       // only the middle tail is evicted. That tail is archived to RAG TWICE:
@@ -538,12 +555,12 @@ export async function runAgent(options: RunAgentOptions) {
       );
 
       if (evicted.length > 0) {
-        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
+        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${effectiveLimit}). Deep-archiving history...`);
         publishUiSyncEvent({
           topic: "chat",
           chatId: options.chatId,
           projectId: options.projectId ?? null,
-          reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
+          reason: "[System] Context was compacted to keep the conversation responsive — older messages were archived to memory and remain searchable.",
         });
 
         const memorySubdir = options.projectId ? `${options.projectId}` : "main";
@@ -600,7 +617,9 @@ export async function runAgent(options: RunAgentOptions) {
       }
     }
 
-    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const allMessages = neutralizeHallucinatedHistory(
+      convertChatMessagesToModelMessages(chat.messages)
+    );
     const history = new History(80);
     history.addMany(allMessages);
     context.history = history.getAll();
@@ -990,6 +1009,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         let reissueUsage: import("@/lib/cost/accumulator").RawUsage | undefined;
         let reissueMessages: ModelMessage[] = [];
         if (hallucinatedCall) {
+          // PM #82 — printing a tool call as text is the degradation symptom.
+          // Flag the chat so its NEXT pre-flight pass compacts aggressively and
+          // escapes the long-context loop (behavior-triggered backstop).
+          recordChatDegradation(options.chatId);
           const budget = recordReissueAttempt(options.chatId);
           console.warn(
             `[Agent] PM #81 — model printed "${hallucinatedCall.name}" as text instead of ` +
@@ -1294,7 +1317,9 @@ export async function runAgentText(options: {
 
   const chat = await getChat(options.chatId);
   if (chat) {
-    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const allMessages = neutralizeHallucinatedHistory(
+      convertChatMessagesToModelMessages(chat.messages)
+    );
     const history = new History(80);
     history.addMany(allMessages);
     context.history = history.getAll();

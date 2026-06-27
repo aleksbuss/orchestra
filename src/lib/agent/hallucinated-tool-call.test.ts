@@ -14,6 +14,8 @@ import {
   turnHasDeliverableAnswer,
   detectActionHallucination,
   stripHallucinatedTrailingText,
+  neutralizeHallucinatedHistory,
+  HALLUCINATED_HISTORY_PLACEHOLDER,
 } from "./agent-response";
 
 describe("extractHallucinatedToolCall (PM #81)", () => {
@@ -204,5 +206,78 @@ describe("stripHallucinatedTrailingText (PM #81 Sprint 2)", () => {
       assistantMsg('<tool_call>{"name":"response","arguments":{"message":"hi"}}</tool_call>'),
     ];
     expect(stripHallucinatedTrailingText(msgs)).toHaveLength(1);
+  });
+});
+
+function assistantParts(parts: unknown[]): ModelMessage {
+  return { role: "assistant", content: parts } as ModelMessage;
+}
+function toolResultMsg(toolCallId: string, toolName: string): ModelMessage {
+  return {
+    role: "tool",
+    content: [
+      { type: "tool-result", toolCallId, toolName, output: { type: "json", value: { ok: true } } },
+    ],
+  } as ModelMessage;
+}
+
+describe("neutralizeHallucinatedHistory (PM #82)", () => {
+  // The REAL production format: nested <tool_call><function=NAME><parameter=…>.
+  const markup =
+    "<tool_call>\n<function=write_text_file>\n<parameter=file_path>a.ts</parameter>\n<parameter=content>x</parameter>";
+
+  it("replaces an action-tool markup assistant message with the placeholder", () => {
+    const out = neutralizeHallucinatedHistory([assistantMsg("ok"), assistantMsg(markup)]);
+    expect(out[0]).toEqual({ role: "assistant", content: "ok" });
+    expect(out[1].content).toBe(HALLUCINATED_HISTORY_PLACEHOLDER);
+  });
+
+  it("neutralizes every poisoned message across the history", () => {
+    const out = neutralizeHallucinatedHistory([
+      assistantMsg(markup),
+      { role: "user", content: "continue" },
+      assistantMsg(markup),
+    ]);
+    expect(out[0].content).toBe(HALLUCINATED_HISTORY_PLACEHOLDER);
+    expect(out[2].content).toBe(HALLUCINATED_HISTORY_PLACEHOLDER);
+  });
+
+  it("leaves clean assistant text untouched", () => {
+    const msgs = [assistantMsg("Here is the plan: step 1, step 2.")];
+    expect(neutralizeHallucinatedHistory(msgs)).toEqual(msgs);
+  });
+
+  it("does not touch user messages, even ones quoting markup", () => {
+    const msgs: ModelMessage[] = [{ role: "user", content: markup }];
+    expect(neutralizeHallucinatedHistory(msgs)).toEqual(msgs);
+  });
+
+  it("keeps a mis-emitted `response` markup (it is the answer, not poison)", () => {
+    const msgs = [
+      assistantMsg('<tool_call>{"name":"response","arguments":{"message":"hi"}}</tool_call>'),
+    ];
+    expect(neutralizeHallucinatedHistory(msgs)).toEqual(msgs);
+  });
+
+  it("preserves a native tool-call/result pair (pair-safe)", () => {
+    const msgs: ModelMessage[] = [
+      assistantParts([
+        { type: "tool-call", toolCallId: "c1", toolName: "write_text_file", input: { file_path: "a.ts" } },
+      ]),
+      toolResultMsg("c1", "write_text_file"),
+    ];
+    expect(neutralizeHallucinatedHistory(msgs)).toEqual(msgs);
+  });
+
+  it("neutralizes markup text but KEEPS a native part in a mixed message", () => {
+    const out = neutralizeHallucinatedHistory([
+      assistantParts([
+        { type: "text", text: markup },
+        { type: "tool-call", toolCallId: "c2", toolName: "search_web", input: { query: "x" } },
+      ]),
+    ]);
+    const content = out[0].content as Array<{ type: string; text?: string; toolName?: string }>;
+    expect(content[0]).toEqual({ type: "text", text: HALLUCINATED_HISTORY_PLACEHOLDER });
+    expect(content.some((p) => p.type === "tool-call" && p.toolName === "search_web")).toBe(true);
   });
 });

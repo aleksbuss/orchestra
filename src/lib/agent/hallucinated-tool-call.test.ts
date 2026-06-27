@@ -51,6 +51,36 @@ describe("extractHallucinatedToolCall (PM #81)", () => {
     expect(call?.args).toEqual({ file_path: "d.ts" });
   });
 
+  // ── The REAL production format (PM #81 deep-audit, chat a8e1a43c): leading
+  // prose, then a NESTED <tool_call><function=…><parameter=…> block, frequently
+  // UNCLOSED (the content param runs to EOF). The first cut anchored to ^…$ and
+  // parsed the <tool_call> inner as JSON → it matched ZERO of these. ──────────
+  it("parses prose-prefixed NESTED <tool_call><function=><parameter=> (the real degradation)", () => {
+    const raw =
+      "Let me update the engine to integrate our new modules:\n\n" +
+      "<tool_call>\n<function=write_text_file>\n" +
+      "<parameter=file_path>\n/proj/src/engine.ts\n</parameter>\n" +
+      "<parameter=content>\nimport { Bot } from 'grammy';\nexport class Engine {}\n"; // UNCLOSED to EOF
+    const call = extractHallucinatedToolCall(raw);
+    expect(call?.name).toBe("write_text_file");
+    expect(call?.args.file_path).toBe("/proj/src/engine.ts");
+    expect(String(call?.args.content)).toContain("import { Bot }");
+  });
+
+  it("parses the nested form when fully CLOSED with trailing tags", () => {
+    const raw =
+      "Here is the file:\n<tool_call><function=read_text_file>" +
+      "<parameter=file_path>a.ts</parameter></function></tool_call>";
+    expect(extractHallucinatedToolCall(raw)?.name).toBe("read_text_file");
+  });
+
+  it("does NOT match a CORRECTION message that only MENTIONS <tool_call> (the operator's manual fix)", () => {
+    const raw =
+      "CRITICAL SYSTEM INSTRUCTION: You are hallucinating raw XML-like `<tool_call>` " +
+      "blocks directly into your text response. Use the native JSON tool-calling API instead.";
+    expect(extractHallucinatedToolCall(raw)).toBeNull();
+  });
+
   it("parses a Mistral [TOOL_CALLS] array", () => {
     const raw = '[TOOL_CALLS][{"name":"search_web","arguments":{"query":"q"}}]';
     expect(extractHallucinatedToolCall(raw)?.name).toBe("search_web");

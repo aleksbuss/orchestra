@@ -1,5 +1,25 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { recordFileWrite, resetRewriteBudget } from "@/lib/tools/write-rewrite-budget";
+import {
+  recordFileWrite,
+  resetRewriteBudget,
+  largeFileRewriteHint,
+  LARGE_EXISTING_FILE_REWRITE_BYTES,
+} from "@/lib/tools/write-rewrite-budget";
+
+describe("largeFileRewriteHint — PM #81 Sprint 3 advisory nudge", () => {
+  it("returns null for a new file (existed=false) regardless of size", () => {
+    expect(largeFileRewriteHint(false, 999_999)).toBeNull();
+  });
+
+  it("returns null for a small existing file (below threshold)", () => {
+    expect(largeFileRewriteHint(true, LARGE_EXISTING_FILE_REWRITE_BYTES - 1)).toBeNull();
+  });
+
+  it("nudges toward replace_in_file for a large existing file (at threshold)", () => {
+    const hint = largeFileRewriteHint(true, LARGE_EXISTING_FILE_REWRITE_BYTES);
+    expect(hint).toContain("replace_in_file");
+  });
+});
 
 describe("recordFileWrite — chat-scoped rewrite budget (PM #80 cross-turn backstop)", () => {
   beforeEach(() => resetRewriteBudget());

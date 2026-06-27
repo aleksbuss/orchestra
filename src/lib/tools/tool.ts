@@ -21,7 +21,7 @@ import { searchWeb, isSearchUsable } from "@/lib/tools/search-engine";
 import { createWebTaskTool } from "@/lib/tools/web-task";
 import { createFetchWebpageTool } from "@/lib/tools/fetch-webpage";
 import { verifyWrittenSource } from "@/lib/tools/post-write-verify";
-import { recordFileWrite } from "@/lib/tools/write-rewrite-budget";
+import { recordFileWrite, largeFileRewriteHint } from "@/lib/tools/write-rewrite-budget";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1106,6 +1106,7 @@ export function createAgentTools(
 
         const resolvedPath = resolveOutgoingFilePath(context, file_path);
         let existed = false;
+        let existedSize = 0;
         try {
           const before = await fs.stat(resolvedPath);
           if (!before.isFile()) {
@@ -1115,6 +1116,7 @@ export function createAgentTools(
             };
           }
           existed = true;
+          existedSize = before.size;
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "ENOENT") throw error;
@@ -1160,6 +1162,7 @@ export function createAgentTools(
         // "fix in place, don't rewrite" directive breaks that loop. null = a
         // non-source/empty/oversized file or a checker error → no signal added.
         const verification = await verifyWrittenSource(resolvedPath, content);
+        const largeRewriteHint = largeFileRewriteHint(existed, existedSize);
 
         return {
           success: true,
@@ -1179,6 +1182,10 @@ export function createAgentTools(
           ...(rewriteBudget.action === "warn"
             ? { rewriteWarning: rewriteBudget.message }
             : {}),
+          // PM #81 Sprint 3 — advisory nudge toward replace_in_file when a large
+          // existing file is fully overwritten (big regenerations provoke format
+          // degradation). Does not block the write.
+          ...(largeRewriteHint ? { rewriteHint: largeRewriteHint } : {}),
         };
       } catch (error) {
         return {

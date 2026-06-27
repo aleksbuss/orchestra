@@ -111,6 +111,32 @@ export function recordFileWrite(
   return { count, action: "allow" };
 }
 
+/**
+ * PM #81 Sprint 3 — soft nudge toward `replace_in_file` when OVERWRITING a large
+ * EXISTING file. A big full regeneration is exactly what provokes format
+ * degradation (the model has to re-emit hundreds of lines through the JSON
+ * tool-call encoder — PM #80's corruption + PM #81's printed-markup both worsen
+ * with output size). This is ADVISORY only (the write still proceeds — a
+ * deliberate full rewrite is legitimate), NOT a fail-fast block: Gemini's
+ * proposed hard "refuse to overwrite a >250-line file" would break legitimate
+ * whole-file regeneration and duplicates what the rewrite-budget + syntax
+ * grounding already bound. Returns the hint string when the existing file is at
+ * or above the byte threshold, else null.
+ */
+export const LARGE_EXISTING_FILE_REWRITE_BYTES = 12_000;
+
+export function largeFileRewriteHint(
+  existed: boolean,
+  existingBytes: number
+): string | null {
+  if (!existed || existingBytes < LARGE_EXISTING_FILE_REWRITE_BYTES) return null;
+  return (
+    `This existing file is large (~${Math.round(existingBytes / 1000)} KB). For a TARGETED change, ` +
+    `prefer replace_in_file — regenerating the whole file risks truncation and format degradation ` +
+    `on big outputs. A full rewrite is fine ONLY if you intend to replace the entire file.`
+  );
+}
+
 /** Clear tracked state — one chat, or all when no id is given. For tests/maintenance. */
 export function resetRewriteBudget(chatId?: string): void {
   if (chatId) {

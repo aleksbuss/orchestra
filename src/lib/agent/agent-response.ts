@@ -167,50 +167,95 @@ function parseCallObject(
   return { name: name.trim(), args };
 }
 
+/**
+ * Extract the first BALANCED `{…}` JSON object from the start of `s` (ignoring a
+ * leading run of whitespace), discarding any trailing junk (`</function>`,
+ * `</tool_call>`, prose). Returns `s` unchanged when it doesn't start with `{`
+ * or the braces never balance — letting the caller's JSON.parse fail cleanly.
+ */
+function extractLeadingJson(s: string): string {
+  const str = s.trimStart();
+  if (!str.startsWith("{")) return str;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') {
+      inStr = true;
+    } else if (c === "{") {
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) return str.slice(0, i + 1);
+    }
+  }
+  return str;
+}
+
 export function extractHallucinatedToolCall(
   text: string
 ): HallucinatedToolCall | null {
   if (!text) return null;
-  const trimmed = stripOneCodeFence(text.trim());
-  if (!trimmed) return null;
+  // Defang ONE fully-enclosing ```lang … ``` fence (a fenced block is a teaching
+  // example, not the model's actual call). Leading/trailing prose is otherwise
+  // ALLOWED below: the real long-context degradation is "Let me update X:\n\n
+  // <tool_call>…" — prose, then the call — so anchoring to `^…$` (as the first
+  // cut did) missed every real case (PM #81 deep-audit against chat a8e1a43c).
+  const body = stripOneCodeFence(text.trim());
+  if (!body) return null;
 
-  // 1) <tool_call>{…}</tool_call> (Qwen/Hermes); closing tag optional.
-  let m = trimmed.match(/^<tool_call>\s*([\s\S]*?)\s*(?:<\/tool_call>)?\s*$/i);
-  if (m) {
-    const call = parseCallObject(m[1]);
-    if (call) return { ...call, raw: trimmed };
-  }
-
-  // 2) <function=NAME>{…}</function> | <function=NAME><parameter=k>v</parameter>…
-  m = trimmed.match(/^<function=([a-zA-Z0-9_.-]+)\s*>\s*([\s\S]*?)\s*(?:<\/function>)?\s*$/i);
-  if (m) {
-    const name = m[1];
-    const inner = m[2].trim();
-    let args: Record<string, unknown> = {};
-    let jsonInner: unknown = null;
-    try {
-      jsonInner = JSON.parse(inner);
-    } catch {
-      jsonInner = null;
-    }
-    const innerRec = asRecord(jsonInner);
-    if (innerRec) {
-      args = innerRec;
-    } else {
-      for (const p of inner.matchAll(
-        /<parameter=([a-zA-Z0-9_.-]+)\s*>([\s\S]*?)<\/parameter>/gi
+  // 1) Functionary form: `<function=NAME>` followed by `<parameter=…>` pairs or a
+  //    `{json}` body. This covers the dominant real degradation
+  //    `…<tool_call>\n<function=write_text_file>\n<parameter=file_path>…` (nested,
+  //    prose-prefixed, often UNCLOSED to EOF) AND standalone `<function=…>{…}`.
+  //    `<function=NAME>` immediately followed by a parameter/JSON body is
+  //    unambiguous — normal prose never contains it — so we SEARCH (prose before
+  //    it is fine) yet require the body so a bare mention never matches.
+  const fn = body.match(/<function=([A-Za-z0-9_.\-]+)\s*>/i);
+  if (fn) {
+    const after = body.slice((fn.index ?? 0) + fn[0].length).trimStart();
+    if (after.startsWith("<parameter=")) {
+      const args: Record<string, unknown> = {};
+      // A value runs until </parameter>, the next <parameter=, a closing
+      // </function>/</tool_call>, or EOF (the real blocks are unclosed).
+      for (const p of after.matchAll(
+        /<parameter=([A-Za-z0-9_.\-]+)\s*>([\s\S]*?)(?=<\/parameter>|<parameter=|<\/function>|<\/tool_call>|$)/gi
       )) {
-        args[p[1]] = p[2];
+        args[p[1]] = p[2].trim();
       }
+      return { name: fn[1], args, raw: body };
     }
-    return { name, args, raw: trimmed };
+    if (after.startsWith("{")) {
+      const rec = (() => {
+        try {
+          return asRecord(JSON.parse(extractLeadingJson(after)));
+        } catch {
+          return null;
+        }
+      })();
+      return { name: fn[1], args: rec ?? {}, raw: body };
+    }
   }
 
-  // 3) [TOOL_CALLS] / [TOOL_CALL] / [TOOL_REQUEST] <json> (Mistral-style).
-  m = trimmed.match(/^\[TOOL_(?:CALLS?|REQUEST)\]\s*([\s\S]+)$/i);
-  if (m) {
-    const call = parseCallObject(m[1]);
-    if (call) return { ...call, raw: trimmed };
+  // 2) Qwen/Hermes `<tool_call>{json}</tool_call>` (closing optional; leading
+  //    prose allowed). A bare `<tool_call>` MENTION (no `{`/`<function=` after)
+  //    never matches — that distinguishes a real call from prose ABOUT one.
+  const tc = body.match(/<tool_call>\s*(\{[\s\S]*)$/i);
+  if (tc) {
+    const call = parseCallObject(extractLeadingJson(tc[1]));
+    if (call) return { ...call, raw: body };
+  }
+
+  // 3) Mistral `[TOOL_CALLS] <json>` (object or single-element array).
+  const mistral = body.match(/\[TOOL_(?:CALLS?|REQUEST)\]\s*(\[?\s*\{[\s\S]*)$/i);
+  if (mistral) {
+    const call = parseCallObject(mistral[1]);
+    if (call) return { ...call, raw: body };
   }
 
   // 4) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
@@ -219,14 +264,13 @@ export function extractHallucinatedToolCall(
   //    no prose"), and the detect/suppress path would then DELETE that answer.
   //    For `response` a false match is harmless — it just recovers the message
   //    as prose. So bare JSON matches `response` only; every other tool requires
-  //    the unambiguous markup of branches 1–3 (where surrounding prose breaks the
-  //    `^…$` anchor, so a teaching example never matches).
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    const call = parseCallObject(trimmed);
+  //    the unambiguous markup of branches 1–3.
+  if (body.startsWith("{") && body.endsWith("}")) {
+    const call = parseCallObject(body);
     if (call && call.name === "response") {
       let parsed: unknown = null;
       try {
-        parsed = JSON.parse(trimmed);
+        parsed = JSON.parse(body);
       } catch {
         parsed = null;
       }
@@ -238,7 +282,7 @@ export function extractHallucinatedToolCall(
           "parameters" in rec ||
           asRecord(rec.function))
       );
-      if (hasArgsContainer) return { ...call, raw: trimmed };
+      if (hasArgsContainer) return { ...call, raw: body };
     }
   }
 

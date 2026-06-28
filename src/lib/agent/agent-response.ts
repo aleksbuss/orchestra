@@ -258,7 +258,33 @@ export function extractHallucinatedToolCall(
     if (call) return { ...call, raw: body };
   }
 
-  // 4) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
+  // 4) DeepSeek (PM #82-followup): the model prints its OWN chat-template tokens —
+  //    `<｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME\n```json\n{args}```` (one or more,
+  //    inside a `<｜tool▁calls▁begin｜>` wrapper). Verified live: deepseek-chat printed exactly
+  //    this for `write_text_file` and Orchestra detected NOTHING (no other branch matches
+  //    `<tool_call_begin>` — branch 2 needs a literal `<tool_call>`). The NAME is in the
+  //    `tool_sep` TOKEN, NOT inside the JSON (the JSON is ARGS-ONLY), so a toolset/name-field
+  //    generalization cannot catch this — an explicit branch is required (both doubt reviewers).
+  //    Canonical tokens use unicode bars (｜ U+FF5C, ▁ U+2581); a degraded model may emit an
+  //    ASCII-ish variant — match BOTH. Require call-begin + sep + NAME + a `{` body (structural
+  //    anchor) so prose merely DISCUSSING the format never matches. Args parsed best-effort and
+  //    NEVER executed — they only trigger a re-prompt (PM #80), so a parse miss is harmless.
+  //    Multi-call blocks: only the FIRST call is recovered (the whole markup message is dropped).
+  const ds = body.match(
+    /tool[_▁]call[_▁]begin[\s\S]{0,60}?tool[_▁]sep[^A-Za-z0-9]*([A-Za-z0-9_.\-]+)[\s\S]*?(\{[\s\S]*)$/i
+  );
+  if (ds) {
+    const rec = (() => {
+      try {
+        return asRecord(JSON.parse(extractLeadingJson(ds[2])));
+      } catch {
+        return null;
+      }
+    })();
+    return { name: ds[1], args: rec ?? {}, raw: body };
+  }
+
+  // 5) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
   //    Bare JSON is too ambiguous to treat as an ACTION-tool call: a legitimate
   //    final answer can BE bare JSON (e.g. "reply with only the tool-call JSON,
   //    no prose"), and the detect/suppress path would then DELETE that answer.

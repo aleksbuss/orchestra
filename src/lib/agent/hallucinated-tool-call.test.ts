@@ -281,3 +281,42 @@ describe("neutralizeHallucinatedHistory (PM #82)", () => {
     expect(content.some((p) => p.type === "tool-call" && p.toolName === "search_web")).toBe(true);
   });
 });
+
+describe("extractHallucinatedToolCall — DeepSeek format (PM #82 followup)", () => {
+  it("detects DeepSeek ASCII tokens (the live deepseek-chat failure)", () => {
+    const text =
+      '<tool_calls_begin>\n<tool_call_begin>function<tool_sep>write_text_file\n```json\n{"file_path":"vitest.config.ts","content":"x","overwrite":true}\n```<tool_call_end>';
+    const call = extractHallucinatedToolCall(text);
+    expect(call?.name).toBe("write_text_file");
+    expect((call?.args as Record<string, unknown>)?.file_path).toBe("vitest.config.ts");
+  });
+
+  it("detects the canonical unicode-bar tokens (｜ U+FF5C, ▁ U+2581)", () => {
+    const text =
+      "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>search_web\n```json\n{\"query\":\"x\"}\n```<｜tool▁call▁end｜>";
+    const call = extractHallucinatedToolCall(text);
+    expect(call?.name).toBe("search_web");
+    expect((call?.args as Record<string, unknown>)?.query).toBe("x");
+  });
+
+  it("detects with leading prose (the real degradation shape)", () => {
+    const text =
+      "Let me create the config file:\n\n<tool_call_begin>function<tool_sep>write_text_file\n```json\n{\"file_path\":\"a.ts\"}\n```";
+    expect(extractHallucinatedToolCall(text)?.name).toBe("write_text_file");
+  });
+
+  it("ignores a bare MENTION without the full call structure", () => {
+    expect(
+      extractHallucinatedToolCall("DeepSeek separates the name with a tool_sep token.")
+    ).toBeNull();
+    expect(
+      extractHallucinatedToolCall("It emits <tool_call_begin> then the function name, no args.")
+    ).toBeNull();
+  });
+
+  it("ignores the tokens with no JSON body", () => {
+    expect(
+      extractHallucinatedToolCall("<tool_call_begin>function<tool_sep>write_text_file")
+    ).toBeNull();
+  });
+});

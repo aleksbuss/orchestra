@@ -113,11 +113,14 @@ export function foldTurnUsage(
   sources: {
     streamUsage?: RawUsage | null;
     continuationUsage?: RawUsage | null;
+    /** PM #81 — spend from a hallucinated-tool-call re-issue generation. */
+    reissueUsage?: RawUsage | null;
     turnExtraUsage?: ChatUsage;
   }
 ): ChatUsage {
   let next = addUsageToCumulative(base, provider, modelId, sources.streamUsage);
   next = addUsageToCumulative(next, provider, modelId, sources.continuationUsage);
+  next = addUsageToCumulative(next, provider, modelId, sources.reissueUsage);
   if (sources.turnExtraUsage) {
     next = mergeUsage(next, sources.turnExtraUsage) ?? next;
   }

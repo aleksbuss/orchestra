@@ -21,8 +21,11 @@ import { MockLanguageModelV3 } from "ai/test";
 import { simulateReadableStream } from "ai";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 
-// Hoisted, mutable so each test can script the model's single text output.
-const modelOut = vi.hoisted(() => ({ text: "" }));
+// Hoisted, mutable so each test can script the model's text output. `genText`
+// (when set) is the `doGenerate` output ONLY — letting a test give the streamed
+// turn (doStream) and a subsequent generateText (e.g. the PM #81 re-issue) DIFFERENT
+// outputs. Defaults to `text` so existing tests are unaffected.
+const modelOut = vi.hoisted(() => ({ text: "", genText: undefined as string | undefined }));
 
 // Mock ONLY the model factory so the real generate/stream paths run against a
 // deterministic model — everything else (tools, prompt, conversion, persistence)
@@ -36,7 +39,7 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
       new MockLanguageModelV3({
         doGenerate: async () =>
           ({
-            content: [{ type: "text", text: modelOut.text }],
+            content: [{ type: "text", text: modelOut.genText ?? modelOut.text }],
             finishReason: "stop",
             usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
             warnings: [],
@@ -154,5 +157,45 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
     expect(
       onDisk.messages.some((m) => m.role === "assistant" && m.content.includes("STREAM_PERSISTED_OK"))
     ).toBe(true);
+  });
+
+  it("PM #81: a streamed hallucinated tool call is SUPPRESSED and re-issued (onFinish wiring)", async () => {
+    // The stream emits a printed-as-text tool call (the degradation). The
+    // onFinish self-heal must: detect it, drop the markup so it never persists,
+    // re-issue (doGenerate → a clean answer), and persist THAT. This is the
+    // agent.ts plumbing the deleted live throwaway covered behaviorally but no
+    // committed test exercised.
+    modelOut.text =
+      '<tool_call>{"name":"write_text_file","arguments":{"file_path":"x.ts","content":"y"}}</tool_call>';
+    modelOut.genText = "Done — I created x.ts via the re-issue.";
+    const chatId = `integ-pm81-${Date.now()}`;
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat, flushAllPendingChats } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "integ-pm81");
+
+    try {
+      const result = await runAgent({ chatId, userMessage: "write x.ts", swarmEnabled: false });
+      for await (const _chunk of result.textStream) void _chunk;
+
+      let chat = null as Awaited<ReturnType<typeof getChat>> | null;
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        chat = await getChat(chatId);
+        if (chat?.messages.some((m) => m.role === "assistant" && m.content.includes("re-issue"))) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await flushAllPendingChats();
+      const assistantText = (chat?.messages ?? [])
+        .filter((m) => m.role === "assistant")
+        .map((m) => m.content)
+        .join("\n");
+
+      // The raw markup must NOT reach the user …
+      expect(assistantText).not.toContain("<tool_call>");
+      // … and the re-issued clean answer must be persisted instead.
+      expect(assistantText).toContain("re-issue");
+    } finally {
+      modelOut.genText = undefined; // don't leak into other tests
+    }
   });
 });

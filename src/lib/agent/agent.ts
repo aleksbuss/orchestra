@@ -56,8 +56,19 @@ import {
   getLastResponseToolText,
   turnHasDeliverableAnswer,
   resolveTurnContinuation,
+  detectActionHallucination,
+  stripHallucinatedTrailingText,
+  neutralizeHallucinatedHistory,
 } from "@/lib/agent/agent-response";
 import type { TurnContinuationResult } from "@/lib/agent/agent-response";
+// PM #81 Sprint 2 — active self-heal for hallucinated (printed-as-text) tool calls.
+import {
+  attemptToolReissue,
+  recordReissueAttempt,
+  resetReissueBudget,
+  recordChatDegradation,
+  isChatDegraded,
+} from "@/lib/agent/agent-tool-reissue";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
 import {
@@ -77,8 +88,17 @@ export {
 };
 export type { TurnContinuationResult };
 
-const MAX_TOOL_STEPS_PER_TURN = 30;
-const MAX_TOOL_STEPS_SUBORDINATE = 15;
+// Per-turn tool-step budget. A SAFETY/cost bound on ONE generateText/streamText
+// loop — NOT a task-sizing target (a heavy task spans several user "Continue"s).
+// Raised 30→50 once the runaway protection got stronger (PM #76 loop guard, the
+// per-file rewrite budget, the token governor): the cap can be more generous
+// because identical/looping/oversized churn is now interrupted independently of
+// it. When a turn EXHAUSTS this budget without delivering an answer, the agent
+// emits a deterministic "reached step limit — press Continue" pause notice
+// instead of forcing a model-authored completion summary (which masqueraded as
+// "done"). See resolveTurnContinuation (agent-response.ts).
+const MAX_TOOL_STEPS_PER_TURN = 50;
+const MAX_TOOL_STEPS_SUBORDINATE = 25;
 
 /**
  * Sprint A4 — number of most-recent messages kept VERBATIM in the live context
@@ -86,6 +106,13 @@ const MAX_TOOL_STEPS_SUBORDINATE = 15;
  * (and not a leading system anchor) is evicted to RAG.
  */
 const KEEP_RECENT_MESSAGES = 8;
+
+/**
+ * PM #82 — fraction of the normal compaction threshold used for a chat flagged
+ * as degraded (it has printed a tool call as text). Halving the threshold forces
+ * an earlier, tighter compaction to break the long-context hallucination loop.
+ */
+const DEGRADED_COMPACTION_RATIO = 0.5;
 
 // ── Swarm DAG Completion Guard ────────────────────────────────────────────────
 // Guarantees that the orchestrator node always transitions out of "running"
@@ -498,13 +525,20 @@ export async function runAgent(options: RunAgentOptions) {
     const rawModelMessages = convertChatMessagesToModelMessages(chat.messages);
     const estimatedTokens = estimateTokenCount(rawModelMessages);
 
-    // Compaction fires at 75% of the resolved window (Sprint A2).
+    // Compaction fires at 75% of the resolved (reliable-capped) window (Sprint
+    // A2 + PM #82). A chat that has shown the printed-tool-call degradation
+    // symptom compacts at HALF that — a behavior-triggered backstop (PM #82) that
+    // escapes the long-context loop even when the model degrades BELOW the static
+    // reliable-window cap.
     const contextLimit = compactionThresholdFor(contextWindow);
+    const effectiveLimit = isChatDegraded(options.chatId)
+      ? Math.floor(contextLimit * DEGRADED_COMPACTION_RATIO)
+      : contextLimit;
 
     // Sprint A1: gate compaction on token pressure ONLY. The old
     // `&& chat.messages.length > 12` guard let a moderate (9–12 message) chat
     // that genuinely exceeds the limit sail past compaction.
-    if (estimatedTokens > contextLimit) {
+    if (estimatedTokens > effectiveLimit) {
       // Sprint A4 — sliding-window + anchors. Keep leading SYSTEM anchors (task
       // framing) and the most-recent-K messages VERBATIM in the live context;
       // only the middle tail is evicted. That tail is archived to RAG TWICE:
@@ -521,12 +555,12 @@ export async function runAgent(options: RunAgentOptions) {
       );
 
       if (evicted.length > 0) {
-        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${contextLimit}). Deep-archiving history...`);
+        console.log(`[Memory] Context reached ${estimatedTokens} tokens (limit ${effectiveLimit}). Deep-archiving history...`);
         publishUiSyncEvent({
           topic: "chat",
           chatId: options.chatId,
           projectId: options.projectId ?? null,
-          reason: "[System] Context memory reached dynamic limit. Deep-archiving history into RAG...",
+          reason: "[System] Context was compacted to keep the conversation responsive — older messages were archived to memory and remain searchable.",
         });
 
         const memorySubdir = options.projectId ? `${options.projectId}` : "main";
@@ -583,7 +617,9 @@ export async function runAgent(options: RunAgentOptions) {
       }
     }
 
-    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const allMessages = neutralizeHallucinatedHistory(
+      convertChatMessagesToModelMessages(chat.messages)
+    );
     const history = new History(80);
     history.addMany(allMessages);
     context.history = history.getAll();
@@ -946,11 +982,78 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             ? ((event as unknown as { finishReason?: string }).finishReason as string)
             : undefined;
 
-        const responseMessages = event.response.messages;
-        // PM #36 (truncation continuation) + PM #69 (forced final answer) are
-        // both decided by resolveTurnContinuation — self-contained and
-        // unit-tested (final-answer-guard.test.ts). We publish any non-fatal
-        // operator notice it returns and bill its usage alongside streamUsage.
+        // Did this turn END because it exhausted the per-turn step cap (vs
+        // finishing)? streamText's onFinish exposes the full `steps` array;
+        // reaching the cap with no delivered answer drives the deterministic
+        // "press Continue" pause notice (resolveTurnContinuation) instead of a
+        // forced completion summary that masquerades as "done".
+        const stepCount = Array.isArray((event as unknown as { steps?: unknown[] }).steps)
+          ? (event as unknown as { steps: unknown[] }).steps.length
+          : undefined;
+        const stepLimitReached =
+          stepCount !== undefined && stepCount >= MAX_TOOL_STEPS_PER_TURN;
+
+        const rawResponseMessages = event.response.messages;
+
+        // PM #81 Sprint 2 — action-tool hallucination self-heal. A degraded model
+        // (qwen3-coder under long context) PRINTS a tool call as raw text instead
+        // of calling it natively; Orchestra never executed it and shipped XML to
+        // the user. Re-prompt WITH tools so the model re-issues the call for real,
+        // and SUPPRESS the raw markup so the user never sees it. Bounded by a
+        // chat-scoped retry budget (circuit breaker). Skipped at a step-cap pause
+        // and in plain-chat mode (no tools to re-issue with).
+        const hallucinatedCall =
+          useTools && !stepLimitReached
+            ? detectActionHallucination(rawResponseMessages)
+            : null;
+        let reissueUsage: import("@/lib/cost/accumulator").RawUsage | undefined;
+        let reissueMessages: ModelMessage[] = [];
+        if (hallucinatedCall) {
+          // PM #82 — printing a tool call as text is the degradation symptom.
+          // Flag the chat so its NEXT pre-flight pass compacts aggressively and
+          // escapes the long-context loop (behavior-triggered backstop).
+          recordChatDegradation(options.chatId);
+          const budget = recordReissueAttempt(options.chatId);
+          console.warn(
+            `[Agent] PM #81 — model printed "${hallucinatedCall.name}" as text instead of ` +
+              `calling it (re-issue attempt ${budget.count}, allowed=${budget.allowed}).`
+          );
+          if (budget.allowed) {
+            const reissue = await attemptToolReissue({
+              model,
+              systemPrompt,
+              baseMessages: messages,
+              priorMessages: rawResponseMessages,
+              tools: effectiveTools,
+              providerOptions,
+              prepareStep: tokenGovernor,
+              settings,
+              abortSignal: options.abortSignal,
+            });
+            if (reissue) {
+              reissueMessages = reissue.responseMessages;
+              reissueUsage = reissue.usage;
+              resetReissueBudget(options.chatId); // delivered → reset for later turns
+            }
+          }
+        }
+
+        // When a hallucination was detected, drop its raw markup message (the
+        // user must not see XML) and append the re-issue's real messages, if any.
+        const responseMessages = hallucinatedCall
+          ? [
+              ...stripHallucinatedTrailingText(rawResponseMessages),
+              ...reissueMessages,
+            ]
+          : rawResponseMessages;
+
+        // PM #36 (truncation continuation) + PM #69 (forced final answer) +
+        // step-cap pause are all decided by resolveTurnContinuation —
+        // self-contained and unit-tested (final-answer-guard.test.ts). We publish
+        // any non-fatal operator notice it returns and bill its usage alongside
+        // streamUsage. A delivered re-issue makes responseMessages deliverable, so
+        // this is a no-op then; a FAILED re-issue (markup stripped, nothing added)
+        // is non-deliverable → it forces a plain final answer (the Sprint 1 path).
         const turnExtra = await resolveTurnContinuation({
           responseMessages,
           finishReason,
@@ -959,6 +1062,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           baseMessages: messages,
           providerOptions,
           settings,
+          stepLimitReached,
           abortSignal: options.abortSignal,
         });
         const continuationText = turnExtra.text;
@@ -1009,15 +1113,16 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
                 (options.userMessage.length > 60 ? "..." : "");
             }
             // PM #36 — fold ALL of this turn's billing surfaces (main stream
-            // + auto-continuation + MoA bundle) into the running per-chat
-            // cumulative via the single accounting helper. Resolved chat-model
-            // identity comes from `resolvedModelConfig`; the continuation reuses
-            // the same model handle, so the pricing lookup is unambiguous.
+            // + auto-continuation + MoA bundle + PM #81 re-issue) into the
+            // running per-chat cumulative via the single accounting helper.
+            // Resolved chat-model identity comes from `resolvedModelConfig`; the
+            // continuation/re-issue reuse the same model handle, so the pricing
+            // lookup is unambiguous.
             chat.cumulativeUsage = foldTurnUsage(
               chat.cumulativeUsage,
               resolvedModelConfig.provider,
               resolvedModelConfig.model,
-              { continuationUsage, turnExtraUsage }
+              { continuationUsage, reissueUsage, turnExtraUsage }
             );
             return chat;
           });
@@ -1212,7 +1317,9 @@ export async function runAgentText(options: {
 
   const chat = await getChat(options.chatId);
   if (chat) {
-    const allMessages = convertChatMessagesToModelMessages(chat.messages);
+    const allMessages = neutralizeHallucinatedHistory(
+      convertChatMessagesToModelMessages(chat.messages)
+    );
     const history = new History(80);
     history.addMany(allMessages);
     context.history = history.getAll();

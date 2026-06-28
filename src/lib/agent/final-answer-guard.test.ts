@@ -162,6 +162,98 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.text).toBe("and the rest of it.");
   });
 
+  // ── Step-cap PAUSE (operator-requested): a turn that exhausts its per-turn
+  // step budget without delivering an answer must emit a DETERMINISTIC "press
+  // Continue" notice, NOT a forced (masquerading-as-complete) model answer. ────
+  it("step-cap PAUSE: no answer + stepLimitReached → deterministic Continue notice, NO model call", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [searchToolCall(), searchToolResult()], // delivered nothing
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never, // would throw if the forced-answer path ran
+    });
+    expect(res.text).toContain("Reached the step limit");
+    expect(res.text).toContain("Continue");
+    expect(res.uiNotice).toContain("per-turn step limit");
+  });
+
+  it("step-cap PAUSE does NOT fire when an answer WAS delivered (even at the cap)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [responseToolCall("Actually finished.")],
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never,
+    });
+    expect(res.text).toBe(""); // delivered → no pause, no force
+  });
+
+  it("step-cap PAUSE fires even when the model NARRATED before the tool call (PM #82 — the live bug)", async () => {
+    // A model that says "Now I understand. Let me fix X" before each tool call
+    // leaves non-empty assistant text → turnHasDeliverableAnswer === true, which
+    // used to GATE OUT the pause (the pause lived inside !turnHasDeliverableAnswer)
+    // → a 50-step turn ended SILENTLY. The hoisted check must still pause: at the
+    // cap, narration before an action tool is NOT a delivered answer.
+    const messages = [
+      assistantText("Now I understand. Let me fix the call to the securityTools method."),
+      searchToolCall(),
+      searchToolResult(),
+    ];
+    expect(turnHasDeliverableAnswer(messages)).toBe(true); // narration looks "delivered"…
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: messages,
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never, // would throw if any LLM path ran
+    });
+    expect(res.text).toContain("Reached the step limit"); // …yet the pause still fires
+    expect(res.uiNotice).toContain("per-turn step limit");
+  });
+
+  it("without stepLimitReached, a no-answer turn still FORCES a final answer (PM #69 unchanged)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      // No-deliverable input that passes the real generateText schema (a
+      // <thinking>-only turn strips to empty), so the FORCE path actually runs.
+      responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+      finishReason: "other",
+      stepLimitReached: false,
+      model: modelReturning("FORCED ANSWER") as never,
+    });
+    expect(res.text).toBe("FORCED ANSWER");
+  });
+
+  it("PM #81: an action-tool hallucination forces a clean final answer (real wire)", async () => {
+    // The model printed a `write_text_file` call as RAW TEXT instead of a native
+    // tool call. turnHasDeliverableAnswer must classify this as NO delivery so
+    // the continuation regenerates a real answer instead of shipping XML garbage.
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [
+        assistantText(
+          '<tool_call>{"name":"write_text_file","arguments":{"file_path":"a.ts","content":"x"}}</tool_call>'
+        ),
+      ],
+      finishReason: "stop",
+      model: modelReturning("Here is the file content you asked for.") as never,
+    });
+    expect(res.text).toBe("Here is the file content you asked for.");
+  });
+
+  it("PM #81: a mis-emitted `response` markup is delivered (NOT regenerated)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [
+        assistantText('<tool_call>{"name":"response","arguments":{"message":"done"}}</tool_call>'),
+      ],
+      finishReason: "stop",
+      model: modelThrowing() as never, // would throw if a regeneration ran
+    });
+    expect(res.text).toBe(""); // recoverable → no forced regeneration
+  });
+
   it("on forced-generation failure: empty text + a uiNotice (never throws)", async () => {
     const res = await resolveTurnContinuation({
       ...base,

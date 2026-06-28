@@ -189,6 +189,29 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.text).toBe(""); // delivered → no pause, no force
   });
 
+  it("step-cap PAUSE fires even when the model NARRATED before the tool call (PM #82 — the live bug)", async () => {
+    // A model that says "Now I understand. Let me fix X" before each tool call
+    // leaves non-empty assistant text → turnHasDeliverableAnswer === true, which
+    // used to GATE OUT the pause (the pause lived inside !turnHasDeliverableAnswer)
+    // → a 50-step turn ended SILENTLY. The hoisted check must still pause: at the
+    // cap, narration before an action tool is NOT a delivered answer.
+    const messages = [
+      assistantText("Now I understand. Let me fix the call to the securityTools method."),
+      searchToolCall(),
+      searchToolResult(),
+    ];
+    expect(turnHasDeliverableAnswer(messages)).toBe(true); // narration looks "delivered"…
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: messages,
+      finishReason: "tool-calls",
+      stepLimitReached: true,
+      model: modelThrowing() as never, // would throw if any LLM path ran
+    });
+    expect(res.text).toContain("Reached the step limit"); // …yet the pause still fires
+    expect(res.uiNotice).toContain("per-turn step limit");
+  });
+
   it("without stepLimitReached, a no-answer turn still FORCES a final answer (PM #69 unchanged)", async () => {
     const res = await resolveTurnContinuation({
       ...base,

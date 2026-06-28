@@ -600,6 +600,24 @@ export async function resolveTurnContinuation(args: {
   const readUsage = (r: unknown) =>
     (r as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage ?? undefined;
 
+  // Step-cap PAUSE (PM #82 follow-up — HOISTED above the deliverable-answer gate).
+  // When the per-turn step budget was EXHAUSTED, the tool loop was CUT OFF
+  // mid-work and the user MUST be told to press Continue. This check used to live
+  // inside the `!turnHasDeliverableAnswer` block below, which made it UNREACHABLE
+  // for a model that narrates before each tool call ("Now I understand. Let me
+  // fix X"): that narration is non-empty assistant text, so `turnHasDeliverableAnswer`
+  // returned true, the block was skipped, and the pause never fired — the live
+  // failure was a 50-step turn ending on a dangling tool-call with NO pause notice.
+  // At the step cap, ONLY a real `response`-tool answer counts as a genuine finish;
+  // narration before an action tool does not. Deterministic + system-authored on
+  // purpose (a forced model "final answer" masquerades as completion). No LLM call.
+  if (stepLimitReached && !getLastResponseToolText(responseMessages).trim()) {
+    console.log(
+      `[Agent] Turn paused at the per-turn step limit (finishReason=${finishReason}); emitting Continue notice.`
+    );
+    return { text: STEP_LIMIT_PAUSE_MESSAGE, uiNotice: STEP_LIMIT_PAUSE_NOTICE };
+  }
+
   if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
     try {
       const continuation = await generateText({
@@ -632,18 +650,9 @@ export async function resolveTurnContinuation(args: {
   }
 
   if (!turnHasDeliverableAnswer(responseMessages)) {
-    // Step-cap PAUSE (operator-requested). The turn ran out of its per-turn tool
-    // budget without delivering an answer. Do NOT force a tool-less "final
-    // answer" here — that yields a model-authored completion summary that
-    // masquerades as "done". Return a DETERMINISTIC, system-authored pause
-    // notice so the operator knows the turn paused at a limit (not finished),
-    // and the work resumes on the next "Continue". No LLM call, no extra spend.
-    if (stepLimitReached) {
-      console.log(
-        `[Agent] Turn paused at the per-turn step limit (finishReason=${finishReason}); emitting Continue notice.`
-      );
-      return { text: STEP_LIMIT_PAUSE_MESSAGE, uiNotice: STEP_LIMIT_PAUSE_NOTICE };
-    }
+    // No answer was delivered at all (PM #69) and this was NOT a step-cap pause
+    // (that is handled above, hoisted out of this gate). Force ONE tool-less final
+    // answer so the user always gets a reply. Tool-less ⇒ text only ⇒ no loop.
     try {
       const forced = await generateText({
         model,

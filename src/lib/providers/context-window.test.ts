@@ -5,6 +5,8 @@ import {
   parseNumCtxFromParameters,
   resolveContextWindow,
   COMPACTION_THRESHOLD_RATIO,
+  effectiveContextWindow,
+  MAX_RELIABLE_CONTEXT_WINDOW,
 } from "./context-window";
 import {
   __setOpenRouterContextLengthForTest,
@@ -36,11 +38,35 @@ describe("lookupStaticContextWindow", () => {
   });
 });
 
+describe("effectiveContextWindow (PM #82 reliable-window cap)", () => {
+  it("is a no-op for windows at or under the reliable ceiling", () => {
+    expect(effectiveContextWindow(4096)).toBe(4096);
+    expect(effectiveContextWindow(32768)).toBe(32768);
+    expect(effectiveContextWindow(MAX_RELIABLE_CONTEXT_WINDOW)).toBe(
+      MAX_RELIABLE_CONTEXT_WINDOW
+    );
+  });
+  it("clamps an over-advertised window to the reliable ceiling", () => {
+    expect(effectiveContextWindow(200000)).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
+    // qwen3-coder's advertised 1,048,576 — the exact bug PM #82 fixes.
+    expect(effectiveContextWindow(1048576)).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
+  });
+});
+
 describe("compactionThresholdFor", () => {
-  it("applies the 0.75 ratio and floors", () => {
-    expect(compactionThresholdFor(4096)).toBe(Math.floor(4096 * COMPACTION_THRESHOLD_RATIO));
+  it("applies the 0.75 ratio and floors for windows under the cap", () => {
+    expect(compactionThresholdFor(4096)).toBe(
+      Math.floor(4096 * COMPACTION_THRESHOLD_RATIO)
+    );
     expect(compactionThresholdFor(4096)).toBe(3072);
-    expect(compactionThresholdFor(200000)).toBe(150000);
+    expect(compactionThresholdFor(32768)).toBe(24576);
+  });
+  it("caps the threshold at the reliable window for over-advertised models (PM #82)", () => {
+    const capped = Math.floor(MAX_RELIABLE_CONTEXT_WINDOW * COMPACTION_THRESHOLD_RATIO);
+    // A 1M advertised window must NOT push the threshold to 786k — the model
+    // degrades long before that. 200k and 1,048,576 both collapse to the cap.
+    expect(compactionThresholdFor(200000)).toBe(capped);
+    expect(compactionThresholdFor(1048576)).toBe(capped);
   });
 });
 

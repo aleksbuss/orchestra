@@ -15,7 +15,7 @@ Execute code in a specified runtime environment. The code runs on the user's mac
 3. **Handle errors** — wrap risky operations in try/except or try/catch
 4. **Check prerequisites** — verify packages are installed before importing
 5. **Use sessions wisely** — session 0 is the default; reuse the same session to keep terminal working-directory state between calls
-6. **Prefer dedicated file tools first** — use `read_text_file`, `read_pdf_file`, `write_text_file`, and `copy_file` for common file tasks; use `code_execution` only when those tools are insufficient
+6. **Prefer dedicated file tools first** — use `read_text_file`, `read_pdf_file`, `write_text_file`, `replace_in_file`, and `copy_file` for common file tasks; use `code_execution` only when those tools are insufficient
 7. **Auto-resolve missing Python deps** — if you see `ModuleNotFoundError`, call `install_packages` with `kind=python` and retry. If pip reports `externally-managed-environment`, install into a project-local virtualenv (`python3 -m venv .venv` + `.venv/bin/python -m pip install <package>`).
 8. **Auto-resolve missing Node deps** — if you see `Cannot find module '<name>'`, install it via `install_packages` (`kind=node`, package `<name>`) or package manager command, then rerun Node code once
 9. **Install system packages carefully** — on Debian/Ubuntu use `install_packages(kind="apt")` (or `apt-get` with `sudo` when needed); **on macOS use `install_packages(kind="brew")`** (apt does not exist there). If a system CLI is `command not found` (e.g. `nmap`, `ffmpeg`), install it via the matching kind, then rerun.

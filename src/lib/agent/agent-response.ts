@@ -41,7 +41,17 @@ export function stripThinkingTags(text: string): string {
  * unchanged (conservative — only unwraps when the WHOLE text is the call).
  */
 export function unwrapSerializedResponseCall(text: string): string {
-  if (!text || !text.includes("response")) return text;
+  if (!text) return text;
+  // PM #81 — the response call may arrive wrapped in RAW tool-call markup
+  // (`<tool_call>{…}</tool_call>`, `<function=response>{…}`, `[TOOL_CALLS]…`),
+  // not just a bare JSON blob. extractHallucinatedToolCall normalizes every
+  // shape; recover the inner message when the mis-emitted call is `response`.
+  const markupCall = extractHallucinatedToolCall(text);
+  if (markupCall && markupCall.name === "response") {
+    const recovered = readResponseMessage(markupCall.args);
+    if (recovered) return recovered;
+  }
+  if (!text.includes("response")) return text;
   let body = text.trim();
   // Strip a single surrounding ```json ... ``` (or bare ```) fence.
   const fence = body.match(/^```(?:json|JSON)?\s*\n?([\s\S]*?)\n?```$/);
@@ -68,6 +78,215 @@ export function unwrapSerializedResponseCall(text: string): string {
           ? args.answer
           : null;
   return message && message.trim() ? message : text;
+}
+
+/**
+ * PM #81 — a tool call the model emitted as RAW TEXT instead of a native tool
+ * call. Degraded models (notably Qwen via Ollama/OpenRouter under long context)
+ * stop using the native tool-calling channel and PRINT the call as markup:
+ *   - Qwen/Hermes:   `<tool_call>{"name":"t","arguments":{…}}</tool_call>`
+ *   - Functionary:   `<function=t>{…}</function>` or `<function=t><parameter=k>v</parameter>`
+ *   - Mistral:       `[TOOL_CALLS]{…}` / `[TOOL_CALLS][{…}]`
+ *   - bare JSON:     `{"name":"response",…}` ONLY (PM #61) — see branch 4 for why
+ *                    action tools require markup, never ambiguous bare JSON.
+ * Orchestra only ever parsed the `response`-tool JSON shape
+ * (`unwrapSerializedResponseCall`), so ANY other such call was persisted
+ * verbatim — the user saw XML garbage and the intended action never ran.
+ *
+ * Returns the normalized `{ name, args, raw }` when the WHOLE trimmed text is a
+ * single such call, else null. Conservative on purpose: an answer that merely
+ * quotes `<tool_call>` inside surrounding prose must NOT match (a false positive
+ * would suppress a real answer), so the markup must DOMINATE the message — every
+ * branch below anchors with `^…$`.
+ */
+export interface HallucinatedToolCall {
+  name: string;
+  args: Record<string, unknown>;
+  /** The matched markup span (for "does this dominate the message" checks). */
+  raw: string;
+}
+
+/** Strip ONE surrounding ```lang … ``` fence; no fence ⇒ returned unchanged. */
+function stripOneCodeFence(s: string): string {
+  const fence = s.match(/^```(?:[a-zA-Z0-9_-]+)?\s*\n?([\s\S]*?)\n?```$/);
+  return fence ? fence[1].trim() : s;
+}
+
+/** Read a final-answer string out of a `response`-call arg bag. */
+function readResponseMessage(args: Record<string, unknown>): string | null {
+  for (const key of ["message", "text", "answer", "response", "content"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
+/**
+ * Parse a JSON tool-call object (or a single-element array of them) into
+ * `{ name, args }`. Handles the OpenAI nested `{ function: { name, arguments } }`
+ * shape and an `arguments` field that is itself a JSON STRING. Returns null when
+ * no tool name can be resolved.
+ */
+function parseCallObject(
+  jsonText: string
+): { name: string; args: Record<string, unknown> } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText.trim());
+  } catch {
+    return null;
+  }
+  if (Array.isArray(parsed)) parsed = parsed[0];
+  const rec = asRecord(parsed);
+  if (!rec) return null;
+
+  // OpenAI-style nesting: { type:"function", function:{ name, arguments } }.
+  const fnRec = asRecord(rec.function);
+  const name: unknown =
+    fnRec && typeof fnRec.name === "string"
+      ? fnRec.name
+      : (rec.name ?? rec.tool ?? rec.call ?? rec.function);
+  if (typeof name !== "string" || !name.trim()) return null;
+
+  const rawArgs =
+    (fnRec ? fnRec.arguments ?? fnRec.parameters : undefined) ??
+    rec.arguments ??
+    rec.input ??
+    rec.parameters;
+  let args: Record<string, unknown> = {};
+  if (typeof rawArgs === "string") {
+    // OpenAI serializes arguments as a JSON string.
+    try {
+      args = asRecord(JSON.parse(rawArgs)) ?? {};
+    } catch {
+      args = {};
+    }
+  } else {
+    args = asRecord(rawArgs) ?? {};
+  }
+  return { name: name.trim(), args };
+}
+
+/**
+ * Extract the first BALANCED `{…}` JSON object from the start of `s` (ignoring a
+ * leading run of whitespace), discarding any trailing junk (`</function>`,
+ * `</tool_call>`, prose). Returns `s` unchanged when it doesn't start with `{`
+ * or the braces never balance — letting the caller's JSON.parse fail cleanly.
+ */
+function extractLeadingJson(s: string): string {
+  const str = s.trimStart();
+  if (!str.startsWith("{")) return str;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < str.length; i++) {
+    const c = str[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') {
+      inStr = true;
+    } else if (c === "{") {
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) return str.slice(0, i + 1);
+    }
+  }
+  return str;
+}
+
+export function extractHallucinatedToolCall(
+  text: string
+): HallucinatedToolCall | null {
+  if (!text) return null;
+  // Defang ONE fully-enclosing ```lang … ``` fence (a fenced block is a teaching
+  // example, not the model's actual call). Leading/trailing prose is otherwise
+  // ALLOWED below: the real long-context degradation is "Let me update X:\n\n
+  // <tool_call>…" — prose, then the call — so anchoring to `^…$` (as the first
+  // cut did) missed every real case (PM #81 deep-audit against chat a8e1a43c).
+  const body = stripOneCodeFence(text.trim());
+  if (!body) return null;
+
+  // 1) Functionary form: `<function=NAME>` followed by `<parameter=…>` pairs or a
+  //    `{json}` body. This covers the dominant real degradation
+  //    `…<tool_call>\n<function=write_text_file>\n<parameter=file_path>…` (nested,
+  //    prose-prefixed, often UNCLOSED to EOF) AND standalone `<function=…>{…}`.
+  //    `<function=NAME>` immediately followed by a parameter/JSON body is
+  //    unambiguous — normal prose never contains it — so we SEARCH (prose before
+  //    it is fine) yet require the body so a bare mention never matches.
+  const fn = body.match(/<function=([A-Za-z0-9_.\-]+)\s*>/i);
+  if (fn) {
+    const after = body.slice((fn.index ?? 0) + fn[0].length).trimStart();
+    if (after.startsWith("<parameter=")) {
+      const args: Record<string, unknown> = {};
+      // A value runs until </parameter>, the next <parameter=, a closing
+      // </function>/</tool_call>, or EOF (the real blocks are unclosed).
+      for (const p of after.matchAll(
+        /<parameter=([A-Za-z0-9_.\-]+)\s*>([\s\S]*?)(?=<\/parameter>|<parameter=|<\/function>|<\/tool_call>|$)/gi
+      )) {
+        args[p[1]] = p[2].trim();
+      }
+      return { name: fn[1], args, raw: body };
+    }
+    if (after.startsWith("{")) {
+      const rec = (() => {
+        try {
+          return asRecord(JSON.parse(extractLeadingJson(after)));
+        } catch {
+          return null;
+        }
+      })();
+      return { name: fn[1], args: rec ?? {}, raw: body };
+    }
+  }
+
+  // 2) Qwen/Hermes `<tool_call>{json}</tool_call>` (closing optional; leading
+  //    prose allowed). A bare `<tool_call>` MENTION (no `{`/`<function=` after)
+  //    never matches — that distinguishes a real call from prose ABOUT one.
+  const tc = body.match(/<tool_call>\s*(\{[\s\S]*)$/i);
+  if (tc) {
+    const call = parseCallObject(extractLeadingJson(tc[1]));
+    if (call) return { ...call, raw: body };
+  }
+
+  // 3) Mistral `[TOOL_CALLS] <json>` (object or single-element array).
+  const mistral = body.match(/\[TOOL_(?:CALLS?|REQUEST)\]\s*(\[?\s*\{[\s\S]*)$/i);
+  if (mistral) {
+    const call = parseCallObject(mistral[1]);
+    if (call) return { ...call, raw: body };
+  }
+
+  // 4) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
+  //    Bare JSON is too ambiguous to treat as an ACTION-tool call: a legitimate
+  //    final answer can BE bare JSON (e.g. "reply with only the tool-call JSON,
+  //    no prose"), and the detect/suppress path would then DELETE that answer.
+  //    For `response` a false match is harmless — it just recovers the message
+  //    as prose. So bare JSON matches `response` only; every other tool requires
+  //    the unambiguous markup of branches 1–3.
+  if (body.startsWith("{") && body.endsWith("}")) {
+    const call = parseCallObject(body);
+    if (call && call.name === "response") {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = null;
+      }
+      const rec = asRecord(parsed);
+      const hasArgsContainer = !!(
+        rec &&
+        ("arguments" in rec ||
+          "input" in rec ||
+          "parameters" in rec ||
+          asRecord(rec.function))
+      );
+      if (hasArgsContainer) return { ...call, raw: body };
+    }
+  }
+
+  return null;
 }
 
 export function extractAssistantText(msg: ModelMessage): string {
@@ -219,7 +438,97 @@ export function shouldAutoContinueAssistant(
  */
 export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
   if (getLastResponseToolText(messages).trim()) return true;
-  return Boolean(stripThinkingTags(getLastAssistantText(messages)).trim());
+  const text = stripThinkingTags(getLastAssistantText(messages)).trim();
+  if (!text) return false;
+  // PM #81 — text that is ONLY a hallucinated tool call (raw `<tool_call>` markup,
+  // not a native call) delivered no real answer. A mis-emitted `response` call is
+  // still recoverable to prose by the persistence-layer unwrap, so it counts as
+  // delivered; any OTHER tool printed as markup (write_text_file, search_web…) is
+  // a failed action — return false so resolveTurnContinuation forces a clean
+  // final answer instead of persisting XML garbage to the user.
+  const hallucinated = extractHallucinatedToolCall(text);
+  if (hallucinated && hallucinated.name !== "response") return false;
+  return true;
+}
+
+/**
+ * PM #81 Sprint 2 — was this turn's only "answer" a hallucinated ACTION tool
+ * call printed as text (not the `response` tool, and no real answer delivered)?
+ * Returns the parsed call so the caller can re-issue it natively, else null.
+ * Mirrors turnHasDeliverableAnswer's logic: a real `response` tool result, or a
+ * mis-emitted `response` (unwrap recovers it), both count as delivered.
+ */
+export function detectActionHallucination(
+  messages: ModelMessage[]
+): HallucinatedToolCall | null {
+  if (getLastResponseToolText(messages).trim()) return null;
+  const text = stripThinkingTags(getLastAssistantText(messages)).trim();
+  if (!text) return null;
+  const call = extractHallucinatedToolCall(text);
+  return call && call.name !== "response" ? call : null;
+}
+
+/**
+ * PM #81 Sprint 2 — drop the trailing assistant message when its text is an
+ * action-tool hallucination, so the raw `<tool_call>` markup is NEVER persisted
+ * to the chat (the user must not see XML garbage). Only the LAST message is
+ * considered, and only when it is an assistant message whose stripped text is a
+ * non-`response` hallucinated call — everything else passes through untouched.
+ */
+export function stripHallucinatedTrailingText(
+  messages: ModelMessage[]
+): ModelMessage[] {
+  if (messages.length === 0) return messages;
+  const last = messages[messages.length - 1];
+  if (last.role !== "assistant") return messages;
+  const text = stripThinkingTags(extractAssistantText(last)).trim();
+  const call = extractHallucinatedToolCall(text);
+  if (call && call.name !== "response") return messages.slice(0, -1);
+  return messages;
+}
+
+/** Placeholder swapped in for a historical printed-tool-call message (PM #82). */
+export const HALLUCINATED_HISTORY_PLACEHOLDER =
+  "[Orchestra removed a tool call that an earlier turn printed as text instead of " +
+  "executing. Issue tool calls through the native function-calling channel.]";
+
+/**
+ * PM #82 — neutralize printed-tool-call markup sitting in CHAT HISTORY. A degraded
+ * model that prints `<tool_call>`/`<function=…>` as text poisons its OWN future
+ * turns: those messages become few-shot examples it imitates, so the loop persists
+ * even after the per-turn suppression (PM #81, which only governs the LAST message)
+ * and even after compaction keeps them in the recent window. For every historical
+ * ASSISTANT message whose text IS an action-tool hallucination (NOT `response` — a
+ * printed answer carries content we keep), replace that text with a short neutral
+ * placeholder. Pair-safe: printed calls are TEXT (no `toolCallId`), so swapping
+ * them never orphans a native tool-call/result pair; non-text parts are preserved.
+ */
+export function neutralizeHallucinatedHistory(
+  messages: ModelMessage[]
+): ModelMessage[] {
+  return messages.map((msg) => {
+    if (msg.role !== "assistant") return msg;
+    const text = stripThinkingTags(extractAssistantText(msg)).trim();
+    if (!text) return msg;
+    const call = extractHallucinatedToolCall(text);
+    if (!call || call.name === "response") return msg;
+
+    const content = msg.content;
+    if (typeof content === "string") {
+      return { ...msg, content: HALLUCINATED_HISTORY_PLACEHOLDER };
+    }
+    if (!Array.isArray(content)) return msg;
+    // Drop the text parts (they carry the markup), keep any non-text parts, and
+    // prepend a single placeholder so the turn still reads as a neutralized reply.
+    const nonText = content.filter(
+      (p) =>
+        !(typeof p === "object" && p !== null && "type" in p && p.type === "text")
+    );
+    return {
+      ...msg,
+      content: [{ type: "text", text: HALLUCINATED_HISTORY_PLACEHOLDER }, ...nonText],
+    } as ModelMessage;
+  });
 }
 
 export interface TurnContinuationResult {
@@ -229,6 +538,22 @@ export interface TurnContinuationResult {
   /** Non-fatal operator notice (a continuation/force attempt failed); caller publishes it. */
   uiNotice?: string;
 }
+
+/**
+ * Persisted, user-visible message when a turn PAUSES at the per-turn step cap.
+ * System-authored + deterministic ON PURPOSE: a model-authored "final answer"
+ * forced after a step-cap stop reliably masquerades as completion ("Sprint 3
+ * Complete ✅") and the operator can't tell a paused turn from a finished one.
+ */
+const STEP_LIMIT_PAUSE_MESSAGE =
+  "⏸ **Reached the step limit for this turn.** The agent used the maximum number " +
+  "of tool steps allowed in a single turn before finishing, so the work above may " +
+  "be incomplete — this is a pause, not a completion. Press **Continue** to resume " +
+  "from where it stopped.";
+
+/** Short transient-toast variant of the pause message. */
+const STEP_LIMIT_PAUSE_NOTICE =
+  "[Agent] Reached the per-turn step limit — press Continue to resume the unfinished work.";
 
 /**
  * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
@@ -253,6 +578,12 @@ export async function resolveTurnContinuation(args: {
   providerOptions: Parameters<typeof generateText>[0]["providerOptions"];
   settings: AppSettings;
   abortSignal?: AbortSignal;
+  /**
+   * True when this turn ended because it EXHAUSTED the per-turn tool-step budget
+   * (`stepCountIs(MAX_TOOL_STEPS_PER_TURN)`) rather than finishing. Drives the
+   * deterministic pause notice instead of a forced (masquerading) completion.
+   */
+  stepLimitReached?: boolean;
 }): Promise<TurnContinuationResult> {
   const {
     responseMessages,
@@ -263,10 +594,29 @@ export async function resolveTurnContinuation(args: {
     providerOptions,
     settings,
     abortSignal,
+    stepLimitReached,
   } = args;
   const lastAssistantText = getLastAssistantText(responseMessages);
   const readUsage = (r: unknown) =>
     (r as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage ?? undefined;
+
+  // Step-cap PAUSE (PM #82 follow-up — HOISTED above the deliverable-answer gate).
+  // When the per-turn step budget was EXHAUSTED, the tool loop was CUT OFF
+  // mid-work and the user MUST be told to press Continue. This check used to live
+  // inside the `!turnHasDeliverableAnswer` block below, which made it UNREACHABLE
+  // for a model that narrates before each tool call ("Now I understand. Let me
+  // fix X"): that narration is non-empty assistant text, so `turnHasDeliverableAnswer`
+  // returned true, the block was skipped, and the pause never fired — the live
+  // failure was a 50-step turn ending on a dangling tool-call with NO pause notice.
+  // At the step cap, ONLY a real `response`-tool answer counts as a genuine finish;
+  // narration before an action tool does not. Deterministic + system-authored on
+  // purpose (a forced model "final answer" masquerades as completion). No LLM call.
+  if (stepLimitReached && !getLastResponseToolText(responseMessages).trim()) {
+    console.log(
+      `[Agent] Turn paused at the per-turn step limit (finishReason=${finishReason}); emitting Continue notice.`
+    );
+    return { text: STEP_LIMIT_PAUSE_MESSAGE, uiNotice: STEP_LIMIT_PAUSE_NOTICE };
+  }
 
   if (shouldAutoContinueAssistant(lastAssistantText, finishReason)) {
     try {
@@ -300,6 +650,9 @@ export async function resolveTurnContinuation(args: {
   }
 
   if (!turnHasDeliverableAnswer(responseMessages)) {
+    // No answer was delivered at all (PM #69) and this was NOT a step-cap pause
+    // (that is handled above, hoisted out of this gate). Force ONE tool-less final
+    // answer so the user always gets a reply. Tool-less ⇒ text only ⇒ no loop.
     try {
       const forced = await generateText({
         model,

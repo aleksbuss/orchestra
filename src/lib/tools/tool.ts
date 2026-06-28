@@ -20,6 +20,8 @@ import { knowledgeQuery } from "@/lib/tools/knowledge-query";
 import { searchWeb, isSearchUsable } from "@/lib/tools/search-engine";
 import { createWebTaskTool } from "@/lib/tools/web-task";
 import { createFetchWebpageTool } from "@/lib/tools/fetch-webpage";
+import { verifyWrittenSource } from "@/lib/tools/post-write-verify";
+import { recordFileWrite, largeFileRewriteHint } from "@/lib/tools/write-rewrite-budget";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1104,6 +1106,7 @@ export function createAgentTools(
 
         const resolvedPath = resolveOutgoingFilePath(context, file_path);
         let existed = false;
+        let existedSize = 0;
         try {
           const before = await fs.stat(resolvedPath);
           if (!before.isFile()) {
@@ -1113,6 +1116,7 @@ export function createAgentTools(
             };
           }
           existed = true;
+          existedSize = before.size;
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code;
           if (code !== "ENOENT") throw error;
@@ -1123,6 +1127,16 @@ export function createAgentTools(
             success: false,
             error: `File already exists and overwrite=false: ${resolvedPath}`,
           };
+        }
+
+        // Cross-turn rewrite-loop backstop (PM #80 follow-up): the per-turn loop
+        // guard resets each turn and cannot see a file rewritten across many
+        // "continue" turns. This caps rewrites of one file within a chat and
+        // refuses the write (without executing it) once the cap is hit, forcing
+        // a read/verify/ask instead of another blind full rewrite.
+        const rewriteBudget = recordFileWrite(context.chatId, resolvedPath);
+        if (rewriteBudget.action === "block") {
+          return { success: false, error: rewriteBudget.message };
         }
 
         // Best-effort recovery snapshot of the previous content. snapshotBeforeWrite
@@ -1141,12 +1155,37 @@ export function createAgentTools(
         await fs.writeFile(resolvedPath, content, "utf-8");
         const after = await fs.stat(resolvedPath);
 
+        // Grounding signal (PM #80): a syntax-only check on the content just
+        // written. `{ success: true, bytes }` alone tells the model the WRITE
+        // landed, not that the CODE is valid — so a model emitting corrupted
+        // source rewrites blindly forever. Attaching precise diagnostics + a
+        // "fix in place, don't rewrite" directive breaks that loop. null = a
+        // non-source/empty/oversized file or a checker error → no signal added.
+        const verification = await verifyWrittenSource(resolvedPath, content);
+        const largeRewriteHint = largeFileRewriteHint(existed, existedSize);
+
         return {
           success: true,
           path: resolvedPath,
           bytes: after.size,
           created: !existed,
           overwritten: existed,
+          ...(verification
+            ? verification.valid
+              ? { syntaxValid: true }
+              : {
+                  syntaxValid: false,
+                  syntaxErrors: verification.diagnostics,
+                  warning: verification.hint,
+                }
+            : {}),
+          ...(rewriteBudget.action === "warn"
+            ? { rewriteWarning: rewriteBudget.message }
+            : {}),
+          // PM #81 Sprint 3 — advisory nudge toward replace_in_file when a large
+          // existing file is fully overwritten (big regenerations provoke format
+          // degradation). Does not block the write.
+          ...(largeRewriteHint ? { rewriteHint: largeRewriteHint } : {}),
         };
       } catch (error) {
         return {
@@ -1155,6 +1194,122 @@ export function createAgentTools(
             error instanceof Error
               ? error.message
               : "Failed to write text file.",
+        };
+      }
+    },
+  });
+
+  tools.replace_in_file = tool({
+    description:
+      "Replace a specific string in an existing local UTF-8 text file. Prefer this over write_text_file when making targeted edits to large files to avoid truncating output.",
+    inputSchema: z.object({
+      file_path: z
+        .string()
+        .describe("Absolute path, or path relative to current project cwd."),
+      target_content: z
+        .string()
+        .min(1, "Target content cannot be empty.")
+        .describe("The exact string to be replaced. Must match exactly once in the file."),
+      replacement_content: z
+        .string()
+        .describe("The new string to replace the target_content with."),
+    }),
+    execute: async ({ file_path, target_content, replacement_content }) => {
+      try {
+        const resolvedPath = resolveOutgoingFilePath(context, file_path);
+        let existed = false;
+        try {
+          const before = await fs.stat(resolvedPath);
+          if (!before.isFile()) {
+            return {
+              success: false,
+              error: `Target exists and is not a regular file: ${resolvedPath}`,
+            };
+          }
+          existed = true;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") throw error;
+        }
+
+        if (!existed) {
+          return {
+            success: false,
+            error: `File does not exist: ${resolvedPath}. Use write_text_file to create new files.`,
+          };
+        }
+
+        const originalContent = await fs.readFile(resolvedPath, "utf-8");
+        
+        // Smart CRLF Detection & Adaptation
+        // This ensures git diffs remain clean in CRLF repos even if the LLM generates \n
+        const isCRLF = originalContent.includes("\r\n");
+        const normalizedTarget = isCRLF 
+          ? target_content.replace(/\r?\n/g, "\r\n") 
+          : target_content.replace(/\r\n/g, "\n");
+        const normalizedReplacement = isCRLF 
+          ? replacement_content.replace(/\r?\n/g, "\r\n") 
+          : replacement_content.replace(/\r\n/g, "\n");
+
+        const count = originalContent.split(normalizedTarget).length - 1;
+        if (count === 0) {
+          // If strict matching failed, try one more time as a fallback to see if it's an indentation or trailing space issue
+          // We won't auto-replace to be safe, but we give a better error message
+          return {
+            success: false,
+            error: `Target content not found in ${resolvedPath}. The target_content must match exactly. Check for trailing spaces or indentation differences.`,
+          };
+        } else if (count > 1) {
+          return {
+            success: false,
+            error: `Target content found ${count} times in ${resolvedPath}. The target_content must be unique. Please include more context to make it unique.`,
+          };
+        }
+
+        // Use split().join() instead of .replace() to avoid $& and $1 regex replacement vulnerabilities
+        const newContent = originalContent.split(normalizedTarget).join(normalizedReplacement);
+
+        if (newContent.length > TEXT_FILE_WRITE_MAX_CHARS) {
+          return {
+            success: false,
+            error: `Resulting content too large (${newContent.length} chars). Max allowed is ${TEXT_FILE_WRITE_MAX_CHARS}.`,
+          };
+        }
+
+        // Snapshot before overwrite
+        await snapshotBeforeWrite({
+          projectId: context.projectId ?? "none",
+          chatId: context.chatId,
+          filePath: resolvedPath,
+          reason: "replace_in_file modify",
+        });
+
+        await fs.writeFile(resolvedPath, newContent, "utf-8");
+        const after = await fs.stat(resolvedPath);
+
+        const verification = await verifyWrittenSource(resolvedPath, newContent);
+
+        return {
+          success: true,
+          path: resolvedPath,
+          bytes: after.size,
+          ...(verification
+            ? verification.valid
+              ? { syntaxValid: true }
+              : {
+                  syntaxValid: false,
+                  syntaxErrors: verification.diagnostics,
+                  warning: verification.hint,
+                }
+            : {}),
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Failed to replace in text file.",
         };
       }
     },

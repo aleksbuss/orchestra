@@ -31,7 +31,10 @@ export default defineConfig({
     }
   },
   test: {
-    exclude: [...configDefaults.exclude, 'tests/e2e/**'],
+    // `data/` is the JSON-on-disk DB + agent-created project workspaces; test files the
+    // agent writes there (e.g. data/projects/<id>/**/*.test.ts) must NEVER be collected as
+    // Orchestra's own suite — they pollute the run and fail on unresolved imports.
+    exclude: [...configDefaults.exclude, 'tests/e2e/**', 'data/**'],
     // Default env is `node` (fast, no DOM). Component tests opt into
     // `happy-dom` via the per-file directive `// @vitest-environment happy-dom`.
     // We picked happy-dom over jsdom for boot speed: ~3x faster cold-start

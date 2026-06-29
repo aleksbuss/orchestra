@@ -60,12 +60,17 @@ function codexAuthPath(): string {
   return path.join(tmpHome, ".codex", "auth.json");
 }
 
+// Deliberately NOT under `tmpHome/.gemini` — that equals the SUT's
+// `os.homedir()/.gemini` default, and resolveAuthPath only treats the env
+// override as "configured" (skipping the /Users/* discovery scan) when the
+// override path DIFFERS from the default. A distinct subdir keeps these tests
+// hermetic on a host that has the operator's own ~/.gemini creds.
 function geminiSettingsPath(): string {
-  return path.join(tmpHome, ".gemini", "settings.json");
+  return path.join(tmpHome, "gemini-cli", "settings.json");
 }
 
 function geminiCredsPath(): string {
-  return path.join(tmpHome, ".gemini", "oauth_creds.json");
+  return path.join(tmpHome, "gemini-cli", "oauth_creds.json");
 }
 
 // Imports happen after spy setup to avoid the module caching a real
@@ -178,6 +183,19 @@ describe("checkProviderAuthStatus — codex-cli OAuth branches", () => {
 });
 
 describe("checkProviderAuthStatus — gemini-cli OAuth branches", () => {
+  // Hermetic isolation. The SUT's `discoverPath()` scans `/Users/*` and
+  // `/home/*` (for Docker / multi-user homes) IN ADDITION to the `os.homedir()`
+  // spy — so on a real macOS box where the operator has their own
+  // `~/.gemini/oauth_creds.json`, the scan finds the REAL creds and reports
+  // `connected=true` no matter what `os.homedir()` is mocked to. Point the
+  // documented env overrides at tmpHome: a non-default path makes the SUT use it
+  // directly and skip discovery entirely, so these tests no longer depend on the
+  // host's home contents. (Outer `afterEach` already deletes these vars.)
+  beforeEach(() => {
+    process.env.GEMINI_OAUTH_CREDS_FILE = geminiCredsPath();
+    process.env.GEMINI_SETTINGS_FILE = geminiSettingsPath();
+  });
+
   it("no settings.json AND no oauth_creds → connected=false", async () => {
     const { checkProviderAuthStatus } = await loadModule();
     const r = await checkProviderAuthStatus({

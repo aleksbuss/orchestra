@@ -57,6 +57,7 @@ import {
   turnHasDeliverableAnswer,
   resolveTurnContinuation,
   detectActionHallucination,
+  detectPrematureCompletion,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
 } from "@/lib/agent/agent-response";
@@ -1074,6 +1075,25 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
             projectId: options.projectId ?? null,
             reason: turnExtra.uiNotice,
           });
+        }
+
+        // PM #84 — premature-completion visibility note. When the model delivered
+        // a `response` answer this turn while the LAST whitelisted verification it
+        // ran (tsc/test/build/lint) exited non-zero, surface a deterministic
+        // operator note. ADVISORY only — never blocks the answer; false-negative-
+        // biased (narrow whitelist, fires only on a delivered answer). The
+        // behavioural lever is system.md hard_constraint #6; this is the backstop.
+        if (useTools) {
+          const prematureNotice = detectPrematureCompletion(responseMessages);
+          if (prematureNotice) {
+            console.warn(`[Agent] PM #84 — ${prematureNotice}`);
+            publishUiSyncEvent({
+              topic: "chat",
+              chatId: options.chatId,
+              projectId: options.projectId ?? null,
+              reason: prematureNotice,
+            });
+          }
         }
 
         if (mcpCleanup) {

@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 85. `deep_memory_recall` leaked one chat's archived history into unrelated chats — global chats shared a single memory pool
+**Date:** 2026-06
+**Status:** RESOLVED
+**Severity:** P2 (no crash; a privacy/relevance contamination — an unrelated chat's `<deep_memory_recall>` system-prompt injection carried a DIFFERENT chat's task context, degrading answers and routing work toward the wrong project. Trust + correctness, not an outage.)
+**Symptoms:** A fresh, unrelated chat's system prompt was injected with the `telegramattacker` task context (a one-off tool built in a PRIOR global chat) because the new query mentioned "Telegram"; work was even routed toward `data/projects/telegramattacker`. The operator never referenced that prior chat.
+**Detection:** Manual — the operator noticed foreign project context surfacing in an unrelated chat. No alert (the injection is a silent system-prompt append). On-disk: `data/memory/main/vectors.json` held `area:"Auto-Archive"` records from many different chats with no owner tag.
+**Root Cause:** Both the compaction ARCHIVE-insert and the recall SEARCH scope memory by the SAME formula `options.projectId ? projectId : "main"` (`agent.ts`, search `memorySubdir`). Project chats are isolated per project, but ALL global (no-`projectId`) chats share ONE pool, `data/memory/main`. Compaction auto-archives a chat's evicted RAW history (verbatim + summary, `area:"Auto-Archive"`) into that pool with NO owner metadata, and the deep-recall `searchMemory(userMessage, 3, 0.7, "main")` runs with NO filter — so a semantic match pulled another chat's raw history into the new chat's `<deep_memory_recall>`. Curated `insert_memory` facts are SUPPOSED to cross chats (the memory feature); auto-archived raw history crossing was the accident — the two were indistinguishable to recall.
+**Resolution:** Chat-scope the auto-archived raw history (option A of a doubt-driven 3-way design review; "stop recalling auto-archive entirely" and "per-chat namespace + sweeper" were the rejected alternatives — A is the most surgical, preserving both within-chat continuity and the cross-chat memory feature). (1) Stamp both archive inserts with `additionalMetadata: { chatId }` (`agent.ts`). (2) `filterDeepRecall` ([`compressor.ts`](src/lib/agent/compressor.ts)) — fetch a WIDER candidate set (`limit × 4`), drop any `area === AUTO_ARCHIVE_AREA` hit whose `chatId !== current`, then cap to the injection budget (so a relevant own-chat/curated hit isn't crowded out of the top-N by a foreign archive about to be filtered). Applied UNIFORMLY (project + global): cross-chat PROJECT knowledge belongs in the blackboard + curated memory, not raw auto-archived history. Legacy pre-fix archives carry no `chatId` → treated as not-this-chat → silently stop leaking (remain on disk; no migration). Curated `insert_memory` facts (areas `main`/`solutions`/`fragments`) are untouched and still cross chats.
+**Regression Coverage:** [`compressor.test.ts`](src/lib/agent/compressor.test.ts) `filterDeepRecall` block (6 cases) — drops another chat's auto-archive, keeps own auto-archive, keeps curated regardless of chatId, drops legacy no-chatId archive, caps-after-filter preserving order, mixed pool.
+**Doc Updates:** `CLAUDE.md` — Core Subsystems memory/RAG contract (the chat-scope rule) + the `data/memory/` Data-Layout row.
+**Rule:** A passive system-prompt injection sourced from a SHARED store must be scoped to its legitimate owner — auto-archived RAW chat history is a WITHIN-chat continuity aid, not a cross-chat knowledge source (that is the blackboard + curated memory). Stamp owner metadata at write; filter by it at read; and when filtering before a top-N cap, over-fetch then filter then cap so a filtered-away foreign hit cannot crowd out a legitimate one.
+
+---
+
 ## 84. Agent declared a task "COMPLETED ✅" while its OWN last typecheck had failed — completion overclaim over a red build
 **Date:** 2026-06
 **Status:** MITIGATED

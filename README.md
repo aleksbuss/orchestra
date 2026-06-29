@@ -6,8 +6,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-3022%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-79%20documented-purple)](./POST_MORTEMS.md)
+[![Tests](https://img.shields.io/badge/tests-3043%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-83%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**

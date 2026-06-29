@@ -22,6 +22,10 @@ import { createWebTaskTool } from "@/lib/tools/web-task";
 import { createFetchWebpageTool } from "@/lib/tools/fetch-webpage";
 import { verifyWrittenSource } from "@/lib/tools/post-write-verify";
 import { recordFileWrite, largeFileRewriteHint } from "@/lib/tools/write-rewrite-budget";
+import {
+  checkSyntaxFailureStreak,
+  recordSyntaxOutcome,
+} from "@/lib/tools/write-failure-streak";
 import { combineWithTimeout } from "@/lib/util/abort-signal";
 import { callSubordinate } from "@/lib/tools/call-subordinate";
 import { createCronTool } from "@/lib/tools/cron-tool";
@@ -1129,6 +1133,15 @@ export function createAgentTools(
           };
         }
 
+        // Failure-keyed cross-turn loop backstop (PM #83): if this file has
+        // failed its post-write syntax check too many times in a row, refuse one
+        // write so the model reads/verifies instead of re-mangling. Checked
+        // before the count budget; the two gates run independently.
+        const syntaxStreak = checkSyntaxFailureStreak(context.chatId, resolvedPath);
+        if (syntaxStreak.action === "block") {
+          return { success: false, error: syntaxStreak.message };
+        }
+
         // Cross-turn rewrite-loop backstop (PM #80 follow-up): the per-turn loop
         // guard resets each turn and cannot see a file rewritten across many
         // "continue" turns. This caps rewrites of one file within a chat and
@@ -1163,6 +1176,14 @@ export function createAgentTools(
         // non-source/empty/oversized file or a checker error → no signal added.
         const verification = await verifyWrittenSource(resolvedPath, content);
         const largeRewriteHint = largeFileRewriteHint(existed, existedSize);
+
+        // Feed the syntax verdict to the failure-streak breaker (PM #83):
+        // invalid extends the streak, valid resets it, no-signal leaves it.
+        recordSyntaxOutcome(
+          context.chatId,
+          resolvedPath,
+          verification ? verification.valid : undefined
+        );
 
         return {
           success: true,
@@ -1260,9 +1281,30 @@ export function createAgentTools(
             error: `Target content not found in ${resolvedPath}. The target_content must match exactly. Check for trailing spaces or indentation differences.`,
           };
         } else if (count > 1) {
+          // PM #83 (C) — disambiguation signal instead of a bare count. Report
+          // each occurrence's 1-based line number (computed on the SAME
+          // normalizedTarget/originalContent pair the count used, so reported
+          // lines match counted matches on CRLF files), capped at 10, so the
+          // model adds context to make the target unique rather than flailing
+          // into a whole-file rewrite. Behaviour is unchanged: the write is
+          // still refused — only the message is richer.
+          const lines: number[] = [];
+          let occ = originalContent.indexOf(normalizedTarget);
+          while (occ !== -1 && lines.length < 10) {
+            lines.push(originalContent.slice(0, occ).split("\n").length);
+            occ = originalContent.indexOf(
+              normalizedTarget,
+              occ + normalizedTarget.length
+            );
+          }
+          const more =
+            count > lines.length ? ` …and ${count - lines.length} more` : "";
           return {
             success: false,
-            error: `Target content found ${count} times in ${resolvedPath}. The target_content must be unique. Please include more context to make it unique.`,
+            error:
+              `Target content found ${count} times in ${resolvedPath} (lines ${lines.join(", ")}${more}). ` +
+              `target_content must match exactly once — add more surrounding context (lines above and/or below) ` +
+              `to make it unique, then retry. Do NOT fall back to rewriting the whole file.`,
           };
         }
 
@@ -1274,6 +1316,18 @@ export function createAgentTools(
             success: false,
             error: `Resulting content too large (${newContent.length} chars). Max allowed is ${TEXT_FILE_WRITE_MAX_CHARS}.`,
           };
+        }
+
+        // Failure-keyed cross-turn loop backstop (PM #83) — same breaker as
+        // write_text_file. replace_in_file has no raw-count budget (a prior
+        // doubt-driven review rejected it as false-positiving legit iterative
+        // edits); this failure-keyed gate is its cross-turn backstop.
+        const syntaxStreak = checkSyntaxFailureStreak(
+          context.chatId,
+          resolvedPath
+        );
+        if (syntaxStreak.action === "block") {
+          return { success: false, error: syntaxStreak.message };
         }
 
         // Snapshot before overwrite
@@ -1288,6 +1342,13 @@ export function createAgentTools(
         const after = await fs.stat(resolvedPath);
 
         const verification = await verifyWrittenSource(resolvedPath, newContent);
+
+        // Feed the syntax verdict to the failure-streak breaker (PM #83).
+        recordSyntaxOutcome(
+          context.chatId,
+          resolvedPath,
+          verification ? verification.valid : undefined
+        );
 
         return {
           success: true,

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import fs from "fs/promises";
 import { createAgentTools } from "./tool";
 import * as postWriteVerify from "@/lib/tools/post-write-verify";
+import { resetSyntaxFailureStreak } from "@/lib/tools/write-failure-streak";
 import type { AgentContext } from "@/lib/agent/types";
 
 // Mock dependencies
@@ -34,7 +35,10 @@ describe("tools.replace_in_file", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    
+    // The streak breaker holds module-level state shared across tests; clear it
+    // so each test starts from a clean per-(chat,file) streak.
+    resetSyntaxFailureStreak();
+
     // Provide a mock AppSettings object
     const mockSettings = {
       codeExecution: { enabled: false },
@@ -236,5 +240,126 @@ describe("tools.replace_in_file", () => {
 
     expect(result.success).toBe(true);
     expect(result.syntaxValid).toBe(true);
+  });
+
+  // PM #83 (C) — ambiguous-target report with occurrence line numbers.
+  it("reports each occurrence's line number when target is not unique", async () => {
+    vi.mocked(fs.stat).mockResolvedValue({ isFile: () => true } as any);
+    vi.mocked(fs.readFile).mockResolvedValue(
+      "match\nfoo\nmatch\nbar\nmatch\n"
+    );
+
+    const result = (await replaceInFile.execute(
+      {
+        file_path: "/test.txt",
+        target_content: "match",
+        replacement_content: "x",
+      },
+      {} as any
+    )) as any;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("found 3 times");
+    expect(result.error).toContain("lines 1, 3, 5");
+    expect(result.error).toContain("add more surrounding context");
+    expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("caps the reported occurrence list at 10 with an overflow note", async () => {
+    vi.mocked(fs.stat).mockResolvedValue({ isFile: () => true } as any);
+    // 12 occurrences of "z" on 12 separate lines.
+    vi.mocked(fs.readFile).mockResolvedValue(
+      Array.from({ length: 12 }, () => "z").join("\n")
+    );
+
+    const result = (await replaceInFile.execute(
+      { file_path: "/test.txt", target_content: "z", replacement_content: "q" },
+      {} as any
+    )) as any;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("found 12 times");
+    expect(result.error).toContain("…and 2 more");
+    expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  // PM #83 (B) — failure-keyed streak breaker shared with write_text_file.
+  it("blocks after 4 consecutive syntax-invalid edits to one file", async () => {
+    vi.mocked(fs.stat).mockResolvedValue({
+      isFile: () => true,
+      size: 100,
+    } as any);
+    vi.mocked(fs.readFile).mockResolvedValue("AAA");
+    vi.mocked(postWriteVerify.verifyWrittenSource).mockResolvedValue({
+      valid: false,
+      diagnostics: "err",
+      hint: "fix in place",
+    } as any);
+
+    // Four invalid edits land (success:true, syntaxValid:false).
+    for (let i = 0; i < 4; i++) {
+      const r = (await replaceInFile.execute(
+        {
+          file_path: "/loop.ts",
+          target_content: "AAA",
+          replacement_content: "AAA",
+        },
+        {} as any
+      )) as any;
+      expect(r.success).toBe(true);
+      expect(r.syntaxValid).toBe(false);
+    }
+
+    // The 5th is refused BEFORE writing.
+    const blocked = (await replaceInFile.execute(
+      {
+        file_path: "/loop.ts",
+        target_content: "AAA",
+        replacement_content: "AAA",
+      },
+      {} as any
+    )) as any;
+    expect(blocked.success).toBe(false);
+    expect(blocked.error).toContain("Syntax loop");
+    expect(fs.writeFile).toHaveBeenCalledTimes(4); // 5th never wrote
+  });
+
+  it("a valid edit after a block fully recovers the file (PM #83 runway)", async () => {
+    vi.mocked(fs.stat).mockResolvedValue({
+      isFile: () => true,
+      size: 100,
+    } as any);
+    vi.mocked(fs.readFile).mockResolvedValue("AAA");
+    vi.mocked(postWriteVerify.verifyWrittenSource).mockResolvedValue({
+      valid: false,
+    } as any);
+
+    for (let i = 0; i < 4; i++) {
+      await replaceInFile.execute(
+        {
+          file_path: "/loop.ts",
+          target_content: "AAA",
+          replacement_content: "AAA",
+        },
+        {} as any
+      );
+    }
+    // 5th blocked (streak drops into the band).
+    const blocked = (await replaceInFile.execute(
+      { file_path: "/loop.ts", target_content: "AAA", replacement_content: "AAA" },
+      {} as any
+    )) as any;
+    expect(blocked.success).toBe(false);
+
+    // A VALID write now lands (runway) and resets the streak to zero.
+    vi.mocked(postWriteVerify.verifyWrittenSource).mockResolvedValue({
+      valid: true,
+    } as any);
+    const recovered = (await replaceInFile.execute(
+      { file_path: "/loop.ts", target_content: "AAA", replacement_content: "AAA" },
+      {} as any
+    )) as any;
+    expect(recovered.success).toBe(true);
+    expect(recovered.syntaxValid).toBe(true);
   });
 });

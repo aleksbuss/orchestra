@@ -128,6 +128,11 @@ For the layout of the JSON-on-disk database under `data/`, see "💾 Data Layout
 ### 2. Project Blackboard (`src/lib/memory/blackboard.ts`)
 - **Shared Fact Storage:** Agents write to `.orchestra_blackboard.json` using vector embeddings. This allows independent agents to share and retrieve canonical truths across the entire project lifecycle without relying on linear chat history.
 
+### 2b. Deep-Memory Recall — chat-scope auto-archived raw history (PM #85)
+- `runAgent` injects a passive `<deep_memory_recall>` block into the system prompt: a `searchMemory` over the chat's memory pool (`data/memory/<projectId|main>`), keyed on the user message. The compaction path (Sprint A4) auto-archives a chat's evicted RAW history (verbatim + summary, `area: AUTO_ARCHIVE_AREA`) INTO that same pool.
+- **The contamination (PM #85):** all GLOBAL (no-`projectId`) chats share ONE pool (`data/memory/main`). Auto-archived raw history from a one-off chat was recalled into UNRELATED later chats by semantic match (the `telegramattacker`→unrelated-chat leak), because archive-insert and recall-search use the SAME `projectId ?? "main"` subdir and recall had no owner filter.
+- **Contract:** auto-archive inserts are stamped `{ chatId }`; `filterDeepRecall` ([`compressor.ts`](src/lib/agent/compressor.ts)) drops any `AUTO_ARCHIVE_AREA` hit whose `chatId` ≠ the current chat BEFORE the top-N cap (over-fetch `limit × 4` → filter → cap, so a foreign archive can't crowd out a legitimate hit). Applied uniformly (project + global). **Auto-archived RAW history is a WITHIN-chat continuity aid only** — cross-chat knowledge belongs to the Project Blackboard (§2) and CURATED `insert_memory` facts (areas `main`/`solutions`/`fragments`), which are deliberately untouched and still cross chats. **Rule:** a passive injection sourced from a shared store must be scoped to its legitimate owner — stamp owner metadata at write, filter by it at read.
+
 ### 3. Fact-Checking Mandate (`src/prompts/system.md`)
 - The Orchestrator operates under a strict mandate: *Never guess library versions or syntax*. If the `search_web` tool is available, the agent MUST use it to verify documentation before streaming code.
 
@@ -437,7 +442,7 @@ Orchestra has no traditional database — `data/` IS the database. Every directo
 | `data/.trash/chats/<id>.<ms>.json` | `chat-store.ts` | PM #63 — soft-deleted chats. `restoreChatFromTrash(id)` / `listTrashedChats()` recover them; an accidental or in-app deletion is reversible. | **Swept** — `sweepChatTrash` (boot + 6h) purges entries older than `CHAT_TRASH_MAX_AGE_MS = 30 days`. |
 | `data/projects/<projectId>/` | `project-store.ts` | Per-project workspace, including `.orchestra_blackboard.json`. | Deleted with the project. Never auto-swept. |
 | `data/goals/` | `goal-store` (in `storage/`) | `GoalTree` JSON files; ghost-sweeper resurrects orphaned tasks here. | Ghost-swept once per boot (`sweepGhostTasks`). |
-| `data/memory/` | `lib/memory/` | Vector embeddings for long-term memory. | **Not swept yet** (PM #32 — deferred; needs `deleteProject`-side atomic clear before any TTL is safe). |
+| `data/memory/` | `lib/memory/` | Vector embeddings for long-term memory. Per-subdir (`<projectId>` or `main`). Compaction auto-archive records (`area: Auto-Archive`) are stamped `{ chatId }` and chat-scoped at deep-recall read time (PM #85, §2b); curated `insert_memory` facts cross chats. | **Not swept yet** (PM #32 — deferred; needs `deleteProject`-side atomic clear before any TTL is safe). |
 | `data/queue/` | misc background tasks | Pending job descriptors. | Boot-time + 6h `sweepOrphanQueueEntries` removes entries whose chatId is absent from chat-index. |
 | `data/settings/` | `lib/settings/` | User-level settings JSON (model preferences, toggles). | Never auto-swept — operator config. |
 | `data/external-sessions/` | `api/external` | OAuth / external integration session blobs. | **Not swept yet** (PM #32 — deferred; TTL is integration-specific). |

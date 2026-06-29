@@ -61,6 +61,46 @@ export function formatVerbatimArchive(messages: ChatMessage[]): string {
 }
 
 /**
+ * The `area` tag stamped on compaction auto-archive records (verbatim + summary).
+ * Single source of truth so the INSERT (agent.ts) and the recall FILTER below
+ * agree on the exact string. Curated `insert_memory` facts use other areas
+ * (`main`/`solutions`/`fragments`) and are intentionally NOT auto-archive.
+ */
+export const AUTO_ARCHIVE_AREA = "Auto-Archive";
+
+/**
+ * PM #85 — chat-scope the deep-memory recall of AUTO-ARCHIVED raw history.
+ *
+ * Compaction archives a chat's evicted raw history into the memory pool
+ * (`data/memory/<projectId|main>`). Global chats share ONE pool (`main`), so a
+ * one-off task's archived history was recalled into UNRELATED later chats by
+ * semantic match (the `telegramattacker`→unrelated-chat leak). Fix: stamp each
+ * archive record with its `chatId`, then DROP auto-archive hits that belong to a
+ * DIFFERENT chat from the passive `<deep_memory_recall>` injection.
+ *
+ * What is preserved (deliberately): a chat still recalls its OWN compacted-away
+ * history (the A4 within-chat continuity intent), and CURATED `insert_memory`
+ * facts still cross chats (the memory feature) — only another chat's raw
+ * auto-archive is filtered out. Legacy pre-PM-#85 archives carry no `chatId`, so
+ * they are treated as "not this chat" and silently stop leaking (they remain on
+ * disk; no migration needed).
+ *
+ * Applied UNIFORMLY (project and global): cross-chat PROJECT knowledge belongs in
+ * the blackboard + curated memory, not raw auto-archived history.
+ */
+export function filterDeepRecall<T extends { metadata: Record<string, unknown> }>(
+  results: T[],
+  chatId: string,
+  limit: number
+): T[] {
+  return results
+    .filter(
+      (r) => r.metadata.area !== AUTO_ARCHIVE_AREA || r.metadata.chatId === chatId
+    )
+    .slice(0, limit);
+}
+
+/**
  * Audit fix #3 — the evicted compaction tail is always archived VERBATIM, but
  * the extra dense LLM summary (`compressChatHistory` = an `utilityModel`
  * round-trip + a 2nd embed) only earns its cost above this many tokens. Below

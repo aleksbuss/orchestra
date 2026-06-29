@@ -34,6 +34,8 @@ import {
   partitionForCompaction,
   formatVerbatimArchive,
   shouldSummarizeEviction,
+  AUTO_ARCHIVE_AREA,
+  filterDeepRecall,
 } from "@/lib/agent/compressor";
 import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
@@ -571,10 +573,12 @@ export async function runAgent(options: RunAgentOptions) {
         try {
           await insertMemory(
             `Archived Chat History (verbatim) [${archivedAt}]:\n${formatVerbatimArchive(evicted)}`,
-            "Auto-Archive",
+            AUTO_ARCHIVE_AREA,
             memorySubdir,
             settings,
-            undefined,
+            // PM #85 — stamp the owning chat so deep-recall can chat-scope this
+            // raw history and not leak it into unrelated chats sharing the pool.
+            { chatId: options.chatId },
             options.abortSignal
           );
         } catch (err) {
@@ -595,10 +599,10 @@ export async function runAgent(options: RunAgentOptions) {
           try {
             await insertMemory(
               `Archived Chat History (summary) [${archivedAt}]:\n${summary}`,
-              "Auto-Archive",
+              AUTO_ARCHIVE_AREA,
               memorySubdir,
               settings,
-              undefined,
+              { chatId: options.chatId }, // PM #85 — chat-scope (see verbatim insert)
               options.abortSignal
             );
             console.log(`[Memory] History successfully vector-archived (verbatim + summary).`);
@@ -704,8 +708,14 @@ export async function runAgent(options: RunAgentOptions) {
   try {
     const memorySubdir = options.projectId ? `${options.projectId}` : "main";
       const similarityThreshold = settings.memory?.similarityThreshold ?? 0.7;
-      const ragResults = await searchMemory(options.userMessage, 3, similarityThreshold, memorySubdir, settings, undefined, options.abortSignal);
-      
+      const deepRecallLimit = 3;
+      // PM #85 — fetch a WIDER candidate set, then chat-scope auto-archived raw
+      // history (drop other chats' archives) before capping to the injection
+      // budget, so a relevant own-chat / curated hit isn't crowded out of the
+      // top-N by a foreign archive that is about to be filtered away.
+      const ragCandidates = await searchMemory(options.userMessage, deepRecallLimit * 4, similarityThreshold, memorySubdir, settings, undefined, options.abortSignal);
+      const ragResults = filterDeepRecall(ragCandidates, options.chatId, deepRecallLimit);
+
       if (ragResults && ragResults.length > 0) {
         const ragFormatted = ragResults.map((r) => `[Relevance Score: ${r.score.toFixed(2)}] (Area: ${r.metadata.area})\n${r.text}`).join("\n\n");
         systemPrompt += `\n\n<deep_memory_recall>\nYou have subconscious access to past archived conversations and vectors matching the user's current query. Use this to maintain perfect context continuity:\n\n${ragFormatted}\n</deep_memory_recall>`;

@@ -20,6 +20,8 @@ import {
   formatVerbatimArchive,
   shouldSummarizeEviction,
   SUMMARY_MIN_EVICTED_TOKENS,
+  AUTO_ARCHIVE_AREA,
+  filterDeepRecall,
 } from "./compressor";
 import { generateText } from "ai";
 import { encode } from "gpt-tokenizer/encoding/cl100k_base";
@@ -232,5 +234,60 @@ describe("estimateTokenCount", () => {
       { role: "user" as const, content: null },
     ];
     expect(estimateTokenCount(messages as any)).toBe(0);
+  });
+});
+
+describe("filterDeepRecall (PM #85 — chat-scope auto-archived raw history)", () => {
+  const row = (area: string, chatId: string | undefined, text: string, score = 0.9) => ({
+    id: text,
+    text,
+    score,
+    metadata: chatId === undefined ? { area } : { area, chatId },
+  });
+
+  it("DROPS another chat's auto-archive (the leak)", () => {
+    expect(
+      filterDeepRecall([row(AUTO_ARCHIVE_AREA, "other-chat", "telegramattacker stuff")], "mine", 3)
+    ).toHaveLength(0);
+  });
+
+  it("KEEPS this chat's own auto-archive (within-chat continuity)", () => {
+    const out = filterDeepRecall([row(AUTO_ARCHIVE_AREA, "mine", "my evicted tail")], "mine", 3);
+    expect(out).toHaveLength(1);
+    expect(out[0].text).toBe("my evicted tail");
+  });
+
+  it("KEEPS curated facts regardless of chatId (the memory feature stays cross-chat)", () => {
+    const out = filterDeepRecall(
+      [row("solutions", "other-chat", "a past fix"), row("main", undefined, "user attribute")],
+      "mine",
+      3
+    );
+    expect(out).toHaveLength(2);
+  });
+
+  it("DROPS a legacy auto-archive with NO chatId (treated as not-this-chat)", () => {
+    expect(
+      filterDeepRecall([row(AUTO_ARCHIVE_AREA, undefined, "pre-fix archive")], "mine", 3)
+    ).toHaveLength(0);
+  });
+
+  it("caps to the limit AFTER filtering, preserving order", () => {
+    const curated = [1, 2, 3, 4, 5].map((n) => row("main", undefined, `fact-${n}`));
+    const out = filterDeepRecall(curated, "mine", 3);
+    expect(out.map((r) => r.text)).toEqual(["fact-1", "fact-2", "fact-3"]);
+  });
+
+  it("mixed pool: keeps own-archive + curated, drops foreign archive, then caps", () => {
+    const out = filterDeepRecall(
+      [
+        row(AUTO_ARCHIVE_AREA, "other-chat", "FOREIGN — must drop"),
+        row(AUTO_ARCHIVE_AREA, "mine", "own archive"),
+        row("solutions", "other-chat", "curated fix"),
+      ],
+      "mine",
+      3
+    );
+    expect(out.map((r) => r.text)).toEqual(["own archive", "curated fix"]);
   });
 });

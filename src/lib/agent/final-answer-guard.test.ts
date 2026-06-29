@@ -15,6 +15,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import type { AppSettings } from "@/lib/types";
 import { turnHasDeliverableAnswer, resolveTurnContinuation } from "./agent";
+import { detectPrematureCompletion } from "./agent-response";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -263,5 +264,135 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     });
     expect(res.text).toBe("");
     expect(res.uiNotice).toMatch(/Could not produce a final answer/i);
+  });
+});
+
+// ── PM #84 — detectPrematureCompletion: deterministic visibility note when the
+// model claims "done" via `response` while its OWN last whitelisted check failed.
+// Advisory backstop; false-negative-biased (narrow whitelist, last-check-wins,
+// fires only on a delivered answer).
+const codeExecCall = (id: string, code: string): ModelMessage =>
+  ({
+    role: "assistant",
+    content: [
+      { type: "tool-call", toolCallId: id, toolName: "code_execution", input: { runtime: "terminal", code } },
+    ],
+  }) as unknown as ModelMessage;
+
+// Mirrors formatCommandResult: a NON-zero exit appends "Exit code: N"; a success
+// (exit 0) appends NO such line.
+const codeExecFail = (id: string, exit: number, stderr = "error"): ModelMessage =>
+  ({
+    role: "tool",
+    content: [
+      { type: "tool-result", toolCallId: id, toolName: "code_execution", output: `STDERR:\n${stderr}\n\nExit code: ${exit}` },
+    ],
+  }) as unknown as ModelMessage;
+
+const codeExecPass = (id: string, stdout = "ok"): ModelMessage =>
+  ({
+    role: "tool",
+    content: [
+      { type: "tool-result", toolCallId: id, toolName: "code_execution", output: `STDOUT:\n${stdout}` },
+    ],
+  }) as unknown as ModelMessage;
+
+describe("PM #84 — detectPrematureCompletion", () => {
+  it("FIRES: the live repro — tsc --noEmit exited 2, then a COMPLETED ✅ response", () => {
+    const notice = detectPrematureCompletion([
+      codeExecCall("c1", "npx tsc --noEmit"),
+      codeExecFail("c1", 2, "src/x.ts(1,1): error TS1005: ';' expected."),
+      responseToolCall("# Sprint 3 — COMPLETED SUCCESSFULLY ✅"),
+    ]);
+    expect(notice).toMatch(/Completion check/);
+    expect(notice).toMatch(/tsc --noEmit/);
+    expect(notice).toMatch(/exited 2/);
+  });
+
+  it("FIRES via vitest, jest, pytest, build, eslint", () => {
+    const cases: Array<[string, RegExp]> = [
+      ["npx vitest run", /vitest/],
+      ["npx jest", /jest/],
+      ["pytest -q", /pytest/],
+      ["npm run build", /build/],
+      ["npx eslint .", /eslint/],
+    ];
+    for (const [cmd, label] of cases) {
+      const notice = detectPrematureCompletion([
+        codeExecCall("c1", cmd),
+        codeExecFail("c1", 1),
+        responseToolCall("Done ✅"),
+      ]);
+      expect(notice, cmd).toMatch(label);
+    }
+  });
+
+  it("SILENT: the check PASSED (no Exit code line) even with a response", () => {
+    expect(
+      detectPrematureCompletion([
+        codeExecCall("c1", "npx tsc --noEmit"),
+        codeExecPass("c1"),
+        responseToolCall("All green — done."),
+      ])
+    ).toBeNull();
+  });
+
+  it("SILENT: no `response` answer delivered (gate a) even though tsc failed", () => {
+    expect(
+      detectPrematureCompletion([codeExecCall("c1", "npx tsc --noEmit"), codeExecFail("c1", 2)])
+    ).toBeNull();
+  });
+
+  it("SILENT: fix-then-rerun — the LAST tsc passed (earlier failure overridden)", () => {
+    expect(
+      detectPrematureCompletion([
+        codeExecCall("c1", "npx tsc --noEmit"),
+        codeExecFail("c1", 2),
+        codeExecCall("c2", "npx tsc --noEmit"),
+        codeExecPass("c2"),
+        responseToolCall("Fixed and verified — done."),
+      ])
+    ).toBeNull();
+  });
+
+  it("FIRES: pass-then-fail — the LAST check failed", () => {
+    const notice = detectPrematureCompletion([
+      codeExecCall("c1", "npx vitest run"),
+      codeExecPass("c1"),
+      codeExecCall("c2", "npx vitest run"),
+      codeExecFail("c2", 1),
+      responseToolCall("Done ✅"),
+    ]);
+    expect(notice).toMatch(/vitest/);
+    expect(notice).toMatch(/exited 1/);
+  });
+
+  it("SILENT: a non-whitelisted command failed (grep exits 1 normally)", () => {
+    expect(
+      detectPrematureCompletion([
+        codeExecCall("c1", "grep -r TODO src/"),
+        codeExecFail("c1", 1),
+        responseToolCall("No TODOs — done."),
+      ])
+    ).toBeNull();
+  });
+
+  it("SILENT: no code_execution at all (pure Q&A answer)", () => {
+    expect(detectPrematureCompletion([responseToolCall("React 19.2.7 is the latest.")])).toBeNull();
+  });
+
+  it("SILENT: an explicit `Exit code: 0` is not a failure (defensive non-zero guard)", () => {
+    expect(
+      detectPrematureCompletion([
+        codeExecCall("c1", "npm test"),
+        {
+          role: "tool",
+          content: [
+            { type: "tool-result", toolCallId: "c1", toolName: "code_execution", output: "STDOUT:\nok\n\nExit code: 0" },
+          ],
+        } as unknown as ModelMessage,
+        responseToolCall("Tests pass — done."),
+      ])
+    ).toBeNull();
   });
 });

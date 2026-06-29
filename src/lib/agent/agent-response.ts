@@ -432,6 +432,139 @@ export function getLastResponseToolText(messages: ModelMessage[]): string {
   return "";
 }
 
+/**
+ * Command patterns whose NON-ZERO exit unambiguously means "a verification
+ * failed". Deliberately NARROW (PM #84 — the audit's hard requirement to bias to
+ * false-NEGATIVES): `grep`, `test`/`[ ]`, and `git diff --exit-code` all exit
+ * non-zero in normal use, so they are EXCLUDED — only real check commands whose
+ * non-zero exit is always a failure are listed. Matched against the
+ * `code_execution` `code` argument (the command the model actually ran).
+ */
+const VERIFICATION_COMMAND_PATTERNS: ReadonlyArray<{ label: string; re: RegExp }> = [
+  { label: "typecheck (tsc --noEmit)", re: /\btsc\b[^\n]*--no[-]?emit/i },
+  { label: "typecheck (npm run typecheck)", re: /\bnpm\s+run\s+typecheck\b/i },
+  { label: "build (npm run build)", re: /\bnpm\s+run\s+build\b/i },
+  { label: "build (next build)", re: /\bnext\s+build\b/i },
+  { label: "tests (vitest)", re: /\bvitest\b/i },
+  { label: "tests (jest)", re: /\bjest\b/i },
+  { label: "tests (pytest)", re: /\bpytest\b/i },
+  { label: "tests (npm test)", re: /\bnpm\s+(?:run\s+)?test\b/i },
+  { label: "lint (eslint)", re: /\beslint\b/i },
+  { label: "lint (npm run lint)", re: /\bnpm\s+run\s+lint\b/i },
+];
+
+function matchVerificationCommand(code: string): string | null {
+  for (const { label, re } of VERIFICATION_COMMAND_PATTERNS) {
+    if (re.test(code)) return label;
+  }
+  return null;
+}
+
+/**
+ * Parse the LAST `Exit code: N` line from a code_execution result, returning N
+ * only when non-zero. `formatCommandResult` (code-execution.ts) appends this
+ * line ONLY for a non-zero exit — a successful command prints no such line — so
+ * its mere presence is the failure signal; we still require `!== 0` for safety
+ * against a managed-session path that could print a zero.
+ */
+function parseLastNonZeroExit(resultText: string): number | null {
+  const re = /Exit code:\s*(-?\d+)/g;
+  let match: RegExpExecArray | null;
+  let last: number | null = null;
+  while ((match = re.exec(resultText)) !== null) {
+    const n = Number.parseInt(match[1], 10);
+    if (Number.isFinite(n)) last = n;
+  }
+  return last !== null && last !== 0 ? last : null;
+}
+
+function partToolName(part: unknown): string {
+  if (!(typeof part === "object" && part !== null) || !("toolName" in part)) return "";
+  const name = (part as { toolName?: unknown }).toolName;
+  return typeof name === "string" ? name : "";
+}
+
+function partToolCallId(part: unknown): string {
+  if (!(typeof part === "object" && part !== null) || !("toolCallId" in part)) return "";
+  const id = (part as { toolCallId?: unknown }).toolCallId;
+  return typeof id === "string" ? id : "";
+}
+
+/**
+ * PM #84 — premature-completion visibility note. The agent sometimes calls the
+ * `response` tool declaring a task "COMPLETED ✅" while its OWN last verification
+ * FAILED (live, chat a8e1a43c: `npx tsc --noEmit` → Exit code 2, then "All the
+ * TypeScript compiles without errors" + a `response("… COMPLETED ✅")`). The
+ * PM #80 grounding signal IS in context and the model reacts to it mid-task, but
+ * it IGNORES the failing check for its FINAL completion claim. Orchestra cannot
+ * make a model reason honestly — but it CAN surface the contradiction.
+ *
+ * Returns an operator-facing notice when BOTH hold for THIS turn's messages:
+ *   (a) a `response`-tool answer was delivered (the completion claim), AND
+ *   (b) the LAST whitelisted verification command run this turn exited non-zero.
+ * Otherwise null.
+ *
+ * DELIBERATELY false-negative-biased (the audit's requirement): the whitelist is
+ * narrow (only commands whose non-zero exit is unambiguously a failure — never
+ * grep/test/git-diff), "the LAST check" means a fix-then-rerun that passes
+ * correctly suppresses it, and no-delivered-answer / no-whitelisted-check turns
+ * stay silent. ADVISORY ONLY — it never blocks the `response` (a hard-gate was
+ * REJECTED in the audit: unreliable detection → false-positive blocks,
+ * nonsensical for non-code tasks). The behavioural lever is the system.md
+ * hard_constraint #6 mandate; this is the deterministic visibility backstop.
+ */
+export function detectPrematureCompletion(messages: ModelMessage[]): string | null {
+  // (a) a `response`-tool answer must have been delivered this turn — otherwise
+  // there is no completion claim to contradict.
+  if (!getLastResponseToolText(messages).trim()) return null;
+
+  // code_execution tool-call id -> result output text.
+  const resultById = new Map<string, string>();
+  for (const msg of messages) {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (!(typeof part === "object" && part !== null)) continue;
+      if (!("type" in part) || part.type !== "tool-result") continue;
+      if (partToolName(part) !== "code_execution") continue;
+      const id = partToolCallId(part);
+      if (!id) continue;
+      const output =
+        "output" in part
+          ? (part as { output?: unknown }).output
+          : (part as { result?: unknown }).result;
+      resultById.set(id, extractToolResultOutputText(output));
+    }
+  }
+
+  // The LAST whitelisted check call this turn (a fix-then-rerun overrides earlier
+  // failures — only the final verification verdict matters).
+  let lastCheck: { label: string; id: string } | null = null;
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (!(typeof part === "object" && part !== null)) continue;
+      if (!("type" in part) || part.type !== "tool-call") continue;
+      if (partToolName(part) !== "code_execution") continue;
+      const input = asRecord("input" in part ? (part as { input?: unknown }).input : undefined);
+      const code = typeof input?.code === "string" ? input.code : "";
+      const label = matchVerificationCommand(code);
+      const id = partToolCallId(part);
+      if (label && id) lastCheck = { label, id };
+    }
+  }
+  if (!lastCheck) return null;
+
+  const exit = parseLastNonZeroExit(resultById.get(lastCheck.id) ?? "");
+  if (exit === null) return null;
+
+  return (
+    `[Agent] ⚠️ Completion check — the last verification you ran this turn, ` +
+    `${lastCheck.label}, exited ${exit} (non-zero), yet you delivered a final ` +
+    `answer. If you reported this task complete, re-verify before claiming done — ` +
+    `a green summary over a failing check misleads the user.`
+  );
+}
+
 export function shouldAutoContinueAssistant(
   text: string,
   finishReason?: string

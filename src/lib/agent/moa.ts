@@ -15,7 +15,8 @@ import { generateText, stepCountIs, type ModelMessage } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
-import { reflectOnResponse, reviseWithCritique } from "@/lib/agent/reflection";
+import { reflectOnResponse, reviseWithCritique, deriveReflectionOutcome } from "@/lib/agent/reflection";
+import { log } from "@/lib/observability/logger";
 import { embedTexts } from "@/lib/memory/embeddings";
 import {
   buildDisagreementMarker,
@@ -23,6 +24,7 @@ import {
   detectDisagreement,
 } from "@/lib/agent/disagreement";
 import { createModel } from "@/lib/providers/llm-provider";
+import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { resolveContextWindow } from "@/lib/providers/context-window";
@@ -55,13 +57,21 @@ export {
   detectProposerRole,
   resolveWorkerKey,
   resolveProposerModelConfig,
+  modelFamily,
+  detectSkepticFamilyOverlap,
 } from "@/lib/agent/moa-personas";
 
 import {
   detectProposerRole,
+  detectSkepticFamilyOverlap,
   resolveProposerModelConfig,
   resolveWorkerKey,
 } from "@/lib/agent/moa-personas";
+
+// DDD Sprint 8 (corrected) — dedup for the in-breed sycophancy advisory:
+// warn once per process per (skeptic, worker, brain) model combo, not on
+// every swarm run. Bounded by construction (distinct combos are few).
+const warnedSkepticFamilyCombos = new Set<string>();
 
 
 // ── Dynamic Persona Generation (DPG) ────────────────────────────────────
@@ -396,7 +406,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     );
   }
 
-  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock);
+  // C3 — thread the operator's maxSwarmSize, clamped to [3, 7]. The clamp is
+  // mandatory: the Router's zod schema is `.min(3).max(maxSwarmSize)`, so a
+  // value < 3 would make min > max and crash the Router on every turn (R4).
+  // Guard non-finite too: a corrupt settings value (e.g. a string) → NaN →
+  // `.max(NaN)` also throws every turn; fall back to the default 5.
+  const rawSwarmSize = settings.maxSwarmSize;
+  const maxSwarmSize = Number.isFinite(rawSwarmSize)
+    ? Math.min(7, Math.max(3, Math.floor(rawSwarmSize as number)))
+    : 5;
+  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock, maxSwarmSize);
 
   publishUiSyncEvent({
     topic: "chat",
@@ -531,14 +550,41 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       const resolvedProvider = proposerConfig.provider;
       const resolvedModel = proposerConfig.model;
 
+      // Resolve the standard role BEFORE the try so the catch/DAG events use
+      // the ACTUAL detected role, not a hardcoded "reviewer".
+      // detectProposerRole is pure (no I/O, no throw).
+      const standardRole = detectProposerRole(proposer);
+
+      // DDD Sprint 8 (corrected) — in-breed sycophancy ADVISORY. The original
+      // Tripartite plan force-switched the Skeptic to a third provider; that
+      // was rejected (breaks single-provider/OpenRouter/Privacy-Mode setups and
+      // silently overrides operator choice — the PM #22 anti-pattern). We only
+      // WARN, once per process per model combo, and change nothing.
+      if (standardRole === "reviewer") {
+        const overlap = detectSkepticFamilyOverlap({
+          skeptic: proposerConfig,
+          worker: workerConfig,
+          brain: settings.chatModel,
+        });
+        if (overlap) {
+          const comboKey = [
+            `${proposerConfig.provider}/${proposerConfig.model}`,
+            `${workerConfig.provider}/${workerConfig.model}`,
+            `${settings.chatModel.provider}/${settings.chatModel.model}`,
+          ].join("|");
+          if (!warnedSkepticFamilyCombos.has(comboKey)) {
+            warnedSkepticFamilyCombos.add(comboKey);
+            console.warn(`[MoA] S8 advisory — ${overlap}`);
+          }
+        }
+      }
+
       try {
         const workerModel = createModel(proposerConfig, { projectId, currentPath });
 
         // PM #42 — extracted to a reusable helper so the role detection
         // (UI icon, tool assignment, prompt augmentation) goes through
-        // one place and stays consistent. The exported `detectProposerRole`
-        // is also used by tests and future eval cases.
-        const standardRole = detectProposerRole(proposer);
+        // one place and stays consistent.
 
         const messages: ModelMessage[] = [
           ...safeHistory.slice(-6), // Limit context to 6 text messages
@@ -561,7 +607,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             // global chats). Sub-paths aren't supported on the proposer
             // surface — they're synthesizers, not navigators.
             cwd: getWorkDir(projectId),
-          }
+          },
+          // Wire the "does this model support tool calling?" gate (PM #17).
+          // Without it, a non-tool proposer model (e.g. an OpenRouter model in
+          // NO_TOOL_PATTERNS) gets tools forwarded → the call 404s and wastes
+          // the first attempt before the no-tools fallback retries. This makes
+          // it run tool-less (with the PM #77 directive) on the first pass.
+          modelSupportsTools(proposerConfig.provider, proposerConfig.model)
         );
         // §4 — proposers MUST go through the same loop guard as the main agent
         // path. Without it, a throwing tool (e.g. a flaky search_web) is caught
@@ -601,46 +653,70 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // because tiers (PM #48) can land proposers on different models/windows.
         const proposerContextWindow = await resolveWindow(proposerConfig);
 
-        const result = await generateText({
-          model: workerModel,
-          // PM #42 — system prompt is augmented with the Fact-Check Mandate
-          // when this proposer was assigned search_web (reviewer / researcher).
-          // For other roles, augmentedSystemPrompt === proposer.systemPrompt
-          // verbatim.
-          system: augmentedSystemPrompt,
-          messages,
-          prepareStep: createTokenGovernor({
-            contextWindow: proposerContextWindow,
-            reservedOutputTokens: proposerMaxOutput,
-          }),
-          // PM #48 — temperature/maxTokens read from the RESOLVED config
-          // (proposerConfig), not workerConfig. A tier slot can override
-          // both alongside the model id.
-          temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
-          // PM #66 — proposers are INTERMEDIATE "draft" outputs that feed the
-          // aggregator and run N-way PARALLEL, so they keep a bounded ceiling
-          // (like the codebase's other intermediate calls — critic=256,
-          // title-gen=Math.min(…,1200)). A re-audit found that removing the cap
-          // entirely risked an ~Nx cost blow-up when an operator sets a high
-          // utility maxTokens. We respect a configured maxTokens UP TO a ceiling
-          // (raised 2048 → 4096 so genuinely long drafts aren't truncated),
-          // defaulting to 2048 when unset. The final-answer paths (aggregator,
-          // bypass, revisor) are uncapped — they're 1×, not N×.
-          maxOutputTokens: proposerMaxOutput,
-          tools: guardedProposerTools,
-          // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
-          // from generateText; the old `maxSteps: …` here was silently ignored
-          // (it is not a CallSettings field), so generateText fell back to its
-          // default `stepCountIs(1)`. A tool-using proposer (the Skeptic /
-          // researcher with `search_web`) therefore stopped right after emitting
-          // the tool call — no follow-up generation, empty `text`, "(empty
-          // draft)" → dropped by `isSuccessfulDraft`. Use `stopWhen` like the
-          // agent path: tool proposers get up to 3 steps (call → result →
-          // answer); tool-less proposers do a single generation (was the
-          // PM #42 intent — a coder without tools shouldn't pay for tool rounds).
-          stopWhen: stepCountIs(guardedProposerTools ? 3 : 1),
-          abortSignal: proposerSignal,
-        });
+        let result;
+        try {
+          result = await generateText({
+            model: workerModel,
+            // PM #42 — system prompt is augmented with the Fact-Check Mandate
+            // when this proposer was assigned search_web (reviewer / researcher).
+            // For other roles, augmentedSystemPrompt === proposer.systemPrompt
+            // verbatim.
+            system: augmentedSystemPrompt,
+            messages,
+            prepareStep: createTokenGovernor({
+              contextWindow: proposerContextWindow,
+              reservedOutputTokens: proposerMaxOutput,
+            }),
+            // PM #48 — temperature/maxTokens read from the RESOLVED config
+            // (proposerConfig), not workerConfig. A tier slot can override
+            // both alongside the model id.
+            temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
+            // PM #66 — proposers are INTERMEDIATE "draft" outputs that feed the
+            // aggregator and run N-way PARALLEL, so they keep a bounded ceiling
+            // (like the codebase's other intermediate calls — critic=256,
+            // title-gen=Math.min(…,1200)). A re-audit found that removing the cap
+            // entirely risked an ~Nx cost blow-up when an operator sets a high
+            // utility maxTokens. We respect a configured maxTokens UP TO a ceiling
+            // (raised 2048 → 4096 so genuinely long drafts aren't truncated),
+            // defaulting to 2048 when unset. The final-answer paths (aggregator,
+            // bypass, revisor) are uncapped — they're 1×, not N×.
+            maxOutputTokens: proposerMaxOutput,
+            tools: guardedProposerTools,
+            // PM #65 — proposer tool-loop bound. AI SDK v5+ REMOVED `maxSteps`
+            // from generateText; the old `maxSteps: …` here was silently ignored
+            // (it is not a CallSettings field), so generateText fell back to its
+            // default `stepCountIs(1)`. A tool-using proposer (the Skeptic /
+            // researcher with `search_web`) therefore stopped right after emitting
+            // the tool call — no follow-up generation, empty `text`, "(empty
+            // draft)" → dropped by `isSuccessfulDraft`. Use `stopWhen` like the
+            // agent path: tool proposers get up to 3 steps (call → result →
+            // answer); tool-less proposers do a single generation (was the
+            // PM #42 intent — a coder without tools shouldn't pay for tool rounds).
+            stopWhen: stepCountIs(guardedProposerTools ? 3 : 1),
+            abortSignal: proposerSignal,
+          });
+        } catch (textErr: any) {
+          const msg = textErr instanceof Error ? textErr.message : String(textErr);
+          if (guardedProposerTools && (msg.toLowerCase().includes("tool") || msg.toLowerCase().includes("endpoint"))) {
+            console.warn(`[MoA] Proposer "${proposer.id}" model doesn't support tools. Retrying without tools... (${msg})`);
+            result = await generateText({
+              model: workerModel,
+              system: proposer.systemPrompt, // original un-augmented prompt
+              messages,
+              prepareStep: createTokenGovernor({
+                contextWindow: proposerContextWindow,
+                reservedOutputTokens: proposerMaxOutput,
+              }),
+              temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
+              maxOutputTokens: proposerMaxOutput,
+              tools: undefined,
+              stopWhen: stepCountIs(1),
+              abortSignal: proposerSignal,
+            });
+          } else {
+            throw textErr;
+          }
+        }
 
         const text = result.text?.trim() || "(empty draft)";
         const latencyMs = Date.now() - pStart;
@@ -677,8 +753,94 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           resolvedTier: proposerTier,
         };
       } catch (err) {
-        const latencyMs = Date.now() - pStart;
-        const errMsg = err instanceof Error ? err.message : String(err);
+        let latencyMs = Date.now() - pStart;
+        let errMsg = err instanceof Error ? err.message : String(err);
+        
+        // Sprint 6 (Resilience/Failover): Intercept reviewer failures
+        if (standardRole === "reviewer") {
+          console.warn(`[MoA] Critic "${proposer.id}" failed (${errMsg})! Activating fallback model...`);
+          publishUiSyncEvent({
+            topic: "chat",
+            chatId,
+            nodeType: "agent_node",
+            swarmNode: {
+              nodeId,
+              role: standardRole,
+              taskSummary: `${proposer.role}: Failed. Activating fallback...`,
+              status: "running",
+            },
+          });
+          
+          try {
+            const fallbackModel = createModel(workerConfig, { projectId, currentPath });
+            const messages: ModelMessage[] = [
+              ...safeHistory.slice(-6),
+              { role: "user", content: userMessage },
+            ];
+            const PROPOSER_TIMEOUT_MS = 120_000;
+            let proposerSignal: AbortSignal;
+            if (typeof AbortSignal.any === "function" && abortSignal) {
+              proposerSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(PROPOSER_TIMEOUT_MS)]);
+            } else {
+              proposerSignal = AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
+            }
+            const proposerMaxOutput = Math.min(
+              workerConfig.maxTokens ?? 2048,
+              4096
+            );
+
+            // Retry without tools to maximize success chance
+            const result = await generateText({
+              model: fallbackModel,
+              system: proposer.systemPrompt, // original un-augmented prompt
+              messages,
+              prepareStep: createTokenGovernor({
+                contextWindow: await resolveWindow(workerConfig),
+                reservedOutputTokens: proposerMaxOutput,
+              }),
+              temperature: workerConfig.temperature ?? 0.5,
+              maxOutputTokens: proposerMaxOutput,
+              tools: undefined,
+              stopWhen: stepCountIs(1),
+              abortSignal: proposerSignal,
+            });
+            
+            const text = result.text?.trim() || "(empty draft)";
+            latencyMs = Date.now() - pStart;
+
+            console.log(`[MoA] Proposer "${proposer.id}" FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);
+
+            publishUiSyncEvent({
+              topic: "chat",
+              chatId,
+              nodeType: "agent_node",
+              swarmNode: {
+                nodeId,
+                role: standardRole,
+                taskSummary: `${proposer.role}: Fallback complete.`,
+                status: "completed",
+                completedAt: new Date().toISOString(),
+              },
+            });
+
+            return {
+              proposerId: proposer.id,
+              role: proposer.role,
+              text,
+              latencyMs,
+              rawUsage: result.usage,
+              resolvedProvider: workerConfig.provider,
+              resolvedModel: workerConfig.model,
+              resolvedTier: "fast", // Fallback typically uses standard reliable utility config
+            };
+          } catch (fallbackErr) {
+             const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+             console.error(`[MoA] Proposer "${proposer.id}" FALLBACK also failed: ${fallbackMsg}`);
+             errMsg = `${errMsg} -> Fallback failed: ${fallbackMsg}`;
+             latencyMs = Date.now() - pStart;
+          }
+        }
+
         console.error(`[MoA] Proposer "${proposer.id}" failed: ${errMsg}`);
 
         publishUiSyncEvent({
@@ -687,13 +849,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           nodeType: "agent_node",
           swarmNode: {
             nodeId,
-            role: "reviewer", // Fallback role for error reporting
+            role: standardRole,
             taskSummary: `${proposer.role}: Failed (${errMsg})`,
             status: "error",
             completedAt: new Date().toISOString(),
           },
         });
 
+        // R1 — a failed reviewer (Skeptic) is dropped like any other proposer
+        // (PM #77 contract): its error draft is filtered out by isSuccessfulDraft
+        // while the other proposers' drafts survive. Throwing here would reject
+        // the Promise.all → runMoAEnsemble throws → agent.ts silently collapses
+        // the whole ensemble to a single agent, discarding every good draft.
         return {
           proposerId: proposer.id,
           role: proposer.role,
@@ -883,6 +1050,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       totalLatencyMs,
       aggregatorMode: "synthesis",
     };
+
     return {
       text: "",
       drafts,
@@ -1068,7 +1236,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     //      over embeddings > convergenceThreshold) → the model is
     //      oscillating between rephrasings; exit to avoid waste.
     //
-    // Plus a code-level hard cap (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 50`)
+    // Plus a code-level hard cap (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 3`)
     // protects against accidental runaway when the operator sets a
     // maxRounds higher than they meant to. Cost is visible per-turn via
     // PM #36 budget banner.
@@ -1084,8 +1252,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     let reflectionRevisionsExecuted = 0;
     let reflectionCriticCleanedUp = false;
     let reflectionHitCap = false;
+    // DDD Phase 1 (corrected) — two extra exit flags so the single
+    // `ddd_reflection_outcome` log event can classify the run.
+    let reflectionCannotFix = false;
+    let reflectionConverged = false;
     if (settings.reflection?.enabled) {
-      const ABSOLUTE_MAX_REFLECTION_ROUNDS = 50;
+      const ABSOLUTE_MAX_REFLECTION_ROUNDS = 3;
       const requestedMaxRounds = Math.max(
         1,
         Math.floor(settings.reflection.maxRounds ?? 1)
@@ -1094,6 +1266,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         requestedMaxRounds,
         ABSOLUTE_MAX_REFLECTION_ROUNDS
       );
+      // DDD audit fix #9 — warn when operator's setting is capped.
+      if (requestedMaxRounds > ABSOLUTE_MAX_REFLECTION_ROUNDS) {
+        console.warn(
+          `[MoA] Reflection maxRounds ${requestedMaxRounds} exceeds cap (${ABSOLUTE_MAX_REFLECTION_ROUNDS}), using ${effectiveMaxRounds}.`
+        );
+      }
       const convergenceThreshold = Math.min(
         1,
         Math.max(0, settings.reflection.convergenceThreshold ?? 0.97)
@@ -1104,11 +1282,15 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         let round = 0;
         while (round < effectiveMaxRounds) {
           round += 1;
+          // Pass brainConfig so the critic runs on the frontier model for the
+          // Deep Audit, not the cheap utilityModel.
           const reflection = await reflectOnResponse({
             userMessage,
             agentResponse: finalText,
             settings,
+            modelOverride: brainConfig,
             projectId,
+            chatId,
             abortSignal,
           });
           if (reflection.usage && reflection.modelConfig) {
@@ -1141,6 +1323,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             settings,
             modelOverride: brainConfig,
             projectId,
+            chatId,
             abortSignal,
           });
           if (revision.usage && revision.modelConfig) {
@@ -1150,6 +1333,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
               revision.modelConfig.model,
               revision.usage
             );
+          }
+
+          if (revision.status === "cannot_fix") {
+            console.log(`[MoA] Reflection round ${round}/${effectiveMaxRounds}: Coder cannot fix issues (${revision.explanation}). Breaking loop.`);
+            reflectionCannotFix = true;
+            break;
           }
 
           previousText = finalText;
@@ -1180,6 +1369,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
                 console.log(
                   `[MoA] Reflection round ${round}/${effectiveMaxRounds}: converged (cosine ${similarity.toFixed(3)} >= ${convergenceThreshold}), stopping.`
                 );
+                reflectionConverged = true;
                 break;
               }
               console.log(
@@ -1203,6 +1393,25 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           // the model couldn't converge. Recorded for trace quality score.
           if (!reflectionCriticCleanedUp) reflectionHitCap = true;
         }
+
+        // DDD Phase 1 (corrected) — ONE structured event per reflection run,
+        // through the EXISTING logger (data/logs/*.jsonl), instead of the
+        // originally-planned OpenTelemetry tracer module (rejected: no-APM
+        // local-first; duplicates trace-memory + cost accumulator + SSE).
+        // The roadmap's aggregate metrics are offline queries over this event:
+        //   critic_rejection_rate  = share of events with revisionsExecuted > 0
+        //   average_reflection_rounds = mean(rounds)
+        log.info("ddd_reflection_outcome", {
+          chatId,
+          rounds: round,
+          revisionsExecuted: reflectionRevisionsExecuted,
+          outcome: deriveReflectionOutcome({
+            criticCleanedUp: reflectionCriticCleanedUp,
+            cannotFix: reflectionCannotFix,
+            converged: reflectionConverged,
+            hitCap: reflectionHitCap,
+          }),
+        });
       } catch (reflectionErr) {
         // Reflection is a quality-improvement pass, never a blocker — log
         // and continue with the un-revised aggregator output.

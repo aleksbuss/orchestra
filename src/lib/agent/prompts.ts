@@ -180,6 +180,13 @@ export async function buildSystemPrompt(options: {
     );
   }
 
+      parts.push(
+      `\n## Port Allocation Rules\n` +
+      `- NEVER use port 3000 when starting web servers or deploying applications. The Orchestra system runs on port 3000.\n` +
+      `- If a framework defaults to 3000 (like Next.js), you MUST override it (e.g. PORT=3001 npm run dev or --port 3001).\n` +
+      `- Do not attempt to kill processes on port 3000 to free it up.`
+    );
+
   // 4. Project instructions and Skills
   if (options.projectId) {
     const project = await getProject(options.projectId);

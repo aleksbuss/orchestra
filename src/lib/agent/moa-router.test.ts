@@ -271,7 +271,7 @@ describe("generateDynamicSwarm — failure path", () => {
     mockedGenerateObject.mockRejectedValue(new Error("LLM blew up"));
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
-    expect(result.personas).toBe(MOA_PROPOSERS);
+    expect(result.personas).toEqual(MOA_PROPOSERS);
     expect(result.requiresSwarm).toBe(true); // err on the side of running the swarm
     expect(result.usage).toBeUndefined();
     expect(errSpy).toHaveBeenCalledWith(
@@ -285,7 +285,36 @@ describe("generateDynamicSwarm — failure path", () => {
     mockedGenerateObject.mockRejectedValue(new Error("Zod parse failed"));
     vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
-    expect(result.personas).toBe(MOA_PROPOSERS);
+    expect(result.personas).toEqual(MOA_PROPOSERS);
+  });
+});
+
+describe("generateDynamicSwarm — maxSwarmSize (C3)", () => {
+  it("threads maxSwarmSize into the prompt (default 5, explicit 7)", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+
+    await generateDynamicSwarm("do a thing", [], STUB_MODEL, false);
+    const defaultPrompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(defaultPrompt).toContain("3 to 5");
+
+    mockedGenerateObject.mockClear();
+    await generateDynamicSwarm("do a thing", [], STUB_MODEL, false, undefined, "", 7);
+    const widePrompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(widePrompt).toContain("3 to 7");
+    expect(widePrompt).not.toContain("3 to 5");
+  });
+
+  it("fallback respects maxSwarmSize and still injects a skeptic", async () => {
+    mockedGenerateObject.mockRejectedValue(new Error("router down"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await generateDynamicSwarm("x", [], STUB_MODEL, false, undefined, "", 3);
+    expect(result.personas.length).toBeLessThanOrEqual(3);
+    const hasSkeptic = result.personas.some((p) =>
+      /critic|skeptic|auditor|red.?team|adversari/i.test(p.id) ||
+      /critic|skeptic|auditor|red.?team|adversari/i.test(p.role)
+    );
+    expect(hasSkeptic).toBe(true);
   });
 });
 

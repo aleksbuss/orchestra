@@ -25,7 +25,7 @@
  *      "user". This is the test that would have caught PM #2 and prevents
  *      its return.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 // Module mocks: stub the AI SDK + provider + UI bus + presets so we can run
 // the ensemble in-process without touching network / filesystem / models.
@@ -66,6 +66,18 @@ vi.mock("@/lib/tools/search-engine", () => ({
   isSearchUsable: (s: { enabled?: boolean; provider?: string } | undefined) =>
     !!(s?.enabled && s.provider !== "none"),
 }));
+
+// Mock the logger so the DDD `ddd_reflection_outcome` event is a deterministic
+// vi.fn (asserted in the DDD-glue tests) rather than a real file/stdout write.
+// moa.ts only uses `log.info`; keep the rest of the module (withLogContext etc.)
+// real so any transitive caller is unaffected.
+vi.mock("@/lib/observability/logger", async (orig) => {
+  const actual = await orig<typeof import("@/lib/observability/logger")>();
+  return {
+    ...actual,
+    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  };
+});
 
 import {
   runMoAEnsemble,
@@ -344,6 +356,53 @@ describe("runMoAEnsemble — DPG router failure falls back to MOA_PROPOSERS", ()
     // Drafts collection holds the 5 proposer outputs.
     expect(result.drafts.length).toBe(5);
   }, 30_000); // staggered starts: 0,1,2,3,4 sec → ≤10s wall-clock realistically; 30s headroom
+});
+
+describe("R1 — a failed reviewer (Skeptic) must NOT collapse the ensemble", () => {
+  afterEach(() => {
+    mockedGenerateText.mockReset();
+  });
+
+  it("skeptic model down → other proposers' drafts survive; the skeptic is an error stub, not a throw", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Systems Analyst", systemPrompt: "You are a Systems Analyst. Analyze deeply and thoroughly.", color: "blue" },
+          { id: "pragmatist", role: "Pragmatist", systemPrompt: "You are a Pragmatist. Ship the simplest working thing.", color: "green" },
+          { id: "critic", role: "Adversarial Critic", systemPrompt: "You are an Adversarial Critic and Red-Teamer. Find every flaw.", color: "rose" },
+        ],
+      },
+    } as never);
+
+    // The Skeptic's model is down: BOTH its primary and no-tools fallback
+    // throw. Every other proposer + the aggregator succeed. Pre-R1 the
+    // reviewer's throw rejected Promise.all → runMoAEnsemble threw → the whole
+    // ensemble silently collapsed. Now it must return normally.
+    mockedGenerateText.mockImplementation((async (opts: { system?: string }) => {
+      if (typeof opts.system === "string" && /Adversarial Critic|Red-Teamer/i.test(opts.system)) {
+        throw new Error("skeptic model down");
+      }
+      return {
+        text: "Working proposer draft, long enough to count as a real answer.",
+        usage: { inputTokens: 10, outputTokens: 10 },
+      };
+    }) as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a token-bucket rate limiter",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // The two working proposers survived (the ensemble did not throw)...
+    const working = result.drafts.filter((d) => d.text.includes("Working proposer draft"));
+    expect(working.length).toBe(2);
+    // ...and the failed Skeptic is a dropped error stub, not a collapse.
+    const critic = result.drafts.find((d) => d.proposerId === "critic");
+    expect(critic?.text).toMatch(/^\[Error:/);
+  }, 30_000);
 });
 
 describe("runMoAEnsemble — Aggregator must NOT receive consecutive user messages (PM #2)", () => {
@@ -1130,9 +1189,9 @@ describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
       usage: { inputTokens: 80, outputTokens: 30 },
     } as never);
     // Revisor produces the corrected text
-    mockedGenerateText.mockResolvedValueOnce({
-      text: AGG_TEXT_REVISED,
-      usage: { inputTokens: 250, outputTokens: 110 },
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { diff: AGG_TEXT_REVISED, status: "fixed" },
+      usage: { promptTokens: 250, completionTokens: 110 },
     } as never);
 
     const result = await runMoAEnsemble({
@@ -1142,8 +1201,8 @@ describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
       settings: settingsWithReflection(),
     });
 
-    // 3 proposers + aggregator + reflection + revisor = 6 calls.
-    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    // 3 proposers + aggregator + reflection = 5 calls. (Revisor is generateObject)
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
     // Text was replaced by the revisor output.
     expect(result.text).toBe(AGG_TEXT_REVISED);
   }, 30_000);
@@ -1246,9 +1305,9 @@ describe("PM #38 — reflection loop wired into MoA after aggregator", () => {
       usage: { inputTokens: 100, outputTokens: 30 },
     } as never);
     // Revisor
-    mockedGenerateText.mockResolvedValueOnce({
-      text: "Revised version of the answer with the correction applied.",
-      usage: { inputTokens: 300, outputTokens: 150 },
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { diff: "Revised version of the answer with the correction applied.", status: "fixed" },
+      usage: { promptTokens: 300, completionTokens: 150 },
     } as never);
 
     const result = await runMoAEnsemble({
@@ -1319,9 +1378,9 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
       text: '{"shouldRevise": true, "critique": "first issue", "suggestion": "fix it"}',
       usage: { inputTokens: 80, outputTokens: 30 },
     } as never);
-    mockedGenerateText.mockResolvedValueOnce({
-      text: "Revised version #1 long enough to escape short-circuit.",
-      usage: { inputTokens: 200, outputTokens: 80 },
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { diff: "Revised version #1 long enough to escape short-circuit.", status: "fixed" },
+      usage: { promptTokens: 200, completionTokens: 80 },
     } as never);
 
     const result = await runMoAEnsemble({
@@ -1333,7 +1392,7 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
 
     // 3 proposers + 1 aggregator + 1 reflection + 1 revisor = 6 calls.
     // NO second reflection call (maxRounds=1 caps after first revision).
-    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
     expect(result.text).toBe("Revised version #1 long enough to escape short-circuit.");
   }, 30_000);
 
@@ -1344,9 +1403,9 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
       text: '{"shouldRevise": true, "critique": "issue A", "suggestion": "fix A"}',
       usage: { inputTokens: 80, outputTokens: 30 },
     } as never);
-    mockedGenerateText.mockResolvedValueOnce({
-      text: "First revision long enough to skip short-circuit logic.",
-      usage: { inputTokens: 200, outputTokens: 80 },
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { diff: "First revision long enough to skip short-circuit logic.", status: "fixed" },
+      usage: { promptTokens: 200, completionTokens: 80 },
     } as never);
     // Embedder returns IDENTICAL vectors immediately → cosine = 1.0 →
     // convergence triggers on round 1. The loop stops; the 2nd
@@ -1386,9 +1445,9 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
         text: `{"shouldRevise": true, "critique": "issue ${i}", "suggestion": "fix ${i}"}`,
         usage: { inputTokens: 80, outputTokens: 30 },
       } as never);
-      mockedGenerateText.mockResolvedValueOnce({
-        text: `Revision ${i} long enough to escape short-circuit logic block here.`,
-        usage: { inputTokens: 200, outputTokens: 80 },
+      mockedGenerateObject.mockResolvedValueOnce({
+        object: { diff: `Revision ${i} long enough to escape short-circuit logic block here.`, status: "fixed" },
+        usage: { promptTokens: 200, completionTokens: 80 },
       } as never);
     }
 
@@ -1417,23 +1476,28 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
     vi.doUnmock("@/lib/memory/embeddings");
   }, 30_000);
 
-  it("hard cap (ABSOLUTE_MAX_REFLECTION_ROUNDS=50) protects against runaway maxRounds=999", async () => {
+  it("hard cap (ABSOLUTE_MAX_REFLECTION_ROUNDS=3) protects against runaway maxRounds=999", async () => {
+    // Hermetic: clear any mockResolvedValueOnce values leaked by a sibling
+    // multi-round test (clearAllMocks in beforeEach does NOT drain the once-queue).
+    mockedGenerateText.mockReset();
+    mockedGenerateObject.mockReset();
     queueSwarmThroughAggregator("Initial response long enough to skip short-circuit logic.");
 
-    // Mock 51 reflection rounds (50 cap + 1 buffer to verify cap fires).
-    // Each round: critic flags + revisor runs.
-    for (let i = 0; i < 51; i++) {
+    // Queue more rounds than the cap allows. Each round: critic flags + revisor
+    // runs. The cap must stop the loop well before these are exhausted.
+    for (let i = 0; i < 8; i++) {
       mockedGenerateText.mockResolvedValueOnce({
         text: `{"shouldRevise": true, "critique": "round ${i}", "suggestion": "fix"}`,
         usage: { inputTokens: 10, outputTokens: 10 },
       } as never);
-      mockedGenerateText.mockResolvedValueOnce({
-        text: `Revision ${i} long enough to skip short-circuit logic always.`,
-        usage: { inputTokens: 10, outputTokens: 10 },
+      mockedGenerateObject.mockResolvedValueOnce({
+        object: { diff: `Revision ${i} long enough to skip short-circuit logic always.`, status: "fixed" },
+        usage: { promptTokens: 10, completionTokens: 10 },
       } as never);
     }
 
-    // Force divergent embeddings so convergence never triggers.
+    // Force divergent embeddings so convergence never triggers — the ONLY
+    // thing that can stop the loop is the hard cap.
     vi.doMock("@/lib/memory/embeddings", () => ({
       embedTexts: vi.fn().mockResolvedValue([
         [1, 0, 0, 0],
@@ -1443,17 +1507,19 @@ describe("PM #46 — multi-round reflection with convergence + hard cap", () => 
     vi.resetModules();
     const { runMoAEnsemble: runWithCap } = await import("./moa");
 
-    await runWithCap({
+    const result = await runWithCap({
       chatId: "c1",
       userMessage: "do thing",
       history: [],
       settings: settingsMultiRound(999), // operator set absurd value
     });
 
-    // We can't easily assert the call count after vi.resetModules() invalidated
-    // the spy, but the run completing (within the 30s timeout) WITHOUT hanging
-    // proves the hard cap fired. If the cap were bypassed, this test would
-    // run forever consuming queued mocks until they exhausted then crash.
+    // The cap is 3, so exactly 3 revisions fire and the final text is the 3rd
+    // (0-indexed "Revision 2"). This proves the loop stopped at the cap rather
+    // than running all 8 queued rounds — a real assertion, not just "it didn't hang".
+    expect(result.text).toBe(
+      "Revision 2 long enough to skip short-circuit logic always."
+    );
 
     vi.doUnmock("@/lib/memory/embeddings");
   }, 30_000);
@@ -1622,4 +1688,93 @@ describe("PM #56 — tournament-failure fallback to synthesis (PM #52 closure)",
     // generateText would be the synthesis we deliberately skipped).
     expect(mockedGenerateText).toHaveBeenCalledTimes(3);
   }, 30_000);
+});
+
+// ── DDD wiring — reflection-outcome log + S8 sycophancy advisory ──────────────
+// The reflection loop path in runMoAEnsemble was entirely untested here. These
+// two pins prove the moa.ts GLUE for the corrected DDD items executes with real
+// args (the pure functions behind them are unit-tested in reflection.test.ts /
+// moa-personas.test.ts). No auth, no network, no LLM spend.
+describe("DDD glue — reflection outcome event + in-breed sycophancy advisory", () => {
+  it("Phase 1 (corrected): logs one ddd_reflection_outcome event when reflection runs", async () => {
+    // beforeEach runs clearAllMocks (mockClear), which does NOT drain a prior
+    // test's unconsumed mockResolvedValueOnce queue. Reset so this test's mock
+    // sequencing is deterministic regardless of run order.
+    mockedGenerateObject.mockReset();
+    mockedGenerateText.mockReset();
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] a [RULES] r [FORMAT] f", color: "blue" },
+          { id: "coder", role: "Senior Coder", systemPrompt: "[GOAL] c [RULES] r [FORMAT] f", color: "green" },
+        ],
+      },
+    } as any);
+    // All generateText (proposers, aggregator, critic) return a >30-char draft.
+    // The critic's output has no parseable JSON verdict → shouldRevise=false →
+    // the loop exits clean at round 1 and the outcome event fires.
+    mockedGenerateText.mockResolvedValue({
+      text: "A sufficiently long synthesized answer that exceeds the reflection minimum length threshold.",
+    } as any);
+
+    const { log } = await import("@/lib/observability/logger");
+
+    await runMoAEnsemble({
+      chatId: "reflect-glue-1",
+      userMessage: "build a feature",
+      history: [],
+      settings: { ...fakeSettings(), reflection: { enabled: true, maxRounds: 1 } },
+    });
+
+    // The mocked logger makes log.info a deterministic vi.fn; beforeEach's
+    // clearAllMocks means only THIS run's calls are present.
+    expect(log.info).toHaveBeenCalledWith(
+      "ddd_reflection_outcome",
+      expect.objectContaining({
+        chatId: "reflect-glue-1",
+        outcome: expect.any(String),
+        rounds: expect.any(Number),
+        revisionsExecuted: expect.any(Number),
+      })
+    );
+  });
+
+  it("S8 (corrected): warns the in-breed sycophancy ADVISORY when the Skeptic shares the family, and changes nothing", async () => {
+    mockedGenerateObject.mockReset();
+    mockedGenerateText.mockReset();
+    // Unique chatModel id so this test's dedup comboKey can't collide with any
+    // other test's advisory (the warned-combos Set is module-scoped by design).
+    const singleProvider = {
+      ...fakeSettings(),
+      chatModel: { provider: "openai" as const, model: "gpt-4o-s8-uniq", apiKey: "k" },
+    };
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "domain", role: "Domain Expert", systemPrompt: "[GOAL] d [RULES] r [FORMAT] f", color: "blue" },
+          { id: "critic", role: "Adversarial Critic", systemPrompt: "[GOAL] doubt [RULES] r [FORMAT] f", color: "rose" },
+        ],
+      },
+    } as any);
+    mockedGenerateText.mockResolvedValue({ text: "ok draft" } as any);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await runMoAEnsemble({
+      chatId: "s8-glue-1",
+      userMessage: "do a thing",
+      history: [],
+      settings: singleProvider,
+    });
+
+    const warned = warnSpy.mock.calls.some(
+      (c) => String(c[0]).includes("S8 advisory") && String(c[0]).includes("sycophancy")
+    );
+    expect(warned).toBe(true);
+    // ADVISORY ONLY — the swarm still ran and produced drafts (nothing gated).
+    expect(result.drafts.length).toBeGreaterThanOrEqual(2);
+    warnSpy.mockRestore();
+  });
 });

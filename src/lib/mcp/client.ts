@@ -447,25 +447,70 @@ function createTransport(
  * propagate the URL string back through the agent loop (avoids leaking
  * private-IP probe results via error messages).
  */
+/**
+ * Bound the MCP handshake. A STDIO server spawned via `npx -y <pkg>` that is
+ * misconfigured (e.g. an empty required API key) can START yet never complete
+ * the MCP `initialize` handshake, leaving `client.connect` pending FOREVER.
+ * Because `getProjectMcpTools` awaits each connect sequentially at the top of a
+ * turn, one such server hangs the ENTIRE agent turn before generation — no
+ * response, no error, no postmortem (observed live: project MCP servers with
+ * blank keys). `callMcpTool` already had a timeout (R6); the CONNECT did not.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
+
 export async function connectMcpServer(
   config: McpServerConfig
 ): Promise<McpConnection | null> {
+  let transport: ReturnType<typeof createTransport> | undefined;
   try {
-    const transport = createTransport(config);
+    transport = createTransport(config);
     const client = new Client(
       { name: MCP_CLIENT_NAME, version: MCP_CLIENT_VERSION },
       {}
     );
-    await client.connect(transport as Parameters<Client["connect"]>[0]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `MCP handshake exceeded ${CONNECT_TIMEOUT_MS}ms — the server started but never completed initialize (likely misconfigured, e.g. a missing/blank API key).`
+            )
+          ),
+        CONNECT_TIMEOUT_MS
+      );
+    });
+    try {
+      await Promise.race([
+        client.connect(transport as Parameters<Client["connect"]>[0]),
+        timeout,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     return { serverId: config.id, client, transport };
   } catch (err) {
+    // On timeout OR connect error, close the transport so a spawned STDIO child
+    // (`npx …`) doesn't leak for the process lifetime. Best-effort; ignore close
+    // failures. Returning null lets getProjectMcpTools SKIP this server and the
+    // turn proceed instead of hanging.
+    if (
+      transport &&
+      "close" in transport &&
+      typeof (transport as { close?: unknown }).close === "function"
+    ) {
+      await (transport as { close: () => Promise<void> }).close().catch(() => {});
+    }
     if (err instanceof UnsafeOutboundUrlError) {
       console.error(
         `[MCP] Refusing to connect to server "${config.id}": URL fails SSRF guard (${err.message}).`
       );
       return null;
     }
-    console.error(`[MCP] Failed to connect to server "${config.id}":`, err);
+    console.error(
+      `[MCP] Failed to connect to server "${config.id}":`,
+      err instanceof Error ? err.message : err
+    );
     return null;
   }
 }

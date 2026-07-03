@@ -135,9 +135,9 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
       apiKey: "anth-key",
     };
     const settings = fakeSettings({
-      proposerTiers: { fast: fastConfig },
+      proposerTiers: { balanced: fastConfig },
     });
-    // skepticPersona role keywords ("review", "red-team") → reviewer → fast
+    // skepticPersona → reviewer → floored to "balanced" (R5); its tier config is used.
     const { config, tier } = resolveProposerModelConfig(
       skepticPersona,
       defaultWorker,
@@ -145,7 +145,7 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
     );
     expect(config.provider).toBe("anthropic");
     expect(config.model).toBe("claude-haiku-4-5-20251001");
-    expect(tier).toBe("fast");
+    expect(tier).toBe("balanced");
   });
 
   it("explicit persona.modelTier overrides role-derived tier", () => {
@@ -180,7 +180,7 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
       apiKey: "anth-key",
     };
     const settings = fakeSettings({
-      proposerTiers: { fast: emptyTier },
+      proposerTiers: { balanced: emptyTier },
     });
     const { config, tier } = resolveProposerModelConfig(
       skepticPersona,
@@ -188,7 +188,85 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
       settings
     );
     expect(config).toBe(defaultWorker);
-    expect(tier).toBe("fast");
+    expect(tier).toBe("balanced"); // reviewer floored to balanced (R5)
+  });
+
+  // ── proposerTiers.skepticTier — the effect of the "Deep Audit Mode (Skeptic)"
+  // UI selector (settings page). It writes settings.proposerTiers.skepticTier;
+  // these pin that the Skeptic (reviewer role) actually routes to the chosen
+  // tier and that the choice is honored OVER the R5 balanced-floor. Regression
+  // guard for the feature "give the Skeptic a smarter model."
+  it("skepticTier='frontier' routes the Skeptic to the frontier tier (selector honored)", () => {
+    const frontierConfig: ModelConfig = {
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      apiKey: "anth-key",
+    };
+    const settings = fakeSettings({
+      proposerTiers: { skepticTier: "frontier", frontier: frontierConfig },
+    });
+    const { config, tier } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings
+    );
+    expect(tier).toBe("frontier");
+    expect(config.model).toBe("claude-opus-4-8");
+  });
+
+  it("skepticTier='fast' is honored — an EXPLICIT cheap choice bypasses the R5 balanced-floor", () => {
+    // The R5 floor only bumps a would-be "fast" reviewer when the operator made
+    // no explicit choice. skepticTier='fast' is explicit → floor must NOT fire.
+    const fastConfig: ModelConfig = {
+      provider: "anthropic",
+      model: "claude-haiku-4-5-20251001",
+      apiKey: "anth-key",
+    };
+    const settings = fakeSettings({
+      proposerTiers: { skepticTier: "fast", fast: fastConfig },
+    });
+    const { config, tier } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings
+    );
+    expect(tier).toBe("fast"); // NOT floored to balanced — operator's choice wins
+    expect(config.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("skepticTier applies ONLY to the reviewer role — a coder ignores it", () => {
+    const frontierConfig: ModelConfig = {
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      apiKey: "anth-key",
+    };
+    const settings = fakeSettings({
+      // skepticTier set to 'fast', but coder must still derive 'frontier'.
+      proposerTiers: { skepticTier: "fast", frontier: frontierConfig },
+    });
+    const { config, tier } = resolveProposerModelConfig(
+      coderPersona,
+      defaultWorker,
+      settings
+    );
+    expect(tier).toBe("frontier"); // skepticTier did NOT bleed into a non-reviewer
+    expect(config.model).toBe("claude-opus-4-8");
+  });
+
+  it("skepticTier selects a tier with NO model configured → selector is inert, falls back to defaultWorker", () => {
+    // Documents the current UI gap: the selector picks a tier LABEL, but there
+    // is no UI to set the ModelConfig behind fast/balanced/frontier. Choosing
+    // 'frontier' with proposerTiers.frontier unset yields the default worker.
+    const settings = fakeSettings({
+      proposerTiers: { skepticTier: "frontier" }, // no frontier ModelConfig
+    });
+    const { config, tier } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings
+    );
+    expect(tier).toBe("frontier");
+    expect(config).toBe(defaultWorker); // inert until a tier model is configured
   });
 
   it("API-key inheritance: tier config without apiKey inherits chatModel.apiKey via resolveWorkerKey", () => {
@@ -200,23 +278,24 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
       apiKey: "",
     };
     const settings = fakeSettings({
-      proposerTiers: { fast: partialTier },
+      proposerTiers: { balanced: partialTier },
     });
     const { config, tier } = resolveProposerModelConfig(
       skepticPersona,
       defaultWorker,
       settings
     );
-    expect(tier).toBe("fast");
+    expect(tier).toBe("balanced"); // reviewer floored to balanced (R5)
     // resolveWorkerKey backfills the chatModel apiKey for matching-provider tiers
     expect(config.apiKey).toBe("chat-key");
     expect(config.model).toBe("gpt-4o-mini");
   });
 
-  it("heterogeneous tiers across providers are preserved (Anthropic fast + local frontier)", () => {
+  it("heterogeneous tiers across providers are preserved (Anthropic balanced + local frontier)", () => {
     const settings = fakeSettings({
       proposerTiers: {
-        fast: {
+        // reviewer floors to "balanced" (R5), so configure the anthropic model there
+        balanced: {
           provider: "anthropic",
           model: "claude-haiku-4-5-20251001",
           apiKey: "anth-key",

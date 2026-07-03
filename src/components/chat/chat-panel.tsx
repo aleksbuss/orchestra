@@ -217,6 +217,7 @@ function areUIMessagesEquivalentById(
 }
 
 import { SwarmDAG, useSwarmDAGEvents } from "./swarm-dag";
+import { SwarmTerminal } from "./swarm-terminal";
 import { Plane, Loader2, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
@@ -667,6 +668,7 @@ export function ChatPanel() {
               <div className="p-4 space-y-4">
                 <GoalTree chatId={activeChatId || internalChatId} syncTick={syncTick} />
                 <SwarmDAG chatId={activeChatId || internalChatId} externalNodes={swarmNodes} onClearNodes={clearSwarmNodes} />
+                <SwarmTerminal chatId={activeChatId || internalChatId} />
               </div>
             </SheetContent>
           </Sheet>

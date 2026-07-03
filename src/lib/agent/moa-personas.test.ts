@@ -304,10 +304,20 @@ describe("resolveProposerModelConfig — tier-aware model selection (PM #48)", (
     expect(result.tier).toBe("frontier");
   });
 
-  it("falls back to derived tier when modelTier is missing", () => {
+  it("floors a reviewer to 'balanced' when no explicit tier lifts it (R5)", () => {
+    // skeptic → reviewer → would derive to "fast", but R5 floors the Skeptic
+    // at "balanced" so the anti-sycophancy audit isn't run on the weakest model.
     const p = makePersona({ id: "skeptic" });
     const result = resolveProposerModelConfig(p, defaultWorker, baseSettings);
-    expect(result.tier).toBe("fast"); // derived from "skeptic" → reviewer
+    expect(result.tier).toBe("balanced");
+  });
+
+  it("an explicit stronger persona modelTier still wins over the R5 floor", () => {
+    // The floor only bumps a would-be "fast" reviewer; a persona that
+    // explicitly asked for "frontier" is honored unchanged.
+    const p = makePersona({ id: "skeptic", modelTier: "frontier" });
+    const result = resolveProposerModelConfig(p, defaultWorker, baseSettings);
+    expect(result.tier).toBe("frontier");
   });
 
   it("falls back to defaultWorkerConfig when no tier configuration exists", () => {
@@ -317,30 +327,29 @@ describe("resolveProposerModelConfig — tier-aware model selection (PM #48)", (
   });
 
   it("uses a configured tier model when present", () => {
-    const fastModel: ModelConfig = {
+    const balancedModel: ModelConfig = {
       provider: "anthropic",
       model: "claude-3-5-haiku",
-      apiKey: "sk-fast",
+      apiKey: "sk-bal",
     };
     const s = makeSettings({
       proposerTiers: {
-        fast: fastModel,
-        balanced: { provider: "openai", model: "" }, // empty model → falls through
+        balanced: balancedModel,
       },
     } as Partial<AppSettings>);
-    const p = makePersona({ id: "skeptic" }); // → reviewer → fast
+    const p = makePersona({ id: "skeptic" }); // → reviewer → floored to "balanced" (R5)
     const result = resolveProposerModelConfig(p, defaultWorker, s);
     expect(result.config.model).toBe("claude-3-5-haiku");
-    expect(result.tier).toBe("fast");
+    expect(result.tier).toBe("balanced");
   });
 
   it("falls back to default when the selected tier has an empty `model`", () => {
     const s = makeSettings({
       proposerTiers: {
-        fast: { provider: "anthropic", model: "" } as ModelConfig,
+        balanced: { provider: "anthropic", model: "" } as ModelConfig,
       },
     } as Partial<AppSettings>);
-    const p = makePersona({ id: "skeptic" });
+    const p = makePersona({ id: "skeptic" }); // → reviewer → floored to "balanced" (R5)
     const result = resolveProposerModelConfig(p, defaultWorker, s);
     expect(result.config).toBe(defaultWorker);
   });
@@ -359,5 +368,94 @@ describe("resolveProposerModelConfig — tier-aware model selection (PM #48)", (
     const result = resolveProposerModelConfig(p, defaultWorker, s);
     expect(result.config.apiKey).toBe("sk-vault-anth");
     expect(result.config.model).toBe("claude-3-5-sonnet");
+  });
+});
+
+// ── DDD Sprint 8 (corrected) — in-breed sycophancy ADVISORY ───────────────────
+// The forced Tripartite (three distinct providers, auto-switch the Skeptic) was
+// rejected; these pin the advisory-only replacement: a model-FAMILY heuristic
+// plus a pure overlap detector whose output moa.ts warns with (once) and
+// NEVER acts on.
+describe("modelFamily — vendor family heuristic (S8 advisory)", () => {
+  it("direct cloud providers ARE the family", async () => {
+    const { modelFamily } = await import("@/lib/agent/moa-personas");
+    expect(modelFamily({ provider: "anthropic" as const, model: "claude-opus-4-8" })).toBe("anthropic");
+    expect(modelFamily({ provider: "openai" as const, model: "gpt-4o" })).toBe("openai");
+    expect(modelFamily({ provider: "google" as const, model: "gemini-2.5-pro" })).toBe("google");
+  });
+
+  it("OpenRouter path-prefixed ids take the vendor prefix (provider alone would be wrong)", async () => {
+    const { modelFamily } = await import("@/lib/agent/moa-personas");
+    expect(modelFamily({ provider: "openrouter" as const, model: "deepseek/deepseek-v4-flash" })).toBe("deepseek");
+    expect(modelFamily({ provider: "openrouter" as const, model: "anthropic/claude-opus-4-8" })).toBe("anthropic");
+  });
+
+  it("local/self-hosted ids take the leading alpha run", async () => {
+    const { modelFamily } = await import("@/lib/agent/moa-personas");
+    expect(modelFamily({ provider: "ollama" as const, model: "qwen2.5:7b" })).toBe("qwen");
+    expect(modelFamily({ provider: "vllm" as const, model: "llama-3-8b-instruct" })).toBe("llama");
+  });
+
+  it("degrades to the provider (or 'unknown') when the model id has no usable shape", async () => {
+    const { modelFamily } = await import("@/lib/agent/moa-personas");
+    expect(modelFamily({ provider: "custom" as const, model: "123" })).toBe("custom");
+    expect(modelFamily({ provider: "" as unknown as import("@/lib/types").ModelConfig["provider"], model: "" })).toBe("unknown");
+  });
+});
+
+describe("detectSkepticFamilyOverlap — advisory text, never a gate", () => {
+  const or = (model: string) => ({ provider: "openrouter" as const, model });
+
+  it("all three on one family → strongest advisory naming the family", async () => {
+    const { detectSkepticFamilyOverlap } = await import("@/lib/agent/moa-personas");
+    const msg = detectSkepticFamilyOverlap({
+      skeptic: or("deepseek/deepseek-v4-flash"),
+      worker: or("deepseek/deepseek-chat"),
+      brain: or("deepseek/deepseek-v4-flash"),
+    });
+    expect(msg).toContain('"deepseek"');
+    expect(msg).toContain("Skeptic, workers AND orchestrator");
+    expect(msg).toContain("Advisory only");
+  });
+
+  it("skeptic matches only the workers → workers-specific advisory", async () => {
+    const { detectSkepticFamilyOverlap } = await import("@/lib/agent/moa-personas");
+    const msg = detectSkepticFamilyOverlap({
+      skeptic: or("qwen/qwen3-coder"),
+      worker: or("qwen/qwen-2.5-72b"),
+      brain: or("deepseek/deepseek-v4-flash"),
+    });
+    expect(msg).toContain("as the workers");
+  });
+
+  it("skeptic matches only the orchestrator → orchestrator-specific advisory", async () => {
+    const { detectSkepticFamilyOverlap } = await import("@/lib/agent/moa-personas");
+    const msg = detectSkepticFamilyOverlap({
+      skeptic: or("deepseek/deepseek-v4-flash"),
+      worker: or("qwen/qwen-2.5-72b"),
+      brain: or("deepseek/deepseek-chat"),
+    });
+    expect(msg).toContain("orchestrator/synthesizer");
+  });
+
+  it("three distinct families → null (no advisory)", async () => {
+    const { detectSkepticFamilyOverlap } = await import("@/lib/agent/moa-personas");
+    expect(
+      detectSkepticFamilyOverlap({
+        skeptic: { provider: "anthropic" as const, model: "claude-opus-4-8" },
+        worker: or("qwen/qwen-2.5-72b"),
+        brain: or("deepseek/deepseek-v4-flash"),
+      })
+    ).toBeNull();
+  });
+
+  it("cross-provider but SAME family is still flagged (openrouter anthropic/* vs direct anthropic)", async () => {
+    const { detectSkepticFamilyOverlap } = await import("@/lib/agent/moa-personas");
+    const msg = detectSkepticFamilyOverlap({
+      skeptic: or("anthropic/claude-opus-4-8"),
+      worker: or("qwen/qwen-2.5-72b"),
+      brain: { provider: "anthropic" as const, model: "claude-sonnet-5" },
+    });
+    expect(msg).toContain('"anthropic"');
   });
 });

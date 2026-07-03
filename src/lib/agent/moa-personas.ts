@@ -82,16 +82,13 @@ Respond directly to the user's request. Cut the fluff. Show the fastest working 
     id: "critic",
     role: "Adversarial Critic",
     color: "rose",
-    systemPrompt: `You are an Adversarial Critic and Red-Teamer. Your approach is deeply skeptical, paranoid, and detail-oriented.
-
-RULES:
-- Find every flaw, vulnerability, or edge case in the user's request or any solution it implies.
-- Highlight risks, hidden traps, security holes, scalability dangers, and assumptions that might be wrong.
-- Push back hard on premises that seem unfounded. Demand evidence.
-- If something is too good to be true, explain why it likely is.
-- Do NOT blindly trust 'search_web' summaries — they are a search engine's excerpt, not the source. When a claim matters, use the 'fetch_webpage' tool to read the actual page and verify it yourself.
-
-Respond directly to the user's request. Be relentlessly honest, even uncomfortable.`,
+    systemPrompt: `You are a relentless Adversarial Critic and Red-Teamer.
+RULE 1 (No Sycophancy): Do NOT praise the premise. Do NOT use polite fillers. Assume the proposed code/idea will break in production. Do not agree with the Coder simply because they provided a detailed answer.
+RULE 2 (Chain of Doubt): Reason through the CLAIM -> EXTRACT -> DOUBT framework — restate the key claim, extract the risky assumption, then construct a concrete scenario where the proposed architecture fails.
+RULE 3 (Second-Order Thinking): Do not focus purely on syntax. Analyze scaling, race conditions, memory leaks, and security vulnerabilities.
+RULE 4 (No fabrication): If the solution is genuinely robust, say so plainly and explain WHY it holds up. Do not invent edge cases just to be contrarian.
+RULE 5: Do NOT blindly trust 'search_web' summaries — use 'fetch_webpage' to verify.
+Write your critique as prose. Do NOT emit control tags like <doubt> or <approval> — nothing parses them, and they only pollute the downstream synthesis. Respond directly, relentlessly honest, even uncomfortable.`,
   },
   {
     id: "chameleon",
@@ -205,12 +202,102 @@ export function resolveProposerModelConfig(
   defaultWorkerConfig: ModelConfig,
   settings: AppSettings
 ): { config: ModelConfig; tier: ProposerTier } {
-  const tier =
-    proposer.modelTier ?? deriveTierFromRole(detectProposerRole(proposer));
+  const role = detectProposerRole(proposer);
+  const sandboxTier = settings.swarmSandbox?.[role];
+  const skepticTierOverride = role === "reviewer" ? settings.proposerTiers?.skepticTier : undefined;
+
+  let tier = sandboxTier ?? skepticTierOverride ?? proposer.modelTier ?? deriveTierFromRole(role);
+
+  // R5 — floor the Skeptic at "balanced". The DPG hints skeptics as "fast"
+  // (PM #48) and reviewer derives to "fast", so without this the anti-sycophancy
+  // audit runs on the cheapest model by default. Only bumps a would-be "fast"
+  // reviewer; explicit operator controls (swarmSandbox, skepticTier) and an
+  // explicit stronger persona modelTier already resolved above and are honored.
+  if (
+    role === "reviewer" &&
+    tier === "fast" &&
+    sandboxTier === undefined &&
+    skepticTierOverride === undefined
+  ) {
+    tier = "balanced";
+  }
+  
   const tiers = settings.proposerTiers;
   const tierConfig = tiers?.[tier];
   if (!tierConfig || !tierConfig.model) {
     return { config: defaultWorkerConfig, tier };
   }
   return { config: resolveWorkerKey(tierConfig, settings), tier };
+}
+
+/**
+ * DDD Sprint 8 (corrected) — model-FAMILY heuristic for the in-breed
+ * sycophancy advisory.
+ *
+ * The original Tripartite plan FORCED three distinct providers (orchestrator /
+ * workers / skeptic) and auto-switched the Skeptic to a third vendor. Rejected:
+ * it breaks single-provider setups (everything-via-OpenRouter — this operator's
+ * real config), breaks Privacy Mode (all-local = one "provider" by
+ * construction), and silently overrides operator model choice (the PM #22
+ * anti-pattern). The corrected design is ADVISORY ONLY: detect the overlap,
+ * warn once, change nothing.
+ *
+ * Comparing `provider` alone is wrong for exactly the setups that matter:
+ * on OpenRouter every model has provider "openrouter" while the underlying
+ * vendor differs (`deepseek/…` vs `anthropic/…`). So we derive a vendor FAMILY:
+ *   - direct cloud providers ARE the family (anthropic / openai / google);
+ *   - path-prefixed ids (OpenRouter) take the prefix: "deepseek/x" → "deepseek";
+ *   - local/self-hosted ids take the leading alpha run: "qwen2.5:7b" → "qwen".
+ * Heuristic by design — good enough for an advisory, never used to gate.
+ */
+const DIRECT_PROVIDER_FAMILIES: Record<string, string> = {
+  anthropic: "anthropic",
+  openai: "openai",
+  google: "google",
+};
+
+export function modelFamily(
+  config: Pick<ModelConfig, "provider" | "model">
+): string {
+  const provider = (config.provider ?? "").toLowerCase();
+  if (DIRECT_PROVIDER_FAMILIES[provider]) {
+    return DIRECT_PROVIDER_FAMILIES[provider];
+  }
+  const model = (config.model ?? "").toLowerCase().trim();
+  if (model.includes("/")) return model.split("/")[0];
+  const leadingAlpha = model.match(/^([a-z]+)/);
+  if (leadingAlpha) return leadingAlpha[1];
+  return provider || "unknown";
+}
+
+/**
+ * Returns a one-line in-breed sycophancy advisory when the Skeptic's model
+ * family overlaps the workers' and/or the orchestrator's, or null when the
+ * families are distinct. Pure — the caller decides where/whether to surface
+ * it (moa.ts warns once per process per combo).
+ */
+export function detectSkepticFamilyOverlap(params: {
+  skeptic: Pick<ModelConfig, "provider" | "model">;
+  worker: Pick<ModelConfig, "provider" | "model">;
+  brain: Pick<ModelConfig, "provider" | "model">;
+}): string | null {
+  const skeptic = modelFamily(params.skeptic);
+  const worker = modelFamily(params.worker);
+  const brain = modelFamily(params.brain);
+
+  const advice =
+    "In-breed sycophancy risk: an auditor from the same model family shares the blind spots " +
+    "of the code it audits. Consider pointing proposerTiers.skepticTier at a different-family model. " +
+    "Advisory only — nothing was changed.";
+
+  if (skeptic === worker && skeptic === brain) {
+    return `Skeptic, workers AND orchestrator all run on the "${skeptic}" model family. ${advice}`;
+  }
+  if (skeptic === worker) {
+    return `Skeptic runs on the same model family ("${skeptic}") as the workers whose drafts it audits. ${advice}`;
+  }
+  if (skeptic === brain) {
+    return `Skeptic runs on the same model family ("${skeptic}") as the orchestrator/synthesizer. ${advice}`;
+  }
+  return null;
 }

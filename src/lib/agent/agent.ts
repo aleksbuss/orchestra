@@ -206,10 +206,12 @@ async function runSubAgent(
 
   const baseTools = createAgentTools(parentContext, settings);
   let tools = baseTools;
+  let mcpDocs: string | undefined;
   if (parentContext.projectId) {
-    const mcp = await getProjectMcpTools(parentContext.projectId);
+    const mcp = await getProjectMcpTools(parentContext.projectId, role);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
+      mcpDocs = mcp.mcpSystemPrompt(4096); // Default to safe limit for sub-agents without contextWindow prop
     }
   }
 
@@ -218,7 +220,7 @@ async function runSubAgent(
   const readOnlyMatch = (key: string) =>
     key.includes("search") || key.includes("read") || key.includes("list") ||
     key.includes("view") || key.includes("blackboard") || key === "knowledge_query" ||
-    key === "memory_load" || key === "response";
+    key === "memory_load" || key === "response" || key === "call_mcp_tool" || key === "mcp_get_tool_schema";
 
   if (role === "researcher") {
     const filteredTools: Record<string, any> = {};
@@ -241,7 +243,8 @@ async function runSubAgent(
   // ------------------------------------
   tools = applyGlobalToolLoopGuard(tools, { chatId: parentContext.chatId, parentNodeId: nodeId });
 
-  const systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
+  let systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
+  if (mcpDocs) systemPrompt += mcpDocs;
   const promptText = extraContext 
     ? `Task:\n${taskDescription}\n\nContext/Constraints:\n${extraContext}` 
     : `Task:\n${taskDescription}`;
@@ -634,12 +637,14 @@ export async function runAgent(options: RunAgentOptions) {
   // Build tools: base + optional MCP tools from project .meta/mcp
   const baseTools = createAgentTools(context, settings);
   let mcpCleanup: (() => Promise<void>) | undefined;
+  let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
     const mcp = await getProjectMcpTools(options.projectId);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
+      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
     }
   }
   const orchestratorNodeId = options.chatId;
@@ -703,6 +708,8 @@ export async function runAgent(options: RunAgentOptions) {
     agentNumber: options.agentNumber,
     tools: toolNames,
   });
+
+  if (mcpDocs) systemPrompt += mcpDocs;
 
   // Phase 3: "Deep Memory" System Prompt Injection
   try {
@@ -1356,24 +1363,30 @@ export async function runAgentText(options: {
   }
 
   const baseTools = createAgentTools(context, settings);
+  const contextWindow = 4096; // Conservative default for dry run since model is unknown
+
   let mcpCleanup: (() => Promise<void>) | undefined;
+  let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
     const mcp = await getProjectMcpTools(options.projectId);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
+      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
     }
   }
   tools = applyGlobalToolLoopGuard(tools);
   const toolNames = Object.keys(tools);
 
-  const systemPrompt = await buildSystemPrompt({
+  let systemPrompt = await buildSystemPrompt({
     projectId: options.projectId,
     chatId: options.chatId,
     agentNumber: options.agentNumber,
     tools: toolNames,
   });
+
+  if (mcpDocs) systemPrompt += mcpDocs;
 
   const messages: ModelMessage[] = mergeConsecutiveSameRole([
     ...context.history,

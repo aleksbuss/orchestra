@@ -125,6 +125,19 @@ describe("PM #42 — selectProposerTools", () => {
     expect(tools).toBeUndefined();
   });
 
+  it("toolCallSupported=false → NO tools regardless of role/search (PM #17 wire)", () => {
+    // A model that can't tool-call (NO_TOOL_PATTERNS) must not get tools
+    // forwarded — else the call 404s and wastes the first attempt. Downstream,
+    // augmentProposerPromptForTools(undefined) appends the no-tools directive.
+    const rolesThatNormallyGetTools = ["reviewer", "researcher"] as const;
+    for (const role of rolesThatNormallyGetTools) {
+      expect(selectProposerTools(role, true, enabledSearch)).toBeDefined();
+      expect(
+        selectProposerTools(role, true, enabledSearch, undefined, false)
+      ).toBeUndefined();
+    }
+  });
+
   it("search disabled: reviewer/researcher KEEP fetch_webpage (no key needed); coder/tool get nothing", () => {
     // PM #73 — fetch_webpage is keyless, so verification roles retain it even
     // with no search provider; they just lack search_web.

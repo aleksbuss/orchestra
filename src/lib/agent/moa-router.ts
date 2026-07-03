@@ -52,7 +52,8 @@ export async function generateDynamicSwarm(
   // trace memory is disabled or no relevant traces found. Appended
   // after the INSTRUCTIONS list so it biases persona generation
   // without interfering with the structured-output schema.
-  fewShotsBlock: string = ""
+  fewShotsBlock: string = "",
+  maxSwarmSize: number = 5
 ): Promise<DPGResult> {
   try {
     // Format the last 5 messages for context — content can be string or array (tool-calls)
@@ -87,7 +88,7 @@ export async function generateDynamicSwarm(
           systemPrompt: z.string().describe("The specific system prompt Rules and Guidelines for this expert. MUST follow structure: [GOAL] ... [RULES] ... [FORMAT]"),
           color: z.enum(["slate", "gray", "zinc", "neutral", "stone", "red", "orange", "amber", "yellow", "lime", "green", "emerald", "teal", "cyan", "sky", "blue", "indigo", "violet", "purple", "fuchsia", "pink", "rose"]).describe("A distinct tailwind color for UI representation"),
           modelTier: z.enum(["fast", "balanced", "frontier"]).optional().describe("PM #48 — suggested model tier. 'fast' for skeptic/critic/QA personas (cheap, just evaluates). 'balanced' for analyst/researcher (mid quality). 'frontier' for coder/architect/synthesis-heavy personas (best quality). Omit to let Orchestra derive from the role automatically.")
-        })).min(3).max(5).describe("List of exactly 3 to 5 highly specialized experts required to answer the user request. Only used if requiresSwarm is true.")
+        })).min(3).max(maxSwarmSize).describe(`List of exactly 3 to ${maxSwarmSize} highly specialized experts required to answer the user request. Only used if requiresSwarm is true.`)
       }),
       prompt: `You are the Orchestra Auto-Swarm Router.
 The user has submitted a request. Your job is to determine if a "Dream Team" of experts is needed.
@@ -101,12 +102,12 @@ ${userMessage.slice(0, 2000)}
 INSTRUCTIONS:
 1. If the request is trivial, conversational, or a simple code edit, set requiresSwarm to false.
 2. If the request requires multi-faceted analysis, deep architecture, creative brainstorming, or complex problem solving, set requiresSwarm to true.
-3. If true, assemble 3 to 5 hyper-specialized domain experts. Do NOT use generic roles.
+3. If true, assemble 3 to ${maxSwarmSize} hyper-specialized domain experts. Do NOT use generic roles.
 4. For each expert, provide a highly specific systemPrompt using this exact structure:
    [GOAL] What they are trying to achieve from their narrow perspective.
    [RULES] 2-3 strict guidelines they must follow (e.g., "Always hunt for edge cases", "Never propose complex solutions").
    [FORMAT] How they should format their answer.
-5. VERY IMPORTANT: One of your 3-5 experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail. When a factual claim looks doubtful — or comes only from a search summary — their [RULES] MUST instruct them to call the \`fetch_webpage\` tool to read the RAW source page and verify it directly. A \`search_web\` snippet is a lead, NOT proof.
+5. VERY IMPORTANT: One of your 3 to ${maxSwarmSize} experts MUST ALWAYS be a "QA Auditor / Fact-Checker" (e.g., \`skeptic_auditor\`). Their [GOAL] is to doubt the user's premise, search for potential pitfalls, verify library compatibilities via \`search_web\` (if available), and actively try to find edge cases where the proposed solution would fail. When a factual claim looks doubtful — or comes only from a search summary — their [RULES] MUST instruct them to call the \`fetch_webpage\` tool to read the RAW source page and verify it directly. A \`search_web\` snippet is a lead, NOT proof.
 6. (PM #48 — model tier hint): for each expert, set \`modelTier\` to "fast" / "balanced" / "frontier":
    - "fast" for QA / Skeptic / Critic / Reviewer personas — they evaluate, not synthesize. Cheap reliable models are enough.
    - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
@@ -141,11 +142,11 @@ INSTRUCTIONS:
         `[MoA] DPG output missing a Skeptic persona — force-injecting canonical 'critic' (PM #37). Roles received: ${object.personas.map((p) => p.id).join(", ")}`
       );
       const canonicalCritic = MOA_PROPOSERS.find((p) => p.id === "critic")!;
-      // Cap at 5 personas total to keep the cost envelope predictable.
-      // If the LLM already returned 5, evict the LAST one (heuristic:
+      // Cap at maxSwarmSize personas total to keep the cost envelope predictable.
+      // If the LLM already returned maxSwarmSize, evict the LAST one (heuristic:
       // the LLM's tail picks are usually the weakest).
       personas = [...object.personas];
-      if (personas.length >= 5) personas.pop();
+      if (personas.length >= maxSwarmSize) personas.pop();
       personas.push({
         id: canonicalCritic.id,
         role: canonicalCritic.role,
@@ -160,9 +161,17 @@ INSTRUCTIONS:
     };
   } catch (err) {
     console.error("[MoA] Dynamic Persona Generation failed. Falling back to universal presets.", err);
+    
+    let fallbackPersonas = MOA_PROPOSERS.slice(0, maxSwarmSize);
+    const hasSkepticFallback = fallbackPersonas.some((p) => detectProposerRole(p) === "reviewer");
+    if (!hasSkepticFallback) {
+      fallbackPersonas.pop();
+      fallbackPersonas.push(MOA_PROPOSERS.find((p) => p.id === "critic")!);
+    }
+    
     return {
       requiresSwarm: true,
-      personas: MOA_PROPOSERS,
+      personas: fallbackPersonas,
       // Usage is unknown when the Router crashes; the chat banner just
       // misses the Router's tokens for this turn (a small undercount).
     };

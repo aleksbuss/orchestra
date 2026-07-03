@@ -19,6 +19,32 @@ import type { McpServerConfig } from "@/lib/types";
 // inside the function) when the URL fails the SSRF guard, so we don't need
 // the @modelcontextprotocol/sdk transport to actually connect — the guard
 // fires before the transport constructor is reached.
+// Mock the SDK Client + transports so the connect-timeout tests neither spawn a
+// real `npx` child (stdio) nor open a socket (http). The SSRF describe is
+// unaffected: it uses bad HTTP URLs that make createTransport throw in
+// assertSafeOutboundUrl BEFORE any transport constructor runs.
+const mcpMock = vi.hoisted(() => ({
+  connectImpl: () => Promise.resolve(),
+  transportClose: vi.fn(() => Promise.resolve()),
+}));
+vi.mock("@modelcontextprotocol/sdk/client", () => ({
+  Client: class {
+    connect() {
+      return mcpMock.connectImpl();
+    }
+  },
+}));
+vi.mock("@modelcontextprotocol/sdk/client/stdio", () => ({
+  StdioClientTransport: class {
+    close = mcpMock.transportClose;
+  },
+}));
+vi.mock("@modelcontextprotocol/sdk/client/streamableHttp", () => ({
+  StreamableHTTPClientTransport: class {
+    close = mcpMock.transportClose;
+  },
+}));
+
 import { connectMcpServer, isMcpToolReadOnly, buildMcpToolDocsBlock } from "./client";
 
 describe("buildMcpToolDocsBlock — MCP tool docs injected into the system prompt", () => {
@@ -235,5 +261,49 @@ describe("PM #27 — UNTRUSTED markers in MCP output", () => {
     const injectIdx = out.indexOf(inject);
     expect(injectIdx).toBeGreaterThan(openIdx);
     expect(injectIdx).toBeLessThan(closeIdx);
+  });
+});
+
+describe("connectMcpServer — connect timeout bounds a hanging MCP handshake", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mcpMock.connectImpl = () => Promise.resolve();
+    mcpMock.transportClose.mockClear();
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("resolves the connection when the handshake completes in time", async () => {
+    mcpMock.connectImpl = () => Promise.resolve();
+    const conn = await connectMcpServer({
+      id: "ok",
+      transport: "stdio",
+      command: "npx",
+      args: [],
+    });
+    expect(conn).not.toBeNull();
+    expect(conn?.serverId).toBe("ok");
+  });
+
+  it("returns null (and closes the transport, no leaked child) when connect never completes", async () => {
+    vi.useFakeTimers();
+    // A stdio server that started but never finishes the MCP initialize
+    // handshake — the exact live failure (project MCP server with a blank key).
+    mcpMock.connectImpl = () => new Promise<void>(() => {});
+    const p = connectMcpServer({
+      id: "hang",
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "firecrawl-mcp"],
+    });
+    // Advance past CONNECT_TIMEOUT_MS (15s); the async variant flushes the
+    // microtasks so the Promise.race rejection → catch → close chain settles.
+    await vi.advanceTimersByTimeAsync(15_001);
+    const conn = await p;
+    expect(conn).toBeNull();
+    expect(mcpMock.transportClose).toHaveBeenCalled();
   });
 });

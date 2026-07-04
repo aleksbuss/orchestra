@@ -132,6 +132,16 @@ export interface AppSettings {
     balanced?: ModelConfig;
     /** Default for coder / architect / synthesizer personas. Highest quality. */
     frontier?: ModelConfig;
+    /**
+     * Direct Skeptic model (DDD "operator owns the Skeptic"). When set
+     * (non-empty `model`), BOTH skeptic surfaces — the DPG reviewer
+     * proposer AND the reflection critic (`reflectOnResponse`) — run on
+     * exactly this config. Beats `skepticTier`, `swarmSandbox.reviewer`,
+     * the persona's `modelTier`, and role derivation. The reflection
+     * REVISOR stays on the brain model (it writes; only the judge is a
+     * skeptic). API key inherits via `resolveWorkerKey` when omitted.
+     */
+    skeptic?: ModelConfig;
     /** Deep Audit mode override for the Skeptic. Defaults to fast if undefined. */
     skepticTier?: "fast" | "balanced" | "frontier";
   };

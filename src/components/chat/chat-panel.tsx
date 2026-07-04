@@ -223,8 +223,8 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 export function ChatPanel() {
-  const { activeChatId, setActiveChatId, activeProjectId, currentPath, setCurrentPath, setActiveProjectId, setProjects, addChat, swarmEnabled, daemonMode, forceSwarm, activePreset } = useAppStore(
-    useShallow((s) => ({ activeChatId: s.activeChatId, setActiveChatId: s.setActiveChatId, activeProjectId: s.activeProjectId, currentPath: s.currentPath, setCurrentPath: s.setCurrentPath, setActiveProjectId: s.setActiveProjectId, setProjects: s.setProjects, addChat: s.addChat, swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, activePreset: s.activePreset }))
+  const { activeChatId, setActiveChatId, activeProjectId, currentPath, setCurrentPath, setActiveProjectId, setProjects, addChat, swarmEnabled, daemonMode, forceSwarm, skepticModelOverride, deepAudit, activePreset } = useAppStore(
+    useShallow((s) => ({ activeChatId: s.activeChatId, setActiveChatId: s.setActiveChatId, activeProjectId: s.activeProjectId, currentPath: s.currentPath, setCurrentPath: s.setCurrentPath, setActiveProjectId: s.setActiveProjectId, setProjects: s.setProjects, addChat: s.addChat, swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, skepticModelOverride: s.skepticModelOverride, deepAudit: s.deepAudit, activePreset: s.activePreset }))
   );
   
   // Internal chatId that stays stable during a message send.
@@ -294,6 +294,12 @@ export function ChatPanel() {
   const forceSwarmRef = useRef(forceSwarm);
   forceSwarmRef.current = forceSwarm;
 
+  const skepticModelOverrideRef = useRef(skepticModelOverride);
+  skepticModelOverrideRef.current = skepticModelOverride;
+
+  const deepAuditRef = useRef(deepAudit);
+  deepAuditRef.current = deepAudit;
+
   const daemonModeRef = useRef(daemonMode);
   daemonModeRef.current = daemonMode;
 
@@ -327,6 +333,8 @@ export function ChatPanel() {
           currentPath: currentPathRef.current,
           swarmEnabled: swarmEnabledRef.current,
           forceSwarm: forceSwarmRef.current,
+          skepticModelOverride: skepticModelOverrideRef.current,
+          deepAudit: deepAuditRef.current,
           background: daemonModeRef.current,
           preset: activePresetRef.current,
         }),
@@ -591,6 +599,8 @@ export function ChatPanel() {
             currentPath: currentPathRef.current,
             swarmEnabled: swarmEnabledRef.current,
             forceSwarm: forceSwarmRef.current,
+            skepticModelOverride: skepticModelOverrideRef.current,
+            deepAudit: deepAuditRef.current,
             // Carry the active preset through to background mode too. Without
             // this, the daemon dispatcher uses settings.chatModel directly,
             // ignoring whatever preset the user had pinned in the UI when

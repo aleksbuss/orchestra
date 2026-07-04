@@ -27,7 +27,6 @@ import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
-import { resolveContextWindow } from "@/lib/providers/context-window";
 import type { AppSettings } from "@/lib/types";
 import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
 import { agentSemaphore } from "./semaphore";
@@ -52,26 +51,27 @@ export {
   type ProposerTier,
   type MoAProposer,
   type ProposerRole,
+  type SkepticModelOverride,
   MOA_PROPOSERS,
   deriveTierFromRole,
   detectProposerRole,
   resolveWorkerKey,
   resolveProposerModelConfig,
+  resolveSkepticModelConfig,
+  isValidSkepticOverride,
   modelFamily,
   detectSkepticFamilyOverlap,
 } from "@/lib/agent/moa-personas";
 
 import {
   detectProposerRole,
-  detectSkepticFamilyOverlap,
   resolveProposerModelConfig,
+  resolveSkepticModelConfig,
   resolveWorkerKey,
+  warnSkepticFamilyOverlapOnce, type SkepticModelOverride,
 } from "@/lib/agent/moa-personas";
-
-// DDD Sprint 8 (corrected) — dedup for the in-breed sycophancy advisory:
-// warn once per process per (skeptic, worker, brain) model combo, not on
-// every swarm run. Bounded by construction (distinct combos are few).
-const warnedSkepticFamilyCombos = new Set<string>();
+export { createWindowResolver } from "@/lib/agent/moa-window";
+import { createWindowResolver } from "@/lib/agent/moa-window";
 
 
 // ── Dynamic Persona Generation (DPG) ────────────────────────────────────
@@ -229,6 +229,10 @@ export interface MoAOptions {
    * prompt as trivial. Wired through from the UI's "Force Swarm" toggle.
    */
   forceSwarm?: boolean;
+  /** DDD — per-request Skeptic override; see `resolveSkepticModelConfig`. */
+  skepticModelOverride?: SkepticModelOverride | null;
+  /** DDD — per-request Deep Audit (reflection) toggle; overrides settings. */
+  deepAudit?: boolean;
 }
 
 export interface MoAResult {
@@ -286,33 +290,13 @@ export interface MoAResult {
 }
 
 // PM #57 — `resolveWorkerKey` moved to moa-personas.ts (imported at top).
+// §8 offset — `createWindowResolver` moved to moa-window.ts (re-exported above).
 
 /**
  * Execute the full Mixture-of-Agents pipeline:
  *   1. Fan-out: Run N proposers in parallel
  *   2. Fan-in:  Aggregate results with a brain model
  */
-/**
- * Build a context-window resolver memoized for a single ensemble run (audit fix
- * #4). Keyed by provider|model|baseUrl; stores the in-flight PROMISE so that
- * concurrent proposers sharing a config await ONE probe instead of racing N.
- */
-export function createWindowResolver(
-  abortSignal?: AbortSignal
-): (config: { provider: string; model?: string; baseUrl?: string }) => Promise<number> {
-  const cache = new Map<string, Promise<number>>();
-  return (config) => {
-    const key = `${config.provider}|${config.model ?? ""}|${
-      (config as { baseUrl?: string }).baseUrl ?? ""
-    }`;
-    let p = cache.get(key);
-    if (!p) {
-      p = resolveContextWindow(config, { abortSignal });
-      cache.set(key, p);
-    }
-    return p;
-  };
-}
 
 export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const totalStart = Date.now();
@@ -326,7 +310,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     settings,
     abortSignal,
     forceSwarm,
+    skepticModelOverride,
+    deepAudit,
   } = options;
+
+  // DDD — the operator's Skeptic model, resolved ONCE; feeds both surfaces.
+  const skepticConfig = resolveSkepticModelConfig(settings, skepticModelOverride);
+  // A8 — request-aware reflection: the Deep Audit toggle overrides the settings
+  // default (kept OFF so inline-collapse survives normal turns). Feeds BOTH the
+  // collapse gate and the reflection block below.
+  const reflectionEnabled = deepAudit ?? settings.reflection?.enabled ?? false;
 
   // Audit fix #4 — memoize context-window resolution for THIS ensemble run.
   // resolveContextWindow probes live Ollama (/api/ps) per call; without this,
@@ -546,7 +539,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       // outside the try/catch so the error branch can attribute its (zero)
       // usage to the same provider/model that would have run.
       const { config: proposerConfig, tier: proposerTier } =
-        resolveProposerModelConfig(proposer, workerConfig, settings);
+        resolveProposerModelConfig(proposer, workerConfig, settings, skepticConfig);
       const resolvedProvider = proposerConfig.provider;
       const resolvedModel = proposerConfig.model;
 
@@ -555,28 +548,15 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       // detectProposerRole is pure (no I/O, no throw).
       const standardRole = detectProposerRole(proposer);
 
-      // DDD Sprint 8 (corrected) — in-breed sycophancy ADVISORY. The original
-      // Tripartite plan force-switched the Skeptic to a third provider; that
-      // was rejected (breaks single-provider/OpenRouter/Privacy-Mode setups and
-      // silently overrides operator choice — the PM #22 anti-pattern). We only
-      // WARN, once per process per model combo, and change nothing.
+      // DDD Sprint 8 (corrected) — in-breed sycophancy ADVISORY, warn-once
+      // per process per combo. Advisory only — never switches models (the
+      // forced Tripartite variant was rejected; see moa-personas.ts docs).
       if (standardRole === "reviewer") {
-        const overlap = detectSkepticFamilyOverlap({
+        warnSkepticFamilyOverlapOnce({
           skeptic: proposerConfig,
           worker: workerConfig,
           brain: settings.chatModel,
         });
-        if (overlap) {
-          const comboKey = [
-            `${proposerConfig.provider}/${proposerConfig.model}`,
-            `${workerConfig.provider}/${workerConfig.model}`,
-            `${settings.chatModel.provider}/${settings.chatModel.model}`,
-          ].join("|");
-          if (!warnedSkepticFamilyCombos.has(comboKey)) {
-            warnedSkepticFamilyCombos.add(comboKey);
-            console.warn(`[MoA] S8 advisory — ${overlap}`);
-          }
-        }
       }
 
       try {
@@ -721,7 +701,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         const text = result.text?.trim() || "(empty draft)";
         const latencyMs = Date.now() - pStart;
 
-        console.log(`[MoA] Proposer "${proposer.id}" completed in ${latencyMs}ms (${text.length} chars)`);
+        console.log(`[MoA] Proposer "${proposer.id}" (role=${standardRole}, model=${resolvedProvider}/${resolvedModel}) completed in ${latencyMs}ms (${text.length} chars)`);
 
         // Publish UI: proposer completed
         publishUiSyncEvent({
@@ -756,9 +736,12 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         let latencyMs = Date.now() - pStart;
         let errMsg = err instanceof Error ? err.message : String(err);
         
-        // Sprint 6 (Resilience/Failover): Intercept reviewer failures
+        // Sprint 6 failover — A6: the substitution must be LOUD (with a
+        // direct operator Skeptic the retry is off the operator's choice).
         if (standardRole === "reviewer") {
-          console.warn(`[MoA] Critic "${proposer.id}" failed (${errMsg})! Activating fallback model...`);
+          console.warn(
+            `[MoA] Skeptic failover: "${proposer.id}" on ${resolvedProvider}/${resolvedModel} failed (${errMsg}) → falling back to ${workerConfig.provider}/${workerConfig.model}${skepticConfig ? " (operator Skeptic model NOT honored for this retry)" : ""}`
+          );
           publishUiSyncEvent({
             topic: "chat",
             chatId,
@@ -808,7 +791,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             const text = result.text?.trim() || "(empty draft)";
             latencyMs = Date.now() - pStart;
 
-            console.log(`[MoA] Proposer "${proposer.id}" FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);
+            console.log(`[MoA] Proposer "${proposer.id}" (role=${standardRole}, model=${workerConfig.provider}/${workerConfig.model}) FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);
 
             publishUiSyncEvent({
               topic: "chat",
@@ -1017,7 +1000,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   if (
     settings.aggregator?.inlineSynthesis === true &&
     aggregatorMode === "synthesis" &&
-    !settings.reflection?.enabled &&
+    !reflectionEnabled &&
     successfulDrafts.length >= 2
   ) {
     const totalLatencyMs = Date.now() - totalStart;
@@ -1256,11 +1239,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     // `ddd_reflection_outcome` log event can classify the run.
     let reflectionCannotFix = false;
     let reflectionConverged = false;
-    if (settings.reflection?.enabled) {
+    if (reflectionEnabled) {
       const ABSOLUTE_MAX_REFLECTION_ROUNDS = 3;
+      // A8 — read defensively: `settings.reflection` may be undefined when
+      // reflection is on via the Deep Audit toggle alone.
       const requestedMaxRounds = Math.max(
         1,
-        Math.floor(settings.reflection.maxRounds ?? 1)
+        Math.floor(settings.reflection?.maxRounds ?? 1)
       );
       const effectiveMaxRounds = Math.min(
         requestedMaxRounds,
@@ -1274,7 +1259,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       }
       const convergenceThreshold = Math.min(
         1,
-        Math.max(0, settings.reflection.convergenceThreshold ?? 0.97)
+        Math.max(0, settings.reflection?.convergenceThreshold ?? 0.97)
       );
 
       try {
@@ -1282,13 +1267,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         let round = 0;
         while (round < effectiveMaxRounds) {
           round += 1;
-          // Pass brainConfig so the critic runs on the frontier model for the
-          // Deep Audit, not the cheap utilityModel.
+          // DDD surface 2 — critic = Skeptic: operator's model wins, else brain
+          // (the revisor below stays on brain — it writes, only the judge audits).
           const reflection = await reflectOnResponse({
             userMessage,
             agentResponse: finalText,
             settings,
-            modelOverride: brainConfig,
+            modelOverride: skepticConfig ?? brainConfig,
             projectId,
             chatId,
             abortSignal,

@@ -217,6 +217,49 @@ describe("PM #7 — production setTimeout path (integration; Defect #6 from 2026
     abortJob(chatId);
   });
 
+  it("PM #22 / audit A9 — skepticModelOverride + deepAudit reach runAgent AND the persisted queue entry", async () => {
+    // Same class as forceSwarm: a per-request override that an internal
+    // optimisation can short-circuit MUST thread through the background
+    // dispatch (`runAgent({ ...options })`) AND queue persistence
+    // (`enqueueJob(options)`) so an Auto-Pilot / restart doesn't silently
+    // drop the operator's Skeptic choice.
+    const chatId = "a9-skeptic-override-background";
+
+    vi.mocked(runAgent).mockResolvedValue({
+      text: Promise.resolve("done"),
+    } as unknown as Awaited<ReturnType<typeof runAgent>>);
+    vi.mocked(getActiveGoal).mockResolvedValue(null);
+
+    await dispatchAgentJob({
+      chatId,
+      userMessage: "hello",
+      swarmEnabled: true,
+      skepticModelOverride: { provider: "anthropic", model: "claude-haiku-4-5" },
+      deepAudit: true,
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(runAgent).toHaveBeenCalledWith(
+          expect.objectContaining({
+            skepticModelOverride: { provider: "anthropic", model: "claude-haiku-4-5" },
+            deepAudit: true,
+          })
+        );
+      },
+      { timeout: 1000, interval: 10 }
+    );
+
+    expect(enqueueJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skepticModelOverride: { provider: "anthropic", model: "claude-haiku-4-5" },
+        deepAudit: true,
+      })
+    );
+
+    abortJob(chatId);
+  });
+
   it("an auto-pilot continuation dispatch INCREMENTS the counter (does not reset to 1)", async () => {
     // review bug_001: abortJob unconditionally wiped autoPilotIterations, and
     // dispatchAgentJob calls abortJob first — so the continuation path cycled

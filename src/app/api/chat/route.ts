@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { runAgent } from "@/lib/agent/agent";
+import { isValidSkepticOverride, type SkepticModelOverride } from "@/lib/agent/moa";
 import { createChat, getChat, saveChat } from "@/lib/storage/chat-store";
 import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
@@ -28,6 +29,31 @@ export async function POST(req: NextRequest) {
       const { chatId, projectId, currentPath, background, swarmEnabled, forceSwarm } = body;
       const preset: PresetTier | undefined = body.preset;
       let message: string | undefined = body.message;
+
+      // DDD (audit A4/A11) — the per-request Skeptic override is the FIRST path
+      // that lets a request BODY define a model config. Validate it to the
+      // {provider, model} shape at the boundary: reject a smuggled apiKey /
+      // baseUrl (key-injection / SSRF) or an unknown provider with a 400 —
+      // never let a garbage config reach `createModel` mid-swarm.
+      let skepticModelOverride: SkepticModelOverride | null = null;
+      if (body.skepticModelOverride != null) {
+        if (!isValidSkepticOverride(body.skepticModelOverride)) {
+          return Response.json(
+            {
+              error:
+                "invalid skepticModelOverride — expected exactly { provider, model } " +
+                "with a known provider; apiKey/baseUrl/extra fields are not accepted",
+            },
+            { status: 400 }
+          );
+        }
+        skepticModelOverride = {
+          provider: body.skepticModelOverride.provider,
+          model: body.skepticModelOverride.model,
+        };
+      }
+      const deepAudit: boolean | undefined =
+        typeof body.deepAudit === "boolean" ? body.deepAudit : undefined;
 
       // Support AI SDK's DefaultChatTransport format which sends a `messages` array
       if (!message && Array.isArray(body.messages)) {
@@ -140,6 +166,8 @@ export async function POST(req: NextRequest) {
           // with Force ON who flipped to Auto-Pilot lost their override the
           // moment the Router decided `requiresSwarm: false`.
           forceSwarm: forceSwarm === true,
+          skepticModelOverride,
+          deepAudit,
           preset,
         });
 
@@ -162,6 +190,8 @@ export async function POST(req: NextRequest) {
         currentPath: typeof currentPath === "string" ? currentPath : undefined,
         swarmEnabled: swarmEnabled ?? true,
         forceSwarm: forceSwarm === true,
+        skepticModelOverride,
+        deepAudit,
         preset,
         abortSignal: req.signal,
       });

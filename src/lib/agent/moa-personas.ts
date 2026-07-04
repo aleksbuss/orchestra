@@ -6,7 +6,8 @@
  * proposer constant, role detection, tier derivation, API-key
  * inheritance, and the per-proposer model resolution. No I/O, no
  * LLM calls — every function in this file is synchronous and testable
- * without mocks.
+ * without mocks. (Single deliberate exception: the once-per-process
+ * S8 advisory `console.warn` in `warnSkepticFamilyOverlapOnce`.)
  *
  * Re-exported from `./moa` (no breaking changes for callers or tests).
  */
@@ -185,9 +186,90 @@ export function resolveWorkerKey(
 }
 
 /**
+ * DDD "operator owns the Skeptic" — the wire shape of a per-request
+ * Skeptic override. DELIBERATELY only `provider` + `model`: the request
+ * body must never carry an `apiKey` (key-injection) or `baseUrl` (SSRF —
+ * `createModel` does not run `assertSafeOutboundUrl`). Keys resolve
+ * server-side via `resolveWorkerKey`.
+ */
+export type SkepticModelOverride = Pick<ModelConfig, "provider" | "model">;
+
+/** Providers a per-request Skeptic override may name. Mirrors the ModelConfig
+ * provider union; validated at the API boundary so a garbage payload is a 400,
+ * not a mid-swarm `createModel` throw. */
+const KNOWN_PROVIDERS: ReadonlySet<string> = new Set([
+  "openai",
+  "anthropic",
+  "google",
+  "openrouter",
+  "ollama",
+  "sglang",
+  "vllm",
+  "custom",
+  "mock",
+]);
+
+/**
+ * Boundary validator for a per-request Skeptic override. Accepts ONLY the
+ * two-field shape with a known provider and a non-empty model; anything
+ * else (extra keys like apiKey/baseUrl, unknown provider, empty model)
+ * is rejected so the route can 400 instead of letting a hostile/buggy
+ * client shape reach `createModel`.
+ */
+export function isValidSkepticOverride(
+  value: unknown
+): value is SkepticModelOverride {
+  if (typeof value !== "object" || value === null) return false;
+  const keys = Object.keys(value as Record<string, unknown>);
+  if (keys.length !== 2 || !keys.includes("provider") || !keys.includes("model")) {
+    return false;
+  }
+  const { provider, model } = value as Record<string, unknown>;
+  return (
+    typeof provider === "string" &&
+    KNOWN_PROVIDERS.has(provider) &&
+    typeof model === "string" &&
+    model.trim().length > 0
+  );
+}
+
+/**
+ * DDD — resolve the operator's Skeptic model, if any. Single source of
+ * truth (PM #17 posture) consumed by BOTH skeptic surfaces:
+ *   - the DPG reviewer proposer (`resolveProposerModelConfig` below), and
+ *   - the reflection critic (`moa.ts` → `reflectOnResponse.modelOverride`).
+ *
+ * Precedence: per-request override (panel) > `proposerTiers.skeptic`
+ * (settings) > undefined (callers keep their pre-existing behavior).
+ * Keys inherit server-side via `resolveWorkerKey`; a per-request override
+ * carries provider+model ONLY (see `SkepticModelOverride`).
+ */
+export function resolveSkepticModelConfig(
+  settings: AppSettings,
+  perRequestOverride?: SkepticModelOverride | null
+): ModelConfig | undefined {
+  if (perRequestOverride && isValidSkepticOverride(perRequestOverride)) {
+    return resolveWorkerKey(
+      { provider: perRequestOverride.provider, model: perRequestOverride.model },
+      settings
+    );
+  }
+  const direct = settings.proposerTiers?.skeptic;
+  if (direct?.model && direct.model.trim().length > 0) {
+    return resolveWorkerKey(direct, settings);
+  }
+  return undefined;
+}
+
+/**
  * PM #48 — resolve a proposer's actual ModelConfig from settings + tier.
  *
  * Priority order:
+ *   0. DDD — for reviewer/Skeptic personas, a resolved direct Skeptic
+ *      config (per-request override or `proposerTiers.skeptic`) wins
+ *      outright. DELIBERATE (audit A10): the direct-model knob beats the
+ *      role→tier knob (`swarmSandbox.reviewer`) — both are operator
+ *      intent; most-specific wins. The settings UI warns when both are set.
  *   1. If `settings.proposerTiers[picked]` has a configured model →
  *      use it (with API-key inheritance via `resolveWorkerKey`).
  *   2. Otherwise fall back to `defaultWorkerConfig` (the pre-PM-48
@@ -200,9 +282,19 @@ export function resolveWorkerKey(
 export function resolveProposerModelConfig(
   proposer: MoAProposer,
   defaultWorkerConfig: ModelConfig,
-  settings: AppSettings
+  settings: AppSettings,
+  resolvedSkepticConfig?: ModelConfig
 ): { config: ModelConfig; tier: ProposerTier } {
   const role = detectProposerRole(proposer);
+
+  // DDD surface 1 — the operator's direct Skeptic model. Resolved ONCE by
+  // the caller (`resolveSkepticModelConfig`) and passed in to avoid
+  // re-resolving per proposer. Tier label reflects the strongest slot so
+  // downstream logging/telemetry stays meaningful.
+  if (role === "reviewer" && resolvedSkepticConfig?.model) {
+    return { config: resolvedSkepticConfig, tier: "frontier" };
+  }
+
   const sandboxTier = settings.swarmSandbox?.[role];
   const skepticTierOverride = role === "reviewer" ? settings.proposerTiers?.skepticTier : undefined;
 
@@ -300,4 +392,40 @@ export function detectSkepticFamilyOverlap(params: {
     return `Skeptic runs on the same model family ("${skeptic}") as the orchestrator/synthesizer. ${advice}`;
   }
   return null;
+}
+
+// DDD Sprint 8 (corrected) — dedup for the in-breed sycophancy advisory:
+// warn once per process per (skeptic, worker, brain) model combo, not on
+// every swarm run. Bounded by construction (distinct combos are few).
+// Extracted here from moa.ts (§8 zero-net-growth offset).
+const warnedSkepticFamilyCombos = new Set<string>();
+
+/** Test-only: reset the once-per-process S8 dedup between test cases. */
+export function resetSkepticFamilyWarnDedup(): void {
+  warnedSkepticFamilyCombos.clear();
+}
+
+/**
+ * S8 advisory, warn-once wrapper. Detects skeptic/worker/brain family
+ * overlap and `console.warn`s ONCE per process per model combo. Changes
+ * nothing — advisory only (the forced Tripartite switch was rejected;
+ * see `detectSkepticFamilyOverlap` docs). Returns the advisory string
+ * when one was emitted (new combo), else null.
+ */
+export function warnSkepticFamilyOverlapOnce(params: {
+  skeptic: Pick<ModelConfig, "provider" | "model">;
+  worker: Pick<ModelConfig, "provider" | "model">;
+  brain: Pick<ModelConfig, "provider" | "model">;
+}): string | null {
+  const overlap = detectSkepticFamilyOverlap(params);
+  if (!overlap) return null;
+  const comboKey = [
+    `${params.skeptic.provider}/${params.skeptic.model}`,
+    `${params.worker.provider}/${params.worker.model}`,
+    `${params.brain.provider}/${params.brain.model}`,
+  ].join("|");
+  if (warnedSkepticFamilyCombos.has(comboKey)) return null;
+  warnedSkepticFamilyCombos.add(comboKey);
+  console.warn(`[MoA] S8 advisory — ${overlap}`);
+  return overlap;
 }

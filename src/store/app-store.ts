@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { ChatListItem, Project } from "@/lib/types";
 import type { PresetTier } from "@/lib/agent/presets";
+import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
 
 interface AppState {
   // Chats
@@ -40,6 +41,22 @@ interface AppState {
   setSwarmEnabled: (enabled: boolean) => void;
   setDaemonMode: (enabled: boolean) => void;
   setForceSwarm: (enabled: boolean) => void;
+  /**
+   * DDD — per-request Skeptic model override picked in the swarm panel.
+   * `null` = inherit the Settings default (`proposerTiers.skeptic`). Global
+   * sticky panel state (like `forceSwarm`): applies to every subsequent turn
+   * until changed, persisted across reloads. `{provider, model}` ONLY — the
+   * server re-validates and resolves the key (never carries apiKey/baseUrl).
+   */
+  skepticModelOverride: SkepticModelOverride | null;
+  setSkepticModelOverride: (override: SkepticModelOverride | null) => void;
+  /**
+   * DDD — per-request "Deep Audit" (reflection) toggle. When true, the swarm
+   * runs the reflection critic→revisor loop for this turn regardless of the
+   * Settings default. Global sticky panel state.
+   */
+  deepAudit: boolean;
+  setDeepAudit: (enabled: boolean) => void;
 
   // Model Presets
   activePreset: PresetTier;
@@ -79,9 +96,13 @@ export const useAppStore = create<AppState>()(
       swarmEnabled: true,
       daemonMode: false,
       forceSwarm: false,
+      skepticModelOverride: null,
+      deepAudit: false,
       setSwarmEnabled: (enabled) => set({ swarmEnabled: enabled }),
       setDaemonMode: (enabled) => set({ daemonMode: enabled }),
       setForceSwarm: (enabled) => set({ forceSwarm: enabled }),
+      setSkepticModelOverride: (override) => set({ skepticModelOverride: override }),
+      setDeepAudit: (enabled) => set({ deepAudit: enabled }),
 
       // Model Presets — default to "custom" so we never accidentally override
       // the user's manually-configured model with a preset that requires
@@ -98,6 +119,8 @@ export const useAppStore = create<AppState>()(
         swarmEnabled: state.swarmEnabled,
         daemonMode: state.daemonMode,
         forceSwarm: state.forceSwarm,
+        skepticModelOverride: state.skepticModelOverride,
+        deepAudit: state.deepAudit,
         activePreset: state.activePreset,
       }),
     }

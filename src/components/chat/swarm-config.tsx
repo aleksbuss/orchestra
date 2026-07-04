@@ -2,12 +2,13 @@
 
 import { useAppStore } from "@/store/app-store";
 import { useShallow } from "zustand/react/shallow";
-import { Users, Plane, Zap } from "lucide-react";
+import { Users, Plane, Zap, ShieldAlert } from "lucide-react";
 import { PresetSelector } from "./preset-selector";
+import { SkepticSelector } from "./skeptic-selector";
 
 export function SwarmConfig() {
-  const { swarmEnabled, daemonMode, forceSwarm, setSwarmEnabled, setDaemonMode, setForceSwarm } = useAppStore(
-    useShallow((s) => ({ swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, setSwarmEnabled: s.setSwarmEnabled, setDaemonMode: s.setDaemonMode, setForceSwarm: s.setForceSwarm }))
+  const { swarmEnabled, daemonMode, forceSwarm, deepAudit, setSwarmEnabled, setDaemonMode, setForceSwarm, setDeepAudit } = useAppStore(
+    useShallow((s) => ({ swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, deepAudit: s.deepAudit, setSwarmEnabled: s.setSwarmEnabled, setDaemonMode: s.setDaemonMode, setForceSwarm: s.setForceSwarm, setDeepAudit: s.setDeepAudit }))
   );
 
   return (
@@ -71,6 +72,35 @@ export function SwarmConfig() {
           />
         </button>
       )}
+
+      {swarmEnabled && (
+        <button
+          type="button"
+          onClick={() => setDeepAudit(!deepAudit)}
+          aria-pressed={deepAudit}
+          aria-label="Deep Audit — run the reflection Skeptic loop this turn"
+          title="Deep Audit: run the Doubt-Driven reflection loop (Skeptic critic → revisor) after synthesis for this turn. Higher quality, slower + costlier. Overrides the Settings default; disables inline-synthesis collapse for the turn."
+          className={`
+            inline-flex items-center gap-2 h-8 px-3 rounded-lg border text-xs font-medium
+            transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2
+            focus-visible:ring-rose-500/40
+            ${deepAudit
+              ? "bg-rose-500/12 border-rose-500/40 text-rose-400"
+              : "bg-white/[0.03] border-white/10 text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
+            }
+          `}
+        >
+          <ShieldAlert className="w-3.5 h-3.5" />
+          <span>Deep Audit</span>
+          <span
+            className={`w-1.5 h-1.5 rounded-full ${
+              deepAudit ? "bg-rose-400 animate-pulse" : "bg-muted-foreground/30"
+            }`}
+          />
+        </button>
+      )}
+
+      {swarmEnabled && <SkepticSelector />}
 
       <button
         type="button"

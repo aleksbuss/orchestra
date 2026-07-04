@@ -7,7 +7,10 @@
  * throw with a clear operator-facing message naming the violations.
  */
 import { describe, expect, it } from "vitest";
-import { assertPrivacyModeAllowsSettings } from "./agent";
+import {
+  assertPrivacyModeAllowsSettings,
+  assertPrivacyModeAllowsSkepticOverride,
+} from "./agent";
 import type { AppSettings } from "@/lib/types";
 
 function baseSettings(overrides: Partial<AppSettings> = {}): AppSettings {
@@ -395,5 +398,67 @@ describe("PM #47 — assertPrivacyModeAllowsSettings", () => {
         )
       ).not.toThrow();
     });
+  });
+});
+
+describe("DDD A5 — proposerTiers.skeptic slot + per-request override", () => {
+  it("privacy ON + cloud proposerTiers.skeptic → throws naming the slot", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSettings(
+        baseSettings({
+          privacyMode: { enabled: true },
+          proposerTiers: {
+            skeptic: { provider: "openrouter", model: "deepseek/deepseek-v4-flash" },
+          },
+        })
+      )
+    ).toThrow(/proposerTiers\.skeptic = openrouter\/deepseek\/deepseek-v4-flash/);
+  });
+
+  it("privacy ON + local skeptic slot → no-op", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSettings(
+        baseSettings({
+          privacyMode: { enabled: true },
+          proposerTiers: { skeptic: { provider: "ollama", model: "qwen3:8b" } },
+        })
+      )
+    ).not.toThrow();
+  });
+
+  it("per-request override: privacy OFF → no-op even for a cloud override", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSkepticOverride(baseSettings(), {
+        provider: "anthropic",
+        model: "claude-haiku-4-5",
+      })
+    ).not.toThrow();
+  });
+
+  it("per-request override: privacy ON + cloud override → throws naming it", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSkepticOverride(
+        baseSettings({ privacyMode: { enabled: true } }),
+        { provider: "anthropic", model: "claude-haiku-4-5" }
+      )
+    ).toThrow(/Skeptic override.*anthropic\/claude-haiku-4-5/s);
+  });
+
+  it("per-request override: privacy ON + local override → no-op", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSkepticOverride(
+        baseSettings({ privacyMode: { enabled: true } }),
+        { provider: "ollama", model: "qwen3:8b" }
+      )
+    ).not.toThrow();
+  });
+
+  it("per-request override: privacy ON + no override → no-op", () => {
+    expect(() =>
+      assertPrivacyModeAllowsSkepticOverride(
+        baseSettings({ privacyMode: { enabled: true } }),
+        undefined
+      )
+    ).not.toThrow();
   });
 });

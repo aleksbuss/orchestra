@@ -199,6 +199,14 @@ export async function reflectOnResponse(params: {
   for (let attempts = 1; attempts <= maxAttempts; attempts += 1) {
     const isFallback = attempts > 1;
     const baseModel = !isFallback && modelOverride ? modelOverride : settings.utilityModel ?? settings.chatModel;
+    // A6 — the retry leg deliberately IGNORES modelOverride (resilience:
+    // the override model just failed at the API level). But with a direct
+    // operator Skeptic model that substitution must be LOUD, never silent.
+    if (isFallback && modelOverride) {
+      console.warn(
+        `[Reflection] Skeptic fallback: operator model ${modelOverride.provider}/${modelOverride.model} failed — retrying critic on ${baseModel.provider}/${baseModel.model} (override not honored for this retry).`
+      );
+    }
     const modelConfig = { ...baseModel };
     if (!modelConfig.apiKey && settings.providerApiKeys?.[modelConfig.provider]) {
       modelConfig.apiKey = settings.providerApiKeys[modelConfig.provider];

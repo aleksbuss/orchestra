@@ -192,20 +192,68 @@ export default function SettingsPage() {
                   </select>
                 </div>
                 {settings.proposerTiers?.skepticTier &&
-                  !settings.proposerTiers?.[settings.proposerTiers.skepticTier]?.model && (
+                  !settings.proposerTiers?.[settings.proposerTiers.skepticTier]?.model &&
+                  !settings.proposerTiers?.skeptic?.model && (
                     <p className="text-sm text-amber-500">
                       The &quot;{settings.proposerTiers.skepticTier}&quot; tier has no model
                       configured (see Tier Models below) — this selector is currently inert and
                       the Skeptic falls back to the default worker model.
                     </p>
                   )}
+
+                {/* DDD — direct Skeptic model. Overrides the tier selector above
+                    AND the reviewer Swarm-Sandbox role, and governs BOTH skeptic
+                    surfaces (reviewer proposer + reflection critic). Empty model =
+                    fall back to the tier path. */}
+                <div className="space-y-2 rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Direct Skeptic Model (overrides the tier)</p>
+                    <p className="text-sm text-muted-foreground">
+                      Pin the exact model the Skeptic runs on — the reviewer proposer AND the
+                      reflection critic. Takes precedence over the tier selector above and the
+                      reviewer role in Swarm Sandbox. Leave the model blank to use the tier path.
+                      API key inherits from the key vault / chat model for the same provider.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <select
+                      value={settings.proposerTiers?.skeptic?.provider || "openrouter"}
+                      onChange={(e) =>
+                        updateSettings("proposerTiers.skeptic.provider", e.target.value, true)
+                      }
+                      className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="ollama">Ollama</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="google">Google</option>
+                    </select>
+                    <Input
+                      placeholder="model id (empty = use tier)"
+                      className="flex-1"
+                      value={settings.proposerTiers?.skeptic?.model ?? ""}
+                      onChange={(e) =>
+                        updateSettings("proposerTiers.skeptic.model", e.target.value, true)
+                      }
+                    />
+                  </div>
+                  {settings.proposerTiers?.skeptic?.model &&
+                    settings.swarmSandbox?.reviewer && (
+                      <p className="text-sm text-amber-500">
+                        Both a direct Skeptic model and a Swarm-Sandbox &quot;reviewer&quot; tier are
+                        set — the direct model wins (most specific). Clear one to remove the overlap.
+                      </p>
+                    )}
+                </div>
                 <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
                   <div>
                     <p className="text-sm font-medium">Reflection loop (Doubt-Driven audit)</p>
                     <p className="text-sm text-muted-foreground">
-                      After the swarm synthesizes an answer, a Skeptic critic (runs on the chat
-                      model) audits it; flagged issues trigger a revision pass. Adds latency and
-                      cost per turn.
+                      After the swarm synthesizes an answer, a Skeptic critic audits it (runs on
+                      the Direct Skeptic Model above if set, else the chat model); flagged issues
+                      trigger a revision pass. Adds latency and cost per turn. Can also be toggled
+                      per-turn from the chat swarm panel (&quot;Deep Audit&quot;).
                     </p>
                   </div>
                   <input

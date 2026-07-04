@@ -3,6 +3,7 @@ import { updateChat } from "@/lib/storage/chat-store";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import type { ChatMessage } from "@/lib/types";
 import type { PresetTier } from "@/lib/agent/presets";
+import type { SkepticModelOverride } from "@/lib/agent/moa";
 import { getActiveGoal } from "@/lib/storage/goal-store";
 import type { GoalTask } from "@/lib/types";
 import { enqueueJob, dequeueJob } from "@/lib/storage/queue-store";
@@ -27,6 +28,17 @@ export interface AgentJobPayload {
    * moment the user enables Auto-Pilot.
    */
   forceSwarm?: boolean;
+  /**
+   * DDD — per-request Skeptic model override (`{provider, model}`).
+   * PM #22 / audit A9: like `forceSwarm`, this MUST ride the payload so it
+   * survives (a) the `runAgent({ ...options })` dispatch, (b) the Auto-Pilot
+   * self-continuation re-dispatches (`dispatchAgentJob({ ...options })`), and
+   * (c) queue persistence + boot-resume. The `...options` spreads carry it
+   * automatically; the daemon threading test pins that they do.
+   */
+  skepticModelOverride?: SkepticModelOverride | null;
+  /** DDD — per-request Deep Audit (reflection) toggle. Same PM #22 threading. */
+  deepAudit?: boolean;
   preset?: PresetTier;
 }
 

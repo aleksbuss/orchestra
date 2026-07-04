@@ -19,13 +19,15 @@
  *     a derived one, and falls back to `defaultWorkerConfig` when the
  *     selected tier has no `model` configured.
  */
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MOA_PROPOSERS,
   deriveTierFromRole,
   detectProposerRole,
   resolveWorkerKey,
   resolveProposerModelConfig,
+  warnSkepticFamilyOverlapOnce,
+  resetSkepticFamilyWarnDedup,
   type MoAProposer,
   type ProposerRole,
   type ProposerTier,
@@ -457,5 +459,47 @@ describe("detectSkepticFamilyOverlap — advisory text, never a gate", () => {
       brain: { provider: "anthropic" as const, model: "claude-sonnet-5" },
     });
     expect(msg).toContain('"anthropic"');
+  });
+});
+
+describe("warnSkepticFamilyOverlapOnce — S8 advisory dedup (§8 extraction)", () => {
+  beforeEach(() => {
+    resetSkepticFamilyWarnDedup();
+    vi.restoreAllMocks();
+  });
+
+  const combo = (skepticModel: string) => ({
+    skeptic: { provider: "openrouter" as const, model: skepticModel },
+    worker: { provider: "openrouter" as const, model: "deepseek/deepseek-v4-flash" },
+    brain: { provider: "openrouter" as const, model: "deepseek/deepseek-v4-flash" },
+  });
+
+  it("same-family combo warns ONCE per process per combo", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const first = warnSkepticFamilyOverlapOnce(combo("deepseek/deepseek-chat"));
+    const second = warnSkepticFamilyOverlapOnce(combo("deepseek/deepseek-chat"));
+    expect(first).toMatch(/same model family/);
+    expect(second).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain("[MoA] S8 advisory");
+  });
+
+  it("a DIFFERENT combo warns again", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnSkepticFamilyOverlapOnce(combo("deepseek/deepseek-chat"));
+    const other = warnSkepticFamilyOverlapOnce(combo("deepseek/deepseek-r2"));
+    expect(other).not.toBeNull();
+    expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("different-family skeptic → silent, returns null", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = warnSkepticFamilyOverlapOnce({
+      skeptic: { provider: "anthropic", model: "claude-haiku-4-5" },
+      worker: { provider: "openrouter", model: "deepseek/deepseek-v4-flash" },
+      brain: { provider: "openrouter", model: "deepseek/deepseek-v4-flash" },
+    });
+    expect(result).toBeNull();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

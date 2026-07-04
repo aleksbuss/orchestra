@@ -16,6 +16,8 @@ import { describe, it, expect } from "vitest";
 import {
   deriveTierFromRole,
   resolveProposerModelConfig,
+  resolveSkepticModelConfig,
+  isValidSkepticOverride,
   type MoAProposer,
 } from "./moa";
 import type { AppSettings, ModelConfig } from "@/lib/types";
@@ -316,5 +318,140 @@ describe("resolveProposerModelConfig — config selection (PM #48)", () => {
     expect(reviewer.config.provider).toBe("anthropic");
     expect(coder.config.provider).toBe("ollama");
     expect(coder.config.baseUrl).toBe("http://localhost:11434");
+  });
+});
+
+describe("DDD — direct Skeptic model (resolveSkepticModelConfig + surface-1)", () => {
+  const skepticPersona: MoAProposer = {
+    id: "qa",
+    role: "Adversarial Reviewer",
+    color: "rose",
+    systemPrompt: "Find faults and red-team this.",
+  };
+  const coderPersona: MoAProposer = {
+    id: "coder-1",
+    role: "Senior Coder",
+    color: "violet",
+    systemPrompt: "Write code with thorough design.",
+  };
+
+  it("nothing configured → undefined (callers keep pre-existing behavior)", () => {
+    expect(resolveSkepticModelConfig(fakeSettings())).toBeUndefined();
+  });
+
+  it("settings slot set → returned with API-key inheritance (resolveWorkerKey)", () => {
+    const settings = fakeSettings({
+      proposerTiers: {
+        skeptic: { provider: "openai", model: "o4-skeptic" },
+      },
+    });
+    const cfg = resolveSkepticModelConfig(settings);
+    expect(cfg?.model).toBe("o4-skeptic");
+    // No apiKey on the slot → inherits chatModel key (same provider).
+    expect(cfg?.apiKey).toBe("chat-key");
+  });
+
+  it("empty-model settings slot is inert → undefined", () => {
+    const settings = fakeSettings({
+      proposerTiers: { skeptic: { provider: "openai", model: "  " } },
+    });
+    expect(resolveSkepticModelConfig(settings)).toBeUndefined();
+  });
+
+  it("per-request override beats the settings slot", () => {
+    const settings = fakeSettings({
+      proposerTiers: {
+        skeptic: { provider: "openai", model: "settings-skeptic" },
+      },
+    });
+    const cfg = resolveSkepticModelConfig(settings, {
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    });
+    expect(cfg?.provider).toBe("anthropic");
+    expect(cfg?.model).toBe("claude-haiku-4-5");
+  });
+
+  it("INVALID per-request override (smuggled apiKey) is ignored → settings slot wins", () => {
+    const settings = fakeSettings({
+      proposerTiers: {
+        skeptic: { provider: "openai", model: "settings-skeptic" },
+      },
+    });
+    const hostile = {
+      provider: "openrouter",
+      model: "x",
+      apiKey: "stolen",
+    } as unknown as Parameters<typeof resolveSkepticModelConfig>[1];
+    const cfg = resolveSkepticModelConfig(settings, hostile);
+    expect(cfg?.model).toBe("settings-skeptic");
+  });
+
+  it("isValidSkepticOverride — boundary validator accepts ONLY {provider, model}", () => {
+    expect(isValidSkepticOverride({ provider: "openrouter", model: "deepseek/x" })).toBe(true);
+    expect(isValidSkepticOverride({ provider: "ollama", model: "qwen3:8b" })).toBe(true);
+    // Injection shapes → rejected.
+    expect(isValidSkepticOverride({ provider: "openrouter", model: "x", apiKey: "k" })).toBe(false);
+    expect(isValidSkepticOverride({ provider: "custom", model: "x", baseUrl: "http://169.254.169.254" })).toBe(false);
+    // Garbage shapes → rejected (route must 400, not throw mid-swarm).
+    expect(isValidSkepticOverride({ provider: "not-a-provider", model: "x" })).toBe(false);
+    expect(isValidSkepticOverride({ provider: "openai", model: "" })).toBe(false);
+    expect(isValidSkepticOverride({ provider: "openai" })).toBe(false);
+    expect(isValidSkepticOverride("openai/gpt-4o")).toBe(false);
+    expect(isValidSkepticOverride(null)).toBe(false);
+  });
+
+  it("surface 1: reviewer gets the resolved skeptic config OUTRIGHT — beats sandbox AND skepticTier (A10, deliberate)", () => {
+    const settings = fakeSettings({
+      swarmSandbox: { reviewer: "fast" },
+      proposerTiers: {
+        fast: { provider: "openai", model: "fast-model", apiKey: "f" },
+        frontier: { provider: "openai", model: "frontier-model", apiKey: "fr" },
+        skepticTier: "frontier",
+        skeptic: { provider: "anthropic", model: "operator-skeptic", apiKey: "a" },
+      },
+    });
+    const resolved = resolveSkepticModelConfig(settings);
+    const { config } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings,
+      resolved
+    );
+    expect(config.provider).toBe("anthropic");
+    expect(config.model).toBe("operator-skeptic");
+  });
+
+  it("surface 1: a coder persona IGNORES the skeptic config", () => {
+    const settings = fakeSettings({
+      proposerTiers: {
+        skeptic: { provider: "anthropic", model: "operator-skeptic", apiKey: "a" },
+      },
+    });
+    const resolved = resolveSkepticModelConfig(settings);
+    const { config } = resolveProposerModelConfig(
+      coderPersona,
+      defaultWorker,
+      settings,
+      resolved
+    );
+    expect(config).toEqual(defaultWorker);
+  });
+
+  it("surface 1: no skeptic config passed → EXACT pre-change behavior (sandbox/skepticTier path)", () => {
+    const settings = fakeSettings({
+      proposerTiers: {
+        frontier: { provider: "openai", model: "frontier-model", apiKey: "fr" },
+        skepticTier: "frontier",
+      },
+    });
+    const { config, tier } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings,
+      undefined
+    );
+    expect(tier).toBe("frontier");
+    expect(config.model).toBe("frontier-model");
   });
 });

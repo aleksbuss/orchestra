@@ -81,12 +81,21 @@ const fakeSettings = (override: Partial<{
   baseUrl?: string;
   apiKey?: string;
   embeddingsModel?: { provider: string; model: string; apiKey?: string };
+  utilityModel?: { provider: string; model: string; apiKey?: string };
 }> = {}) => ({
   chatModel: {
     provider: override.provider ?? "openrouter",
     model: override.model ?? "anthropic/claude-3-5-haiku",
     baseUrl: override.baseUrl,
     apiKey: override.apiKey ?? "test-key",
+  },
+  // Default to a specific, keyed utility model so the happy path stays
+  // "healthy"; the utility_model tests override with UNSET / meta-router /
+  // keyless variants.
+  utilityModel: override.utilityModel ?? {
+    provider: "openrouter",
+    model: "deepseek/deepseek-v4-flash",
+    apiKey: "test-key",
   },
   // Default to a LOCAL embeddings model (keyless → usable) so the happy path
   // stays "healthy"; the embeddings_model warn test overrides with a keyless
@@ -179,6 +188,11 @@ describe("GET /api/health — happy path", () => {
       // from embeddings_db (the on-disk vectors). Warns when RAG memory search /
       // MoA disagreement detection / trace-memory silently degrade.
       "embeddings_model",
+      // DDD / PM #89 — utility MODEL usability + meta-router pseudo-model
+      // detection (the MoA Router / DPG driver). Warns on UNSET, on the
+      // OpenRouter meta-router pseudo-id (the 2026-07-04 degenerate-swarm
+      // incident), and on a keyless specific model.
+      "utility_model",
       // PM #30 — chat-file parse integrity surfaced through /api/health so the
       // operator sees "N chats failed to parse on rebuild" instead of silent
       // disappearance from the sidebar.
@@ -295,6 +309,58 @@ describe("GET /api/health — embeddings_model usability (Sprint 1)", () => {
       expect(body.status).not.toBe("healthy");
     } finally {
       if (savedKey !== undefined) process.env.OPENAI_API_KEY = savedKey;
+    }
+  });
+});
+
+describe("GET /api/health — utility_model usability (DDD / PM #89)", () => {
+  it("reports 'ok' for a specific, keyed utility model", async () => {
+    const body = await callHealth();
+    const um = body.subsystems.find((s) => s.name === "utility_model");
+    expect(um?.status).toBe("ok");
+    expect(um?.detail).toMatch(/deepseek\/deepseek-v4-flash/);
+  });
+
+  it("warns on the OpenRouter meta-router pseudo-model (the 2026-07-04 incident) EVEN WITH a key", async () => {
+    // The exact failure: key present, model = openrouter/free → a pure key
+    // check would report ok. The subsystem must catch the pseudo-id.
+    mockedSettings.mockResolvedValue(
+      fakeSettings({
+        utilityModel: { provider: "openrouter", model: "openrouter/free", apiKey: "test-key" },
+      })
+    );
+    const body = await callHealth();
+    const um = body.subsystems.find((s) => s.name === "utility_model");
+    expect(um?.status).toBe("warn");
+    expect(um?.detail).toMatch(/meta-router pseudo-model/i);
+    expect(body.status).not.toBe("healthy");
+  });
+
+  it("warns when the utility model is UNSET", async () => {
+    mockedSettings.mockResolvedValue(
+      fakeSettings({ utilityModel: { provider: "", model: "" } })
+    );
+    const body = await callHealth();
+    const um = body.subsystems.find((s) => s.name === "utility_model");
+    expect(um?.status).toBe("warn");
+    expect(um?.detail).toMatch(/UNSET/);
+  });
+
+  it("warns when a specific utility model has no usable key", async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      mockedSettings.mockResolvedValue(
+        fakeSettings({
+          utilityModel: { provider: "openai", model: "gpt-4o-mini", apiKey: "" },
+        })
+      );
+      const body = await callHealth();
+      const um = body.subsystems.find((s) => s.name === "utility_model");
+      expect(um?.status).toBe("warn");
+      expect(um?.detail).toMatch(/NO usable key/);
+    } finally {
+      if (saved !== undefined) process.env.OPENAI_API_KEY = saved;
     }
   });
 });

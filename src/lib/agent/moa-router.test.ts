@@ -45,8 +45,9 @@ vi.mock("@/lib/providers/llm-provider", () => ({
 }));
 
 import { generateObject } from "ai";
-import { generateDynamicSwarm } from "./moa-router";
+import { generateDynamicSwarm, classifyRouterError } from "./moa-router";
 import { MOA_PROPOSERS } from "./moa-personas";
+import { log } from "@/lib/observability/logger";
 import type { ModelConfig } from "@/lib/types";
 import type { ModelMessage } from "ai";
 
@@ -267,18 +268,25 @@ describe("generateDynamicSwarm — PM #37 skeptic guarantee", () => {
 });
 
 describe("generateDynamicSwarm — failure path", () => {
-  it("falls back to static MOA_PROPOSERS when generateObject throws", async () => {
-    mockedGenerateObject.mockRejectedValue(new Error("LLM blew up"));
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("falls back to static MOA_PROPOSERS + emits a classified telemetry event (PM #89)", async () => {
+    mockedGenerateObject.mockRejectedValue(new Error("401 Unauthorized: invalid api key"));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const logWarnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
     const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
     expect(result.personas).toEqual(MOA_PROPOSERS);
     expect(result.requiresSwarm).toBe(true); // err on the side of running the swarm
     expect(result.usage).toBeUndefined();
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/Dynamic Persona Generation failed.*Falling back/i),
-      expect.any(Error)
+    // Loud stdout line naming the model + reason (was a silent fallback before).
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/Router fallback.*static personas.*reason=auth/i)
     );
-    errSpy.mockRestore();
+    // Structured, greppable event with a classified reason.
+    expect(logWarnSpy).toHaveBeenCalledWith(
+      "moa_router_fallback",
+      expect.objectContaining({ reason: "auth", model: STUB_MODEL.model })
+    );
+    warnSpy.mockRestore();
+    logWarnSpy.mockRestore();
   });
 
   it("falls back when the LLM returns a malformed schema (generateObject throws ZodError)", async () => {
@@ -393,5 +401,29 @@ describe("generateDynamicSwarm — prompt shape", () => {
     const callArgs = mockedGenerateObject.mock.calls[0][0] as any;
     expect(typeof callArgs.maxOutputTokens).toBe("number");
     expect(callArgs.maxOutputTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("classifyRouterError — fallback reason classification (PM #89)", () => {
+  it("auth: 401/403/credit/quota/billing", () => {
+    expect(classifyRouterError(new Error("401 Unauthorized"))).toBe("auth");
+    expect(classifyRouterError(new Error("Insufficient credit (402)"))).toBe("auth");
+    expect(classifyRouterError(new Error("invalid api key"))).toBe("auth");
+  });
+  it("not_found: 404 / no endpoints", () => {
+    expect(classifyRouterError(new Error("404 No endpoints found that support tool use"))).toBe("not_found");
+    expect(classifyRouterError(new Error("unknown model foo/bar"))).toBe("not_found");
+  });
+  it("timeout: abort / timed out", () => {
+    expect(classifyRouterError(new Error("The operation was aborted"))).toBe("timeout");
+    expect(classifyRouterError(new Error("ETIMEDOUT"))).toBe("timeout");
+  });
+  it("schema: parse / zod / no object generated", () => {
+    expect(classifyRouterError(new Error("No object generated: could not parse"))).toBe("schema");
+    expect(classifyRouterError(new Error("ZodError: invalid"))).toBe("schema");
+  });
+  it("other: anything unrecognized", () => {
+    expect(classifyRouterError(new Error("kaboom"))).toBe("other");
+    expect(classifyRouterError("plain string")).toBe("other");
   });
 });

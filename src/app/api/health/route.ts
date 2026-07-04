@@ -328,6 +328,61 @@ export async function GET() {
     });
   }
 
+  // 5c. Utility MODEL usable AND specific? (DDD — PM #89 detector.) The
+  // utilityModel drives the MoA Router's Dynamic Persona Generation
+  // (`generateObject`), the default proposer worker, and the reflection critic
+  // fallback. Two failure modes, both previously SILENT:
+  //   (a) no usable key → Router/utility calls fail outright.
+  //   (b) key present but the model is an OpenRouter META-ROUTER pseudo-model
+  //       (`openrouter/free`, `openrouter/auto`) — a random cheap aggregator,
+  //       NOT a specific model. It authenticates fine (so a key-presence check
+  //       reports `ok`), yet produces degenerate DPG personas + empty drafts.
+  //       This is the exact 2026-07-04 incident: the key existed, the MODEL was
+  //       garbage. A pure key check MISSES it, so we detect the pseudo-id too.
+  try {
+    const settings = await getSettings();
+    const um = settings.utilityModel;
+    const modelId = (um?.model ?? "").toLowerCase().trim();
+    const isMetaRouter =
+      um?.provider === "openrouter" &&
+      (modelId === "openrouter/free" ||
+        modelId === "openrouter/auto" ||
+        modelId === "free" ||
+        modelId === "auto");
+    if (!um?.model) {
+      checks.push({
+        name: "utility_model",
+        status: "warn",
+        detail:
+          "utilityModel is UNSET — the MoA Router (DPG), the default proposer worker, and the reflection-critic fallback have no model. Set one in Settings → Models.",
+      });
+    } else if (isMetaRouter) {
+      checks.push({
+        name: "utility_model",
+        status: "warn",
+        detail: `utilityModel is an OpenRouter meta-router pseudo-model (${um.provider}/${um.model}). It authenticates but routes to a random cheap aggregator — the MoA Router's structured DPG degrades into lazy generic personas + empty drafts (2026-07-04 incident). Pin a SPECIFIC model (e.g. openrouter/deepseek/deepseek-v4-flash).`,
+      });
+    } else if (!isModelKeyConfigured(um)) {
+      checks.push({
+        name: "utility_model",
+        status: "warn",
+        detail: `utilityModel ${um.provider}/${um.model} has NO usable key — the MoA Router (DPG), proposer fan-out, and reflection critic fall back / fail SILENTLY. Add a key in Settings → API Keys, or switch to a local provider.`,
+      });
+    } else {
+      checks.push({
+        name: "utility_model",
+        status: "ok",
+        detail: `${um.provider}/${um.model} can authenticate and is a specific model.`,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      name: "utility_model",
+      status: "warn",
+      detail: `Could not read settings to check the utility model: ${err instanceof Error ? err.message : String(err)}.`,
+    });
+  }
+
   // 6. Chat index integrity (PM #30 + PM #62)
   // Two drift signatures are surfaced so neither is silent:
   //   - PM #30: chat files that failed to PARSE on the last index rebuild

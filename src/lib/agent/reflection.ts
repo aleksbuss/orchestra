@@ -216,6 +216,13 @@ export async function reflectOnResponse(params: {
     let result: Awaited<ReturnType<typeof generateText>>;
     try {
       const model = createModel(modelConfig, { projectId });
+      // QA audit — surface the reflection critic's resolved model in STDOUT
+      // (not just the SSE node), so the operator can verify a direct Skeptic
+      // model actually reaches surface 2 (the reflection critic), distinct
+      // from the brain that runs the revisor.
+      console.log(
+        `[MoA] Reflection critic auditing on ${modelConfig.provider}/${modelConfig.model}${isFallback ? " (fallback)" : ""}`
+      );
       publishNode(
         "running",
         "Skeptic Audit",

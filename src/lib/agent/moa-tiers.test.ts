@@ -422,6 +422,28 @@ describe("DDD — direct Skeptic model (resolveSkepticModelConfig + surface-1)",
     expect(config.model).toBe("operator-skeptic");
   });
 
+  it("surface 1 (C2): tier LABEL is the honestly-resolved tier, not hardcoded 'frontier'", () => {
+    // Operator pinned the reviewer role to the 'fast' sandbox tier AND set a
+    // direct skeptic model. The CONFIG must be the override (precedence), but
+    // the telemetry `tier` must reflect the resolved tier ('fast'), not a
+    // cosmetic 'frontier' that mislabels a cheap skeptic in the DAG.
+    const settings = fakeSettings({
+      swarmSandbox: { reviewer: "fast" },
+      proposerTiers: {
+        skeptic: { provider: "ollama", model: "qwen3:1.7b", apiKey: "x" },
+      },
+    });
+    const resolved = resolveSkepticModelConfig(settings);
+    const { config, tier } = resolveProposerModelConfig(
+      skepticPersona,
+      defaultWorker,
+      settings,
+      resolved
+    );
+    expect(config.model).toBe("qwen3:1.7b"); // override wins the config
+    expect(tier).toBe("fast"); // label honest, NOT "frontier"
+  });
+
   it("surface 1: a coder persona IGNORES the skeptic config", () => {
     const settings = fakeSettings({
       proposerTiers: {

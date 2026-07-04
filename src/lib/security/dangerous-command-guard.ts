@@ -112,6 +112,18 @@ const SHELL_RULES: Rule[] = [
     pattern: /\brm\s+(?:-[a-zA-Z]*[rRfF][a-zA-Z]*\s+)+\/(?:etc|usr|var|bin|sbin|lib|lib64|boot|opt|root|sys|proc|dev)(?:\/?\s|\/?$|\/\*)/,
   },
 
+  // --- Protection against self-termination (Orchestra dev host on :3000) ---
+  {
+    id: "shell.kill.orchestra-host",
+    reason:
+      "Refusing to kill the Orchestra dev server (port 3000 / the next-server process). Killing it terminates the agent mid-task. Ask the operator to restart it instead.",
+    // Catches the real incantations: any `lsof`/`fuser` referencing 3000
+    // (incl. the combined `lsof -ti:3000` form), `kill-port 3000`, and
+    // `pkill`/`killall` targeting the `next`/`next-server` process. Scoped to
+    // the dev process on purpose — it does NOT block a bare `killall node`.
+    pattern:
+      /(?:\b(?:lsof|fuser)\b[^|;&]*\b3000\b|\bkill-port\s+3000\b|\b(?:pkill|killall)\b[^|;&]*\bnext(?:-server)?\b)/i,
+  },
   // --- find -delete on dangerous roots ---
   {
     id: "shell.find.delete-root",

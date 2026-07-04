@@ -60,8 +60,15 @@ export function selectProposerTools(
   coderContext?: {
     settings: AppSettings;
     cwd: string;
-  }
+  },
+  /** DDD audit fix #7 — when false, skip ALL tool assignment regardless of
+   * role. Prevents assigning tools to models that don't support tool calling
+   * (e.g. qwen-2.5-coder on OpenRouter), which previously caused instant
+   * failures and required a wasteful retry-without-tools band-aid. */
+  toolCallSupported: boolean = true,
 ): ToolSet | undefined {
+  if (!toolCallSupported) return undefined;
+
   const out: ToolSet = {};
 
   if (role === "reviewer" || role === "researcher") {

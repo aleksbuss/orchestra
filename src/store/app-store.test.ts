@@ -164,4 +164,25 @@ describe("toggle actions — swarm/daemon/preset", () => {
     useAppStore.getState().setSidebarTab("chats");
     expect(useAppStore.getState().sidebarTab).toBe("chats");
   });
+
+  it("DDD — setSkepticModelOverride round-trips {provider, model} and clears to null", () => {
+    expect(useAppStore.getState().skepticModelOverride).toBeNull(); // default
+    useAppStore
+      .getState()
+      .setSkepticModelOverride({ provider: "anthropic", model: "claude-haiku-4-5" });
+    expect(useAppStore.getState().skepticModelOverride).toEqual({
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    });
+    useAppStore.getState().setSkepticModelOverride(null);
+    expect(useAppStore.getState().skepticModelOverride).toBeNull();
+  });
+
+  it("DDD — setDeepAudit toggles cleanly (default false)", () => {
+    expect(useAppStore.getState().deepAudit).toBe(false);
+    useAppStore.getState().setDeepAudit(true);
+    expect(useAppStore.getState().deepAudit).toBe(true);
+    useAppStore.getState().setDeepAudit(false);
+    expect(useAppStore.getState().deepAudit).toBe(false);
+  });
 });

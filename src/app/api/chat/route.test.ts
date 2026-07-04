@@ -301,6 +301,99 @@ describe("POST /api/chat — swarm / forceSwarm flag forwarding", () => {
   });
 });
 
+describe("POST /api/chat — DDD Skeptic override forwarding + boundary validation", () => {
+  it("forwards a valid {provider, model} skepticModelOverride to runAgent", async () => {
+    vi.mocked(runAgent).mockResolvedValue(fakeRunAgentResult() as never);
+    await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        skepticModelOverride: { provider: "anthropic", model: "claude-haiku-4-5" },
+      })
+    );
+    expect(vi.mocked(runAgent).mock.calls[0][0].skepticModelOverride).toEqual({
+      provider: "anthropic",
+      model: "claude-haiku-4-5",
+    });
+  });
+
+  it("null skepticModelOverride when omitted", async () => {
+    vi.mocked(runAgent).mockResolvedValue(fakeRunAgentResult() as never);
+    await POST(buildRequest({ chatId: "c1", message: "hi" }));
+    expect(vi.mocked(runAgent).mock.calls[0][0].skepticModelOverride).toBeNull();
+  });
+
+  it("400 (SSRF/key-injection guard) when the override smuggles a baseUrl", async () => {
+    vi.mocked(runAgent).mockResolvedValue(fakeRunAgentResult() as never);
+    const res = await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        skepticModelOverride: {
+          provider: "openrouter",
+          model: "x",
+          baseUrl: "http://169.254.169.254/latest/meta-data",
+        },
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("400 when the override smuggles an apiKey", async () => {
+    const res = await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        skepticModelOverride: { provider: "openrouter", model: "x", apiKey: "stolen" },
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("400 on an unknown provider", async () => {
+    const res = await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        skepticModelOverride: { provider: "evil-corp", model: "x" },
+      })
+    );
+    expect(res.status).toBe(400);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("forwards deepAudit=true; ignores a non-boolean deepAudit", async () => {
+    vi.mocked(runAgent).mockResolvedValue(fakeRunAgentResult() as never);
+    await POST(buildRequest({ chatId: "c1", message: "hi", deepAudit: true }));
+    expect(vi.mocked(runAgent).mock.calls[0][0].deepAudit).toBe(true);
+
+    vi.mocked(runAgent).mockClear();
+    await POST(buildRequest({ chatId: "c1", message: "hi", deepAudit: "yes" }));
+    expect(vi.mocked(runAgent).mock.calls[0][0].deepAudit).toBeUndefined();
+  });
+
+  it("background dispatch carries the override + deepAudit (PM #22 — every path)", async () => {
+    vi.mocked(getChat).mockResolvedValue({
+      id: "c1",
+      messages: [],
+    } as never);
+    await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        background: true,
+        skepticModelOverride: { provider: "ollama", model: "qwen3:8b" },
+        deepAudit: true,
+      })
+    );
+    const job = vi.mocked(dispatchAgentJob).mock.calls[0][0];
+    expect(job.skepticModelOverride).toEqual({ provider: "ollama", model: "qwen3:8b" });
+    expect(job.deepAudit).toBe(true);
+  });
+});
+
 describe("POST /api/chat — AbortSignal binding (PM #1)", () => {
   // PM #1 was a P0 outage caused by missing AbortSignal propagation. Every
   // request must pass `req.signal` to runAgent so closing the tab cancels

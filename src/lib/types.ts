@@ -82,11 +82,12 @@ export interface AppSettings {
    *
    * PM #46 — multi-round refinement support. `maxRounds` controls how
    * many critic→revisor iterations are allowed; default 1 preserves
-   * pre-PM-46 single-pass behavior. Local-first power users can set
-   * higher values (e.g., 10-20) to let convergence-based stopping run
-   * until the critic stops flagging issues. A code-level hard cap
-   * (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 50` in moa.ts) protects against
-   * accidental runaway loops on cloud providers.
+   * pre-PM-46 single-pass behavior. A code-level hard cap
+   * (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 3` in moa.ts — lowered from 50 by
+   * the DDD roadmap Sprint 3: each round bills a critic + revisor pass,
+   * and runs that don't converge by round 3 don't converge at 50 either)
+   * protects against accidental runaway loops; values above it are
+   * clamped with a console warning.
    *
    * `convergenceThreshold` is a safety net: if two successive revised
    * outputs are nearly identical (cosine similarity > this value), the
@@ -96,7 +97,7 @@ export interface AppSettings {
    */
   reflection?: {
     enabled: boolean;
-    /** Default 1 (backwards-compat with pre-PM-46 single-pass). Capped at 50. */
+    /** Default 1 (backwards-compat with pre-PM-46 single-pass). Capped at 3 (`ABSOLUTE_MAX_REFLECTION_ROUNDS`). */
     maxRounds?: number;
     /** Default 0.97. Range 0-1; higher = stricter "stop only if nearly identical". */
     convergenceThreshold?: number;
@@ -131,7 +132,28 @@ export interface AppSettings {
     balanced?: ModelConfig;
     /** Default for coder / architect / synthesizer personas. Highest quality. */
     frontier?: ModelConfig;
+    /**
+     * Direct Skeptic model (DDD "operator owns the Skeptic"). When set
+     * (non-empty `model`), BOTH skeptic surfaces — the DPG reviewer
+     * proposer AND the reflection critic (`reflectOnResponse`) — run on
+     * exactly this config. Beats `skepticTier`, `swarmSandbox.reviewer`,
+     * the persona's `modelTier`, and role derivation. The reflection
+     * REVISOR stays on the brain model (it writes; only the judge is a
+     * skeptic). API key inherits via `resolveWorkerKey` when omitted.
+     */
+    skeptic?: ModelConfig;
+    /** Deep Audit mode override for the Skeptic. Defaults to fast if undefined. */
+    skepticTier?: "fast" | "balanced" | "frontier";
   };
+  /**
+   * Configurable Swarm Sandbox (Sprint 4).
+   * Overrides tier selection for specific roles (coder, researcher, reviewer, synthesizer).
+   */
+  swarmSandbox?: Record<string, "fast" | "balanced" | "frontier">;
+  /**
+   * Optimization (Sprint 7). Limit parallel fan-out models. Range 3-7, default 5.
+   */
+  maxSwarmSize?: number;
   /**
    * Air-gapped MoA mode (PM #47). When enabled, Orchestra refuses to run
    * any LLM call against a non-loopback provider. `chatModel`, `utilityModel`,

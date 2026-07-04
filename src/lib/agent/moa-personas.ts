@@ -286,15 +286,6 @@ export function resolveProposerModelConfig(
   resolvedSkepticConfig?: ModelConfig
 ): { config: ModelConfig; tier: ProposerTier } {
   const role = detectProposerRole(proposer);
-
-  // DDD surface 1 — the operator's direct Skeptic model. Resolved ONCE by
-  // the caller (`resolveSkepticModelConfig`) and passed in to avoid
-  // re-resolving per proposer. Tier label reflects the strongest slot so
-  // downstream logging/telemetry stays meaningful.
-  if (role === "reviewer" && resolvedSkepticConfig?.model) {
-    return { config: resolvedSkepticConfig, tier: "frontier" };
-  }
-
   const sandboxTier = settings.swarmSandbox?.[role];
   const skepticTierOverride = role === "reviewer" ? settings.proposerTiers?.skepticTier : undefined;
 
@@ -313,7 +304,15 @@ export function resolveProposerModelConfig(
   ) {
     tier = "balanced";
   }
-  
+
+  // DDD surface 1 — the operator's direct Skeptic model wins the CONFIG
+  // outright (precedence over every tier path — audit A10). The `tier` label
+  // stays the honestly-resolved tier for telemetry/DAG (QA audit C2 — the old
+  // hardcoded "frontier" mislabelled a cheap operator skeptic as frontier).
+  if (role === "reviewer" && resolvedSkepticConfig?.model) {
+    return { config: resolvedSkepticConfig, tier };
+  }
+
   const tiers = settings.proposerTiers;
   const tierConfig = tiers?.[tier];
   if (!tierConfig || !tierConfig.model) {

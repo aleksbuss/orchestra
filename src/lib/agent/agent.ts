@@ -7,10 +7,9 @@ import {
   type PrepareStepFunction,
 } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
-import { createModel, isLocalProvider } from "@/lib/providers/llm-provider";
+import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
-import type { ModelConfig } from "@/lib/types";
 import {
   buildSystemPrompt,
   PLAIN_CHAT_TOOL_OVERRIDE,
@@ -45,6 +44,7 @@ import {
   runMoAEnsemble,
   buildInlineSynthesisInjection,
   type MoAResult,
+  type SkepticModelOverride,
 } from "@/lib/agent/moa";
 import { captureSuccessfulTrace } from "@/lib/agent/trace-memory";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
@@ -206,10 +206,12 @@ async function runSubAgent(
 
   const baseTools = createAgentTools(parentContext, settings);
   let tools = baseTools;
+  let mcpDocs: string | undefined;
   if (parentContext.projectId) {
-    const mcp = await getProjectMcpTools(parentContext.projectId);
+    const mcp = await getProjectMcpTools(parentContext.projectId, role);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
+      mcpDocs = mcp.mcpSystemPrompt(4096); // Default to safe limit for sub-agents without contextWindow prop
     }
   }
 
@@ -218,7 +220,7 @@ async function runSubAgent(
   const readOnlyMatch = (key: string) =>
     key.includes("search") || key.includes("read") || key.includes("list") ||
     key.includes("view") || key.includes("blackboard") || key === "knowledge_query" ||
-    key === "memory_load" || key === "response";
+    key === "memory_load" || key === "response" || key === "call_mcp_tool" || key === "mcp_get_tool_schema";
 
   if (role === "researcher") {
     const filteredTools: Record<string, any> = {};
@@ -241,7 +243,8 @@ async function runSubAgent(
   // ------------------------------------
   tools = applyGlobalToolLoopGuard(tools, { chatId: parentContext.chatId, parentNodeId: nodeId });
 
-  const systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
+  let systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
+  if (mcpDocs) systemPrompt += mcpDocs;
   const promptText = extraContext 
     ? `Task:\n${taskDescription}\n\nContext/Constraints:\n${extraContext}` 
     : `Task:\n${taskDescription}`;
@@ -344,94 +347,34 @@ export interface RunAgentOptions {
    * `swarmEnabled === false`.
    */
   forceSwarm?: boolean;
+  /**
+   * DDD — per-request Skeptic model override (`{provider, model}` ONLY;
+   * validated at the API boundary). Governs both skeptic surfaces in the
+   * MoA run. PM #22: threaded through every dispatch path (interactive,
+   * background, queue, daemon continuation).
+   */
+  skepticModelOverride?: SkepticModelOverride | null;
+  /**
+   * DDD — per-request "Deep Audit" (reflection) toggle. Overrides
+   * `settings.reflection.enabled` for this run only. PM #22: same threading.
+   */
+  deepAudit?: boolean;
   isBackground?: boolean;
   abortSignal?: AbortSignal;
   preset?: PresetTier;
 }
 
-/**
- * PM #47 — Privacy Mode runtime guard. Throws when the operator has
- * enabled `settings.privacyMode.enabled` but any of `chatModel`,
- * `utilityModel`, or `embeddingsModel` resolves to a non-local backend.
- * Exported so the runtime check has its own focused test suite
- * (`agent-privacy.test.ts`) without booting the full runAgent path.
- */
-export function assertPrivacyModeAllowsSettings(
-  settings: AppSettings
-): void {
-  if (!settings.privacyMode?.enabled) return;
-  const violations: string[] = [];
-  if (!isLocalProvider(settings.chatModel)) {
-    violations.push(
-      `chatModel = ${settings.chatModel.provider}/${settings.chatModel.model}`
-    );
-  }
-  // utilityModel is used by the Router + reflection critic. If it's
-  // not local, the swarm leaks the user prompt to a vendor regardless
-  // of whether the chatModel is local.
-  if (
-    settings.utilityModel?.model &&
-    !isLocalProvider(settings.utilityModel)
-  ) {
-    violations.push(
-      `utilityModel = ${settings.utilityModel.provider}/${settings.utilityModel.model}`
-    );
-  }
-  // embeddingsModel is used by Blackboard + PM #39 disagreement
-  // detection + PM #46 convergence. Same threat — text leaves the box.
-  // Note: the embeddingsModel union includes "mock", which is non-network.
-  if (
-    settings.embeddingsModel?.provider &&
-    settings.embeddingsModel.provider !== "mock" &&
-    !isLocalProvider({
-      provider: settings.embeddingsModel.provider as ModelConfig["provider"],
-      model: settings.embeddingsModel.model,
-      baseUrl: settings.embeddingsModel.baseUrl,
-    })
-  ) {
-    violations.push(
-      `embeddingsModel = ${settings.embeddingsModel.provider}/${settings.embeddingsModel.model}`
-    );
-  }
-  // PM #48 — proposerTiers also leak the user prompt if any configured
-  // tier resolves to a non-local backend. The MoA dispatch path uses
-  // `resolveProposerModelConfig` which falls back to `chatModel`/worker
-  // when a tier is unset, so we only check tiers the operator actually
-  // configured (has a `model` set).
-  const tiers = settings.proposerTiers;
-  if (tiers) {
-    for (const tierName of ["fast", "balanced", "frontier"] as const) {
-      const tierCfg = tiers[tierName];
-      if (tierCfg?.model && !isLocalProvider(tierCfg)) {
-        violations.push(
-          `proposerTiers.${tierName} = ${tierCfg.provider}/${tierCfg.model}`
-        );
-      }
-    }
-  }
-  // PM #54 — `settings.aggregator.tournamentJudgeModel` (PM #52) was the
-  // last LLM call path that bypassed the Privacy Mode guard. When the
-  // operator picks tournament mode + a cloud judge model, every MoA call
-  // shipped the user prompt + every draft to that judge provider — the
-  // exact air-gap violation PM #47 was supposed to prevent. Closing the
-  // hole here makes the threat model honest: ALL LLM call paths reachable
-  // from runAgent are now gated by this single guard.
-  const judgeCfg = settings.aggregator?.tournamentJudgeModel;
-  if (judgeCfg?.model && !isLocalProvider(judgeCfg)) {
-    violations.push(
-      `aggregator.tournamentJudgeModel = ${judgeCfg.provider}/${judgeCfg.model}`
-    );
-  }
-  if (violations.length > 0) {
-    throw new Error(
-      `Privacy Mode is enabled, but these models target a non-local backend:\n  ` +
-        violations.map((v) => `• ${v}`).join("\n  ") +
-        `\n\nTo proceed, either: (a) disable Privacy Mode in Settings, or ` +
-        `(b) switch the violating models to a local backend (ollama, ` +
-        `sglang, vllm, or custom with a loopback baseUrl).`
-    );
-  }
-}
+// PM #47/#58 — Privacy Mode guards extracted to `agent-privacy.ts` (§8
+// zero-net-growth offset, DDD Skeptic-override track). Re-exported here
+// so existing callers/tests importing from `./agent` keep working.
+export {
+  assertPrivacyModeAllowsSettings,
+  assertPrivacyModeAllowsSkepticOverride,
+} from "@/lib/agent/agent-privacy";
+import {
+  assertPrivacyModeAllowsSettings,
+  assertPrivacyModeAllowsSkepticOverride,
+} from "@/lib/agent/agent-privacy";
 
 export async function runAgent(options: RunAgentOptions) {
   const settings = await getSettings();
@@ -440,6 +383,9 @@ export async function runAgent(options: RunAgentOptions) {
   // the operator/sharing-friends see the error in the chat UI rather
   // than a partial run with cloud telemetry already in flight.
   assertPrivacyModeAllowsSettings(settings);
+  // A5 — the per-request Skeptic override is NOT in settings; guard it
+  // separately (route checks too — defense in depth, PM #58 posture).
+  assertPrivacyModeAllowsSkepticOverride(settings, options.skepticModelOverride);
 
   // Resolve model config: if a preset is active, use its brain config;
   // otherwise fall back to the user's manual settings.
@@ -634,12 +580,14 @@ export async function runAgent(options: RunAgentOptions) {
   // Build tools: base + optional MCP tools from project .meta/mcp
   const baseTools = createAgentTools(context, settings);
   let mcpCleanup: (() => Promise<void>) | undefined;
+  let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
     const mcp = await getProjectMcpTools(options.projectId);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
+      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
     }
   }
   const orchestratorNodeId = options.chatId;
@@ -703,6 +651,8 @@ export async function runAgent(options: RunAgentOptions) {
     agentNumber: options.agentNumber,
     tools: toolNames,
   });
+
+  if (mcpDocs) systemPrompt += mcpDocs;
 
   // Phase 3: "Deep Memory" System Prompt Injection
   try {
@@ -772,6 +722,8 @@ export async function runAgent(options: RunAgentOptions) {
         settings,
         abortSignal: options.abortSignal,
         forceSwarm: options.forceSwarm,
+        skepticModelOverride: options.skepticModelOverride,
+        deepAudit: options.deepAudit,
       });
       turnExtraUsage = moaResult.cumulativeUsage;
 
@@ -1356,24 +1308,30 @@ export async function runAgentText(options: {
   }
 
   const baseTools = createAgentTools(context, settings);
+  const contextWindow = 4096; // Conservative default for dry run since model is unknown
+
   let mcpCleanup: (() => Promise<void>) | undefined;
+  let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
     const mcp = await getProjectMcpTools(options.projectId);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
+      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
     }
   }
   tools = applyGlobalToolLoopGuard(tools);
   const toolNames = Object.keys(tools);
 
-  const systemPrompt = await buildSystemPrompt({
+  let systemPrompt = await buildSystemPrompt({
     projectId: options.projectId,
     chatId: options.chatId,
     agentNumber: options.agentNumber,
     tools: toolNames,
   });
+
+  if (mcpDocs) systemPrompt += mcpDocs;
 
   const messages: ModelMessage[] = mergeConsecutiveSameRole([
     ...context.history,

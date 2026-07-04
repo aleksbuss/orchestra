@@ -11,6 +11,7 @@ import type { AppSettings } from "@/lib/types";
 
 vi.mock("ai", () => ({
   generateText: vi.fn(),
+  generateObject: vi.fn(),
 }));
 
 vi.mock("@/lib/providers/llm-provider", () => ({
@@ -137,6 +138,68 @@ describe("Reflection System (QA Auditor)", () => {
       expect(result.shouldRevise).toBe(true);
       expect(result.critique).toBe("Missing null check.");
     });
+
+    // Audit C1 — the critic is told to reason (with a CLAIM/DOUBT chain) before
+    // the verdict, and that reasoning contains braces. A greedy first-{ → last-}
+    // match would splice the reasoning brace with the verdict brace → invalid
+    // JSON → critic silently dropped. The verdict must still be extracted.
+    it("extracts the verdict even when reasoning before it contains braces", async () => {
+      const { generateText } = await import("ai");
+      vi.mocked(generateText).mockResolvedValueOnce({
+        text:
+          "<doubt>\nCLAIM: the code is fine.\n" +
+          "EXTRACT: it does `const cfg = { retries: 3, opts: { a: 1 } }` and a `function(){}`.\n" +
+          "DOUBT: retries is unbounded on failure.\n</doubt>\n" +
+          '{"shouldRevise": true, "critique": "Unbounded retry.", "suggestion": "Cap retries."}',
+      } as never);
+
+      const { reflectOnResponse } = await import("@/lib/agent/reflection");
+      const result = await reflectOnResponse({
+        userMessage: "review this",
+        agentResponse: "a".repeat(80),
+        settings: makeSettings(),
+      });
+
+      expect(result.shouldRevise).toBe(true);
+      expect(result.critique).toBe("Unbounded retry.");
+      expect(result.suggestion).toBe("Cap retries.");
+    });
+
+    // Audit C1 — a parse miss must NOT trigger a retry (a critic that can't emit
+    // a parseable verdict won't on a second identical call; retrying just
+    // doubles the cost). One call, then graceful skip.
+    it("does NOT retry on an unparseable verdict (single call, graceful skip)", async () => {
+      const { generateText } = await import("ai");
+      vi.mocked(generateText).mockResolvedValue({
+        text: "<doubt>lots of reasoning but I forgot the JSON verdict entirely</doubt>",
+      } as never);
+
+      const { reflectOnResponse } = await import("@/lib/agent/reflection");
+      const result = await reflectOnResponse({
+        userMessage: "test",
+        agentResponse: "a".repeat(50),
+        settings: makeSettings(),
+      });
+
+      expect(result.shouldRevise).toBe(false);
+      expect(vi.mocked(generateText)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("extractCriticVerdict (unit)", () => {
+    it("returns null when there is no verdict object", async () => {
+      const { extractCriticVerdict } = await import("@/lib/agent/reflection");
+      expect(extractCriticVerdict("just prose, no json")).toBeNull();
+      expect(extractCriticVerdict('{"foo": 1}')).toBeNull(); // object without shouldRevise
+    });
+
+    it("picks the LAST balanced object carrying the verdict", async () => {
+      const { extractCriticVerdict } = await import("@/lib/agent/reflection");
+      const v = extractCriticVerdict(
+        'noise {a:{b:1}} more {"shouldRevise": false, "critique": "", "suggestion": ""}'
+      );
+      expect(v).toEqual({ shouldRevise: false, critique: "", suggestion: "" });
+    });
   });
 
   describe("Error handling", () => {
@@ -231,9 +294,9 @@ describe("PM #38 — reviseWithCritique", () => {
   });
 
   it("returns revised text + usage + modelConfig on success", async () => {
-    const { generateText } = await import("ai");
-    vi.mocked(generateText).mockResolvedValueOnce({
-      text: "Revised version with the fix applied.",
+    const { generateObject } = await import("ai");
+    vi.mocked(generateObject).mockResolvedValueOnce({
+      object: { diff: "Revised version with the fix applied.", status: "fixed" },
       usage: { inputTokens: 200, outputTokens: 50 },
     } as never);
 
@@ -256,9 +319,35 @@ describe("PM #38 — reviseWithCritique", () => {
     });
   });
 
-  it("returns ORIGINAL text when revisor throws (never blocks the response)", async () => {
-    const { generateText } = await import("ai");
-    vi.mocked(generateText).mockRejectedValueOnce(new Error("LLM timeout"));
+  // Audit R2 — weak/free models often can't satisfy a JSON schema. When
+  // structured output fails, a tolerant text revision must still produce a
+  // working revised answer instead of silently returning the un-revised original.
+  it("falls back to a TEXT revision when structured output fails (weak-model path)", async () => {
+    const { generateObject, generateText } = await import("ai");
+    vi.mocked(generateObject).mockRejectedValueOnce(new Error("model does not support structured output"));
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: "Revised answer produced without a schema.",
+      usage: { inputTokens: 120, outputTokens: 40 },
+    } as never);
+
+    const { reviseWithCritique } = await import("@/lib/agent/reflection");
+    const result = await reviseWithCritique({
+      userMessage: "test",
+      originalResponse: "original with a bug",
+      critique: "has a bug",
+      suggestion: "fix the bug",
+      settings: makeSettings(),
+    });
+
+    expect(result.status).toBe("fixed");
+    expect(result.text).toBe("Revised answer produced without a schema.");
+    expect(result.usage).toEqual({ inputTokens: 120, outputTokens: 40 });
+  });
+
+  it("returns ORIGINAL text when BOTH structured and text revision throw (never blocks)", async () => {
+    const { generateObject, generateText } = await import("ai");
+    vi.mocked(generateObject).mockRejectedValueOnce(new Error("LLM failure"));
+    vi.mocked(generateText).mockRejectedValueOnce(new Error("LLM failure too"));
 
     const { reviseWithCritique } = await import("@/lib/agent/reflection");
     const result = await reviseWithCritique({
@@ -316,5 +405,123 @@ describe("PM #38 — reviseWithCritique", () => {
       expect.objectContaining({ model: "claude-opus-4-7" }),
       expect.anything()
     );
+  });
+});
+
+// ── DDD Phase 4 (corrected) — compiler evidence injection ─────────────────────
+describe("Compiler evidence in the critic prompt (advisory, PM #84 posture)", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("a draft with a broken ts block → critic prompt carries the parser diagnostics", async () => {
+    const { generateText } = await import("ai");
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: '{"shouldRevise": false, "critique": "", "suggestion": ""}',
+    } as never);
+
+    const { reflectOnResponse } = await import("@/lib/agent/reflection");
+    const brokenDraft =
+      "Use this helper:\n```ts\nexport function add(a: number {\n  return a + ;\n}\n```\n" +
+      "That should solve the problem you described.";
+    await reflectOnResponse({
+      userMessage: "write an add function",
+      agentResponse: brokenDraft,
+      settings: makeSettings(),
+    });
+
+    const call = vi.mocked(generateText).mock.calls[0][0] as unknown as {
+      messages: Array<{ content: string }>;
+    };
+    const content = call.messages[0].content;
+    expect(content).toContain("Deterministic compiler evidence");
+    expect(content).toContain("Syntax error");
+    // Advisory framing — the evidence must NOT position itself as a verdict.
+    expect(content).toContain("audit those yourself");
+  });
+
+  it("a prose-only draft → no evidence section is injected", async () => {
+    const { generateText } = await import("ai");
+    vi.mocked(generateText).mockResolvedValueOnce({
+      text: '{"shouldRevise": false, "critique": "", "suggestion": ""}',
+    } as never);
+
+    const { reflectOnResponse } = await import("@/lib/agent/reflection");
+    await reflectOnResponse({
+      userMessage: "explain the tradeoffs",
+      agentResponse:
+        "The main tradeoff is latency versus quality: a bigger committee costs more time.",
+      settings: makeSettings(),
+    });
+
+    const call = vi.mocked(generateText).mock.calls[0][0] as unknown as {
+      messages: Array<{ content: string }>;
+    };
+    expect(call.messages[0].content).not.toContain(
+      "Deterministic compiler evidence"
+    );
+  });
+});
+
+// ── DDD Phase 1 (corrected) — reflection outcome classification ───────────────
+describe("deriveReflectionOutcome — flag precedence for ddd_reflection_outcome", () => {
+  it("cannot_fix wins over everything (an unresolvable critique is never 'clean')", async () => {
+    const { deriveReflectionOutcome } = await import("@/lib/agent/reflection");
+    expect(
+      deriveReflectionOutcome({
+        criticCleanedUp: true,
+        cannotFix: true,
+        converged: true,
+        hitCap: true,
+      })
+    ).toBe("cannot_fix");
+  });
+
+  it("critic_clean when the critic approved", async () => {
+    const { deriveReflectionOutcome } = await import("@/lib/agent/reflection");
+    expect(
+      deriveReflectionOutcome({
+        criticCleanedUp: true,
+        cannotFix: false,
+        converged: false,
+        hitCap: false,
+      })
+    ).toBe("critic_clean");
+  });
+
+  it("converged when the loop stopped on cosine similarity", async () => {
+    const { deriveReflectionOutcome } = await import("@/lib/agent/reflection");
+    expect(
+      deriveReflectionOutcome({
+        criticCleanedUp: false,
+        cannotFix: false,
+        converged: true,
+        hitCap: false,
+      })
+    ).toBe("converged");
+  });
+
+  it("max_rounds when the cap exhausted without approval", async () => {
+    const { deriveReflectionOutcome } = await import("@/lib/agent/reflection");
+    expect(
+      deriveReflectionOutcome({
+        criticCleanedUp: false,
+        cannotFix: false,
+        converged: false,
+        hitCap: true,
+      })
+    ).toBe("max_rounds");
+  });
+
+  it("revised as the fallthrough (maxRounds=1 run that applied a revision)", async () => {
+    const { deriveReflectionOutcome } = await import("@/lib/agent/reflection");
+    expect(
+      deriveReflectionOutcome({
+        criticCleanedUp: false,
+        cannotFix: false,
+        converged: false,
+        hitCap: false,
+      })
+    ).toBe("revised");
   });
 });

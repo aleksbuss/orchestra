@@ -169,6 +169,220 @@ export default function SettingsPage() {
               <UtilityModelWizard settings={settings} updateSettings={updateSettings} />
               <EmbeddingsModelWizard settings={settings} updateSettings={updateSettings} />
 
+              <section className="border rounded-xl p-5 bg-card space-y-4">
+                <h3 className="font-semibold text-lg">Deep Audit Mode (Skeptic)</h3>
+                <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Skeptic Tier</p>
+                    <p className="text-sm text-muted-foreground">
+                      Choose which model tier the Skeptic uses for reviewing and auditing code.
+                      Frontier is recommended for deep reasoning.
+                    </p>
+                  </div>
+                  <select
+                    value={settings.proposerTiers?.skepticTier || "balanced"}
+                    onChange={(e) =>
+                      updateSettings("proposerTiers.skepticTier", e.target.value, true)
+                    }
+                    className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  >
+                    <option value="fast">Fast</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="frontier">Frontier</option>
+                  </select>
+                </div>
+                {settings.proposerTiers?.skepticTier &&
+                  !settings.proposerTiers?.[settings.proposerTiers.skepticTier]?.model &&
+                  !settings.proposerTiers?.skeptic?.model && (
+                    <p className="text-sm text-amber-500">
+                      The &quot;{settings.proposerTiers.skepticTier}&quot; tier has no model
+                      configured (see Tier Models below) — this selector is currently inert and
+                      the Skeptic falls back to the default worker model.
+                    </p>
+                  )}
+
+                {/* DDD — direct Skeptic model. Overrides the tier selector above
+                    AND the reviewer Swarm-Sandbox role, and governs BOTH skeptic
+                    surfaces (reviewer proposer + reflection critic). Empty model =
+                    fall back to the tier path. */}
+                <div className="space-y-2 rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Direct Skeptic Model (overrides the tier)</p>
+                    <p className="text-sm text-muted-foreground">
+                      Pin the exact model the Skeptic runs on — the reviewer proposer AND the
+                      reflection critic. Takes precedence over the tier selector above and the
+                      reviewer role in Swarm Sandbox. Leave the model blank to use the tier path.
+                      API key inherits from the key vault / chat model for the same provider.
+                    </p>
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <select
+                      value={settings.proposerTiers?.skeptic?.provider || "openrouter"}
+                      onChange={(e) =>
+                        updateSettings("proposerTiers.skeptic.provider", e.target.value, true)
+                      }
+                      className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                    >
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="ollama">Ollama</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                      <option value="google">Google</option>
+                    </select>
+                    <Input
+                      placeholder="model id (empty = use tier)"
+                      className="flex-1"
+                      value={settings.proposerTiers?.skeptic?.model ?? ""}
+                      onChange={(e) =>
+                        updateSettings("proposerTiers.skeptic.model", e.target.value, true)
+                      }
+                    />
+                  </div>
+                  {settings.proposerTiers?.skeptic?.model &&
+                    settings.swarmSandbox?.reviewer && (
+                      <p className="text-sm text-amber-500">
+                        Both a direct Skeptic model and a Swarm-Sandbox &quot;reviewer&quot; tier are
+                        set — the direct model wins (most specific). Clear one to remove the overlap.
+                      </p>
+                    )}
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Reflection loop (Doubt-Driven audit)</p>
+                    <p className="text-sm text-muted-foreground">
+                      After the swarm synthesizes an answer, a Skeptic critic audits it (runs on
+                      the Direct Skeptic Model above if set, else the chat model); flagged issues
+                      trigger a revision pass. Adds latency and cost per turn. Can also be toggled
+                      per-turn from the chat swarm panel (&quot;Deep Audit&quot;).
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={settings.reflection?.enabled ?? false}
+                    onChange={(e) =>
+                      updateSettings("reflection.enabled", e.target.checked, true)
+                    }
+                    className="rounded"
+                  />
+                </div>
+                {settings.reflection?.enabled && (
+                  <div className="flex items-center justify-between gap-4 rounded-lg border p-4">
+                    <div>
+                      <p className="text-sm font-medium">Max reflection rounds</p>
+                      <p className="text-sm text-muted-foreground">
+                        Critic → revisor iterations per turn (hard cap 3).
+                      </p>
+                    </div>
+                    <Input
+                      type="number"
+                      min="1"
+                      max="3"
+                      className="w-24"
+                      value={settings.reflection?.maxRounds ?? 1}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value, 10);
+                        if (!isNaN(val) && val >= 1 && val <= 3) {
+                          updateSettings("reflection.maxRounds", val, true);
+                        }
+                      }}
+                    />
+                  </div>
+                )}
+              </section>
+
+              <section className="border rounded-xl p-5 bg-card space-y-4">
+                <h3 className="font-semibold text-lg">Swarm Sandbox</h3>
+                <p className="text-sm text-muted-foreground">
+                  Hardcode model tiers for specific roles in the swarm. Auto will use default behaviors.
+                </p>
+                <div className="space-y-3 rounded-lg border p-4">
+                  <div>
+                    <p className="text-sm font-medium">Tier Models</p>
+                    <p className="text-sm text-muted-foreground">
+                      The model behind each tier. A tier without a model falls back to the
+                      default worker (utility model). API keys inherit from the key vault /
+                      chat model for the same provider.
+                    </p>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-3">
+                    {(["fast", "balanced", "frontier"] as const).map((tierName) => (
+                      <div key={tierName} className="flex flex-col gap-2 rounded-lg border p-3">
+                        <Label className="capitalize">{tierName}</Label>
+                        <select
+                          value={settings.proposerTiers?.[tierName]?.provider || "openrouter"}
+                          onChange={(e) =>
+                            updateSettings(
+                              `proposerTiers.${tierName}.provider`,
+                              e.target.value,
+                              true
+                            )
+                          }
+                          className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                        >
+                          <option value="openrouter">OpenRouter</option>
+                          <option value="ollama">Ollama</option>
+                          <option value="openai">OpenAI</option>
+                          <option value="anthropic">Anthropic</option>
+                          <option value="google">Google</option>
+                        </select>
+                        <Input
+                          placeholder="model id (empty = unset)"
+                          value={settings.proposerTiers?.[tierName]?.model ?? ""}
+                          onChange={(e) =>
+                            updateSettings(
+                              `proposerTiers.${tierName}.model`,
+                              e.target.value,
+                              true
+                            )
+                          }
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-4 rounded-lg border p-4 mb-4">
+                  <div>
+                    <p className="text-sm font-medium">Max Swarm Size</p>
+                    <p className="text-sm text-muted-foreground">
+                      Maximum number of parallel experts to spawn (3 to 7).
+                    </p>
+                  </div>
+                  <Input
+                    type="number"
+                    min="3"
+                    max="7"
+                    className="w-24"
+                    value={settings.maxSwarmSize ?? 5}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      if (!isNaN(val) && val >= 3 && val <= 7) {
+                        updateSettings("maxSwarmSize", val, true);
+                      }
+                    }}
+                  />
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(["coder", "researcher", "reviewer", "tool"] as const).map((role) => (
+                    <div key={role} className="flex flex-col gap-2 rounded-lg border p-3">
+                      <Label className="capitalize">{role} Tier</Label>
+                      <select
+                        value={settings.swarmSandbox?.[role] || "default"}
+                        onChange={(e) => {
+                          const val = e.target.value === "default" ? undefined : e.target.value;
+                          updateSettings(`swarmSandbox.${role}`, val, true);
+                        }}
+                        className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                      >
+                        <option value="default">Auto (Default)</option>
+                        <option value="fast">Fast</option>
+                        <option value="balanced">Balanced</option>
+                        <option value="frontier">Frontier</option>
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
               <section className="border rounded-xl p-5 bg-card">
                 <ApiKeyVault />
               </section>

@@ -290,4 +290,20 @@ describe("filterDeepRecall (PM #85 — chat-scope auto-archived raw history)", (
     );
     expect(out.map((r) => r.text)).toEqual(["own archive", "curated fix"]);
   });
+
+  it("defensive: a non-string current chatId never fails open (DoubleTake audit)", () => {
+    // No production caller passes undefined (options.chatId is always a string),
+    // but the helper must fail CLOSED if one ever did — never let undefined ===
+    // undefined keep a foreign/legacy auto-archive. Curated facts still pass.
+    const out = filterDeepRecall(
+      [
+        row(AUTO_ARCHIVE_AREA, "other-chat", "foreign archive"),
+        row(AUTO_ARCHIVE_AREA, undefined, "legacy archive"),
+        row("main", undefined, "curated fact"),
+      ],
+      undefined as unknown as string,
+      3
+    );
+    expect(out.map((r) => r.text)).toEqual(["curated fact"]);
+  });
 });

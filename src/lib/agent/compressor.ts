@@ -95,7 +95,15 @@ export function filterDeepRecall<T extends { metadata: Record<string, unknown> }
 ): T[] {
   return results
     .filter(
-      (r) => r.metadata.area !== AUTO_ARCHIVE_AREA || r.metadata.chatId === chatId
+      // An auto-archive record is kept ONLY when it carries a STRING chatId that
+      // matches the current chat. The explicit `typeof === "string"` guard makes
+      // the helper fail CLOSED regardless of the caller: a legacy record with no
+      // chatId is dropped, and even a defensively-undefined `chatId` argument
+      // (no current caller passes one — `options.chatId` is always a string)
+      // can never make `undefined === undefined` keep a foreign archive.
+      (r) =>
+        r.metadata.area !== AUTO_ARCHIVE_AREA ||
+        (typeof r.metadata.chatId === "string" && r.metadata.chatId === chatId)
     )
     .slice(0, limit);
 }

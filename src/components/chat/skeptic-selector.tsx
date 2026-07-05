@@ -1,47 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/store/app-store";
 import { useShallow } from "zustand/react/shallow";
-import { ShieldQuestion } from "lucide-react";
+import { ChevronDown, ShieldQuestion } from "lucide-react";
+import { SkepticModelFields } from "@/components/settings/model-wizards";
 import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
+import type { AppSettings } from "@/lib/types";
 
 /**
  * DDD — per-request Skeptic model selector for the swarm panel.
  *
  * The operator owns the Skeptic: this picks the exact model the reviewer
- * proposer AND the reflection critic run on, for the next turn onward
- * (global sticky panel state, like Force). It offers a fast switch between
- * models the operator has ALREADY configured (chat / utility / tier /
- * settings-skeptic) — arbitrary provider+model editing lives in
- * Settings → "Direct Skeptic Model". "Inherit Settings" clears the
- * per-request override so `proposerTiers.skeptic` (or the tier path) wins.
+ * proposer AND the reflection critic run on, for the next turn onward (global
+ * sticky panel state, like Force). Unlike the earlier version — which only
+ * offered a quick-switch among ALREADY-configured models — this now exposes the
+ * SAME provider + searchable-catalog picker as the orchestrator wizard
+ * (`SkepticModelFields`), so any model of any accepted provider can be selected
+ * and tested as the Skeptic without first wiring it up elsewhere in Settings.
  *
  * Only `{provider, model}` ever leaves the client — the server re-validates
- * and resolves the API key (never trusts a client-supplied key/baseUrl).
+ * (`isValidSkepticOverride`) and resolves the API key (never trusts a
+ * client-supplied key/baseUrl). "Inherit Settings" clears the per-request
+ * override so `proposerTiers.skeptic` (or the tier path) wins.
  */
 
-interface ModelRef {
-  provider: string;
-  model: string;
-}
-
-interface SettingsPayload {
-  chatModel?: ModelRef;
-  utilityModel?: ModelRef;
-  proposerTiers?: {
-    fast?: ModelRef;
-    balanced?: ModelRef;
-    frontier?: ModelRef;
-    skeptic?: ModelRef;
-  };
-}
-
-const INHERIT = "__inherit__";
-
-function keyOf(m: ModelRef): string {
-  return `${m.provider}/${m.model}`;
-}
+const DEFAULT_PROVIDER = "openrouter";
 
 export function SkepticSelector() {
   const { skepticModelOverride, setSkepticModelOverride } = useAppStore(
@@ -51,33 +35,25 @@ export function SkepticSelector() {
     }))
   );
 
-  const [candidates, setCandidates] = useState<ModelRef[]>([]);
+  const [open, setOpen] = useState(false);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  // Provider held while the operator is mid-selection (before a model is
+  // chosen). Seeded from the sticky override so re-opening shows its provider.
+  const [draftProvider, setDraftProvider] = useState<string>(DEFAULT_PROVIDER);
+  const rootRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    if (skepticModelOverride?.provider) setDraftProvider(skepticModelOverride.provider);
+  }, [skepticModelOverride]);
+
+  // Fetch the full (masked) settings once so the picker can list catalogs.
+  // Keys are masked here; `forceFetch` lets `/api/models` resolve them server-side.
   useEffect(() => {
     let cancelled = false;
     fetch("/api/settings")
       .then((r) => r.json())
-      .then((data: SettingsPayload) => {
-        if (cancelled) return;
-        const raw: (ModelRef | undefined)[] = [
-          data.chatModel,
-          data.utilityModel,
-          data.proposerTiers?.skeptic,
-          data.proposerTiers?.frontier,
-          data.proposerTiers?.balanced,
-          data.proposerTiers?.fast,
-        ];
-        // Distinct, non-empty candidates preserving order.
-        const seen = new Set<string>();
-        const list: ModelRef[] = [];
-        for (const m of raw) {
-          if (!m?.provider || !m?.model) continue;
-          const k = keyOf(m);
-          if (seen.has(k)) continue;
-          seen.add(k);
-          list.push({ provider: m.provider, model: m.model });
-        }
-        setCandidates(list);
+      .then((data: AppSettings) => {
+        if (!cancelled) setSettings(data);
       })
       .catch(() => {});
     return () => {
@@ -85,61 +61,78 @@ export function SkepticSelector() {
     };
   }, []);
 
-  const currentValue = skepticModelOverride ? keyOf(skepticModelOverride) : INHERIT;
-
-  // If the sticky override is a model no longer in the candidate list (e.g.
-  // the operator removed it from settings), still show it so the state is
-  // honest rather than silently snapping to "Inherit".
-  const override = skepticModelOverride;
-  const showOrphan =
-    override != null && !candidates.some((c) => keyOf(c) === keyOf(override));
-
-  function onChange(value: string) {
-    if (value === INHERIT) {
-      setSkepticModelOverride(null);
-      return;
+  useEffect(() => {
+    function onMouseDown(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     }
-    const [provider, ...rest] = value.split("/");
-    const model = rest.join("/");
-    if (!provider || !model) {
+    if (open) document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [open]);
+
+  function handleChange(provider: string, model: string) {
+    setDraftProvider(provider);
+    if (model) {
+      setSkepticModelOverride({
+        provider: provider as SkepticModelOverride["provider"],
+        model,
+      });
+    } else {
+      // Provider switched before a model was picked — drop any stale override
+      // so we never keep a model that belongs to a different provider.
       setSkepticModelOverride(null);
-      return;
     }
-    // The provider originates from a server-validated candidate list; the API
-    // route re-validates via `isValidSkepticOverride` (unknown provider → 400),
-    // so this cast is safe — the server is the authoritative gate.
-    const next: SkepticModelOverride = {
-      provider: provider as SkepticModelOverride["provider"],
-      model,
-    };
-    setSkepticModelOverride(next);
   }
 
+  const label = skepticModelOverride
+    ? `${skepticModelOverride.provider}/${skepticModelOverride.model}`
+    : "Inherit";
+
+  const currentProvider = skepticModelOverride?.provider ?? draftProvider;
+  const currentModel = skepticModelOverride?.model ?? "";
+
   return (
-    <label
-      className="inline-flex items-center gap-1.5 h-8 pl-2.5 pr-1.5 rounded-lg border border-white/10 bg-white/[0.03] text-xs font-medium text-muted-foreground focus-within:ring-2 focus-within:ring-primary/40"
-      title="Skeptic model — the reviewer proposer AND the reflection critic run on this model. 'Inherit' uses your Settings default. Applies to the next turn onward."
-    >
-      <ShieldQuestion className="w-3.5 h-3.5 shrink-0" />
-      <span className="hidden md:inline-block">Skeptic</span>
-      <select
-        value={currentValue}
-        onChange={(e) => onChange(e.target.value)}
+    <div className="relative" ref={rootRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
         aria-label="Skeptic model override"
-        className="bg-transparent text-foreground/90 text-xs focus:outline-none max-w-[9rem] cursor-pointer"
+        title="Skeptic model — the reviewer proposer AND the reflection critic run on this model. 'Inherit' uses your Settings default. Applies to the next turn onward."
+        className="inline-flex items-center gap-1.5 h-8 pl-2.5 pr-2 rounded-lg border border-white/10 bg-white/[0.03] text-xs font-medium text-muted-foreground hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-primary/40"
       >
-        <option value={INHERIT}>Inherit Settings</option>
-        {candidates.map((c) => (
-          <option key={keyOf(c)} value={keyOf(c)}>
-            {c.provider}/{c.model}
-          </option>
-        ))}
-        {showOrphan && override && (
-          <option value={keyOf(override)}>
-            {override.provider}/{override.model}
-          </option>
-        )}
-      </select>
-    </label>
+        <ShieldQuestion className="w-3.5 h-3.5 shrink-0" />
+        <span className="hidden md:inline-block">Skeptic</span>
+        <span className="max-w-[9rem] truncate text-foreground/90">{label}</span>
+        <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+
+      {open && (
+        <div className="absolute right-0 z-50 mt-1 w-[22rem] max-w-[80vw] rounded-lg border border-white/10 bg-background p-3 shadow-xl animate-in fade-in-0 zoom-in-95">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground">Skeptic model (next turn onward)</span>
+            <button
+              type="button"
+              onClick={() => {
+                setSkepticModelOverride(null);
+                setOpen(false);
+              }}
+              className="text-xs text-muted-foreground underline hover:text-foreground"
+            >
+              Inherit Settings
+            </button>
+          </div>
+          {settings ? (
+            <SkepticModelFields
+              settings={settings}
+              provider={currentProvider}
+              model={currentModel}
+              onChange={handleChange}
+              forceFetch
+            />
+          ) : (
+            <div className="py-4 text-center text-xs text-muted-foreground">Loading…</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

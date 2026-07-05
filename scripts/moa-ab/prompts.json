@@ -1,0 +1,62 @@
+[
+  {
+    "id": "contentious-sqlite",
+    "category": "contentious",
+    "prompt": "Orchestra is a solo-developer, local-first Next.js app that stores ALL state as JSON files on disk (chats, settings, vector memory) with atomic-write helpers and an in-process file lock. Should it migrate to SQLite? Give a definitive recommendation, the 3 strongest reasons for and the 3 strongest against, and state concretely what evidence would change your answer."
+  },
+  {
+    "id": "contentious-monorepo",
+    "category": "contentious",
+    "prompt": "A solo developer maintains 5 tightly-coupled services: a Telegram bot, a Next.js dashboard, two Cloudflare Workers, and a shared TypeScript types package. Currently 5 separate git repos. Monorepo or stay polyrepo? Commit to one recommendation, name the 3 strongest arguments each way, and state the single most likely way your recommendation goes wrong."
+  },
+  {
+    "id": "contentious-rust-rewrite",
+    "category": "contentious",
+    "prompt": "A 2-person team of junior Python developers runs a nightly data pipeline (pandas, ~40 min runtime, occasionally OOMs on 16GB). A consultant proposes rewriting it in Rust for '10x speed'. Should they? Give a definitive answer, the strongest case for and against, and at least one alternative that dominates the rewrite if it exists."
+  },
+  {
+    "id": "contentious-rest-graphql",
+    "category": "contentious",
+    "prompt": "A Telegram Mini App backend runs on Cloudflare Workers: ~15 endpoints, one mobile client, single developer, KV + D1 storage. REST or GraphQL? Decide, justify with the 3 factors that actually matter for THIS case (not generic pros/cons), and name the condition under which you'd flip your answer."
+  },
+  {
+    "id": "faceted-offline-sync",
+    "category": "multi-faceted",
+    "prompt": "Design offline-first note synchronization between 3 personal devices (laptop, phone, tablet) WITHOUT any central server. Cover: conflict resolution strategy, data model, device discovery/transport, encryption, what happens when a device is lost, and the failure modes of your design. Be concrete about algorithms and tradeoffs."
+  },
+  {
+    "id": "faceted-nextjs-migration",
+    "category": "multi-faceted",
+    "prompt": "Plan a production migration from Next.js 12 (pages router, getServerSideProps everywhere, 50K DAU, custom Express server, styled-components) to Next.js 15 app router. Give: the ordered migration phases, the 3 riskiest steps and why, what can be migrated incrementally vs must flip atomically, the rollback strategy, and what you would explicitly NOT migrate."
+  },
+  {
+    "id": "faceted-key-leak",
+    "category": "multi-faceted",
+    "prompt": "You discover an AWS access key committed to a public GitHub repo 3 weeks ago (repo has 12 stars, key belongs to a startup's production account). Write the complete incident response: immediate containment steps in order, how to assess what the key accessed, git history cleanup and its limits, notification obligations, and the process changes that prevent recurrence. Flag which steps are time-critical."
+  },
+  {
+    "id": "fact-js-sort",
+    "category": "fact-sensitive",
+    "prompt": "Explain the exact semantics of JavaScript's Array.prototype.sort when called WITHOUT a comparator on an array of numbers: the default string-coercion rules, how undefined and holes are ordered, what stability the spec guarantees and since which ECMAScript edition, and which algorithm V8 has used since 2018. Be precise and explicitly flag anything you are unsure of."
+  },
+  {
+    "id": "fact-python-gil",
+    "category": "fact-sensitive",
+    "prompt": "Explain precisely what Python's GIL does and does not guarantee: which operations are atomic under it, why `x += 1` is still racy, how it interacts with C extensions and I/O, and what changed with the free-threading work in Python 3.13 (PEP number, build flag, current status). Flag anything you are not certain about."
+  },
+  {
+    "id": "fact-http-caching",
+    "category": "fact-sensitive",
+    "prompt": "Explain HTTP caching precisely: the exact difference between Cache-Control: no-cache, no-store, and must-revalidate; how max-age interacts with them; the ETag/If-None-Match 304 revalidation flow; and one widespread misconception about no-cache. Cite the governing RFC. Flag anything you are unsure of."
+  },
+  {
+    "id": "control-fib",
+    "category": "consensus-control",
+    "prompt": "Write a Python function that returns the n-th Fibonacci number iteratively, with a proper docstring, input validation, and two example calls showing expected output."
+  },
+  {
+    "id": "control-email-regex",
+    "category": "consensus-control",
+    "prompt": "Write a JavaScript function that does a pragmatic email format validation with a regex (not full RFC 5322), explain what the regex accepts and rejects, and note why full RFC-compliant regex validation is a bad idea."
+  }
+]

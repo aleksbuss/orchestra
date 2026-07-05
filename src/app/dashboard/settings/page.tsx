@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Check, Loader2, Moon, Save, ShieldCheck, Sun } from "lucide-react";
-import { ChatModelWizard, UtilityModelWizard, EmbeddingsModelWizard } from "@/components/settings/model-wizards";
+import { ChatModelWizard, UtilityModelWizard, EmbeddingsModelWizard, SkepticModelFields } from "@/components/settings/model-wizards";
 import { ApiKeyVault } from "@/components/settings/api-key-vault";
 import { updateSettingsByPath } from "@/lib/settings/update-settings-path";
 import type { AppSettings } from "@/lib/types";
@@ -215,29 +215,24 @@ export default function SettingsPage() {
                       API key inherits from the key vault / chat model for the same provider.
                     </p>
                   </div>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <select
-                      value={settings.proposerTiers?.skeptic?.provider || "openrouter"}
-                      onChange={(e) =>
-                        updateSettings("proposerTiers.skeptic.provider", e.target.value, true)
-                      }
-                      className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  <SkepticModelFields
+                    settings={settings}
+                    provider={settings.proposerTiers?.skeptic?.provider || "openrouter"}
+                    model={settings.proposerTiers?.skeptic?.model ?? ""}
+                    onChange={(prov, mdl) => {
+                      updateSettings("proposerTiers.skeptic.provider", prov, true);
+                      updateSettings("proposerTiers.skeptic.model", mdl, true);
+                    }}
+                  />
+                  {settings.proposerTiers?.skeptic?.model && (
+                    <button
+                      type="button"
+                      onClick={() => updateSettings("proposerTiers.skeptic.model", "", true)}
+                      className="text-xs text-muted-foreground underline hover:text-foreground"
                     >
-                      <option value="openrouter">OpenRouter</option>
-                      <option value="ollama">Ollama</option>
-                      <option value="openai">OpenAI</option>
-                      <option value="anthropic">Anthropic</option>
-                      <option value="google">Google</option>
-                    </select>
-                    <Input
-                      placeholder="model id (empty = use tier)"
-                      className="flex-1"
-                      value={settings.proposerTiers?.skeptic?.model ?? ""}
-                      onChange={(e) =>
-                        updateSettings("proposerTiers.skeptic.model", e.target.value, true)
-                      }
-                    />
-                  </div>
+                      Clear — fall back to the tier path
+                    </button>
+                  )}
                   {settings.proposerTiers?.skeptic?.model &&
                     settings.swarmSandbox?.reviewer && (
                       <p className="text-sm text-amber-500">

@@ -51,19 +51,24 @@ import {
 import { saveGoal, updateGoal } from "@/lib/storage/goal-store";
 import { snapshotBeforeWrite } from "@/lib/storage/snapshots";
 import type { GoalTaskStatus } from "@/lib/types";
-import { dataPath } from "@/lib/storage/data-dir";
 import {
   inferLanguageFromPath,
-  parseLocalMarkdownLinks,
-  parseRequiredSkillResourceLinks,
   slugifyProjectId,
 } from "@/lib/tools/text-helpers";
+import {
+  normalizeContextPathForOutput,
+  resolveContextCwd,
+  resolveOutgoingFilePath,
+  resolveReadableFilePath,
+} from "@/lib/tools/tool-paths";
+import {
+  SKILL_RESOURCE_READ_MAX_CHARS,
+  formatRequiredResourceSkipReason,
+  listSkillResourcePaths,
+  loadRequiredSkillResources,
+  resolveSkillLocalFile,
+} from "@/lib/tools/skill-resources";
 
-const SKILL_RESOURCE_LIST_LIMIT = 60;
-const SKILL_RESOURCE_READ_MAX_CHARS = 24000;
-const SKILL_REQUIRED_AUTOLOAD_MAX_FILES = 4;
-const SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_TOTAL = 50000;
-const SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_PER_FILE = 18000;
 const CODE_EXEC_MAX_CHARS = 20000;
 const CODE_EXEC_MAX_LINES = 800;
 const TEXT_FILE_READ_MAX_CHARS = 30000;
@@ -111,125 +116,6 @@ function getTelegramRuntimeData(context: AgentContext): TelegramRuntimeData | nu
   return { botToken, chatId };
 }
 
-function resolveOutgoingFilePath(context: AgentContext, rawPath: string): string {
-  const value = rawPath.trim();
-  if (!value) {
-    throw new Error("file_path is required");
-  }
-  if (path.isAbsolute(value)) {
-    return path.resolve(value);
-  }
-
-  const cwd = resolveContextCwd(context);
-  return path.resolve(cwd, value);
-}
-
-async function isExistingRegularFile(filePath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(filePath);
-    return stat.isFile();
-  } catch {
-    return false;
-  }
-}
-
-function uniquePaths(paths: string[]): string[] {
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const candidate of paths) {
-    const normalized = path.normalize(candidate);
-    if (!normalized || seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(normalized);
-  }
-  return result;
-}
-
-async function resolveReadableFilePath(
-  context: AgentContext,
-  rawPath: string
-): Promise<string> {
-  const value = rawPath.trim();
-  if (!value) {
-    throw new Error("file_path is required");
-  }
-
-  const normalizedInput = value.replace(/\\/g, "/").replace(/^\.\/+/, "");
-  const candidates: string[] = [resolveOutgoingFilePath(context, value)];
-
-  // Heuristic for accidental Unix absolute paths without a leading slash,
-  // e.g. "Users/name/file.pdf" instead of "/Users/name/file.pdf".
-  if (!path.isAbsolute(value) && /^(Users|home|var|tmp)\//.test(normalizedInput)) {
-    candidates.push(path.resolve(path.sep, normalizedInput));
-  }
-
-  if (path.isAbsolute(value)) {
-    candidates.push(path.resolve(value));
-  }
-
-  const chatId = context.chatId?.trim();
-  if (chatId) {
-    const chatFilesDir = dataPath("chat-files", chatId);
-    const sanitized = value.replace(/^\.\/+/, "");
-
-    if (!path.isAbsolute(value) && !sanitized.includes("/") && !sanitized.includes("\\")) {
-      candidates.push(path.join(chatFilesDir, sanitized));
-    }
-
-    if (!path.isAbsolute(value)) {
-      if (normalizedInput.startsWith("chat-files/")) {
-        candidates.push(dataPath(normalizedInput));
-      } else if (normalizedInput.startsWith("data/chat-files/")) {
-        candidates.push(path.resolve(process.cwd(), normalizedInput));
-      }
-    }
-  }
-
-  const uniqueCandidates = uniquePaths(candidates);
-  for (const candidate of uniqueCandidates) {
-    if (await isExistingRegularFile(candidate)) {
-      return candidate;
-    }
-  }
-
-  return uniqueCandidates[0];
-}
-
-function resolveContextCwd(context: AgentContext): string {
-  // Prefer pre-resolved `context.workDir` when the agent context builder set
-  // it (linked projects honor `absoluteRoot` here). Fall back to the sync
-  // `getWorkDir` for sandbox projects and pre-existing call sites that
-  // haven't been migrated to populate `workDir` yet.
-  const baseDir = context.workDir?.trim() || getWorkDir(context.projectId);
-  const rawCurrentPath = context.currentPath?.trim();
-  if (!rawCurrentPath) {
-    return baseDir;
-  }
-
-  // currentPath is expected to be project-relative; normalize absolute-like inputs ("/foo")
-  // to stay inside the active project work directory.
-  const normalized = path.normalize(rawCurrentPath).replace(/^[/\\]+/, "");
-  const resolved = path.resolve(baseDir, normalized);
-
-  if (
-    resolved === baseDir ||
-    resolved.startsWith(baseDir + path.sep)
-  ) {
-    return resolved;
-  }
-
-  return baseDir;
-}
-
-function normalizeContextPathForOutput(rawPath: string | null | undefined): string {
-  const raw = rawPath?.trim();
-  if (!raw) {
-    return "";
-  }
-  const normalized = path.normalize(raw).replace(/^[/\\]+/, "").replace(/\\/g, "/");
-  return normalized === "." ? "" : normalized;
-}
-
 async function allocateProjectId(baseId: string): Promise<string> {
   const normalizedBase = slugifyProjectId(baseId);
   let candidate = normalizedBase;
@@ -239,208 +125,6 @@ async function allocateProjectId(baseId: string): Promise<string> {
     counter += 1;
   }
   return candidate;
-}
-
-async function resolveSkillLocalFile(
-  skillDir: string,
-  relativePath: string
-): Promise<string | null> {
-  const normalized = path.normalize(relativePath).replace(/^[/\\]+/, "");
-  if (!normalized || normalized.includes("..")) return null;
-
-  const skillRoot = path.resolve(skillDir);
-  const fullPath = path.resolve(skillRoot, normalized);
-  if (!fullPath.startsWith(skillRoot + path.sep) && fullPath !== skillRoot) {
-    return null;
-  }
-
-  try {
-    const stat = await fs.stat(fullPath);
-    if (!stat.isFile()) return null;
-    return fullPath;
-  } catch {
-    return null;
-  }
-}
-
-async function isDirectory(dirPath: string): Promise<boolean> {
-  try {
-    const stat = await fs.stat(dirPath);
-    return stat.isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-async function collectSkillFilesRecursive(
-  rootDir: string,
-  skillDir: string,
-  limit: number
-): Promise<string[]> {
-  const results: string[] = [];
-  const queue: string[] = [rootDir];
-
-  while (queue.length > 0 && results.length < limit) {
-    const dir = queue.shift()!;
-    const entries = await fs
-      .readdir(dir, { withFileTypes: true })
-      .catch(() => null);
-    if (!entries) {
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (results.length >= limit) break;
-      if (entry.name.startsWith(".")) continue;
-
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        queue.push(fullPath);
-        continue;
-      }
-      if (!entry.isFile()) continue;
-
-      const relative = path.relative(skillDir, fullPath).replaceAll("\\", "/");
-      results.push(relative);
-    }
-  }
-
-  return results;
-}
-
-async function listSkillResourcePaths(
-  skillDir: string,
-  skillBody: string
-): Promise<string[]> {
-  const result: string[] = [];
-  const seen = new Set<string>();
-  const pushUnique = (value: string) => {
-    if (seen.has(value) || result.length >= SKILL_RESOURCE_LIST_LIMIT) return;
-    seen.add(value);
-    result.push(value);
-  };
-
-  const links = parseLocalMarkdownLinks(skillBody);
-  for (const link of links) {
-    if (result.length >= SKILL_RESOURCE_LIST_LIMIT) break;
-    const fullPath = await resolveSkillLocalFile(skillDir, link);
-    if (!fullPath) continue;
-    const relative = path.relative(skillDir, fullPath).replaceAll("\\", "/");
-    pushUnique(relative);
-  }
-
-  const resourceDirs = ["references", "scripts", "assets"];
-  for (const dirName of resourceDirs) {
-    if (result.length >= SKILL_RESOURCE_LIST_LIMIT) break;
-    const dirPath = path.join(skillDir, dirName);
-    if (!(await isDirectory(dirPath))) continue;
-    const remaining = SKILL_RESOURCE_LIST_LIMIT - result.length;
-    const files = await collectSkillFilesRecursive(dirPath, skillDir, remaining);
-    for (const file of files) {
-      pushUnique(file);
-    }
-  }
-
-  return result;
-}
-
-interface RequiredSkillResourceContent {
-  relativePath: string;
-  language: string;
-  content: string;
-  truncated: boolean;
-}
-
-type RequiredResourceSkipReason =
-  | "not_found"
-  | "read_error"
-  | "file_limit"
-  | "char_limit";
-
-interface RequiredSkillResourceSkip {
-  relativePath: string;
-  reason: RequiredResourceSkipReason;
-}
-
-interface RequiredSkillResourceAutoloadReport {
-  detectedLinks: string[];
-  loaded: RequiredSkillResourceContent[];
-  skipped: RequiredSkillResourceSkip[];
-}
-
-async function loadRequiredSkillResources(
-  skillDir: string,
-  skillBody: string
-): Promise<RequiredSkillResourceAutoloadReport> {
-  const requiredLinks = parseRequiredSkillResourceLinks(skillBody);
-  const loaded: RequiredSkillResourceContent[] = [];
-  const skipped: RequiredSkillResourceSkip[] = [];
-  let totalChars = 0;
-
-  for (const link of requiredLinks) {
-    const normalizedLink = link.replace(/\\/g, "/");
-    if (loaded.length >= SKILL_REQUIRED_AUTOLOAD_MAX_FILES) {
-      skipped.push({ relativePath: normalizedLink, reason: "file_limit" });
-      continue;
-    }
-    if (totalChars >= SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_TOTAL) {
-      skipped.push({ relativePath: normalizedLink, reason: "char_limit" });
-      continue;
-    }
-
-    const fullPath = await resolveSkillLocalFile(skillDir, link);
-    if (!fullPath) {
-      skipped.push({ relativePath: normalizedLink, reason: "not_found" });
-      continue;
-    }
-
-    let raw: string;
-    try {
-      raw = await fs.readFile(fullPath, "utf-8");
-    } catch {
-      skipped.push({ relativePath: normalizedLink, reason: "read_error" });
-      continue;
-    }
-
-    const remaining = SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_TOTAL - totalChars;
-    const maxForFile = Math.min(SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_PER_FILE, remaining);
-    if (maxForFile <= 0) {
-      skipped.push({ relativePath: normalizedLink, reason: "char_limit" });
-      continue;
-    }
-
-    const truncated = raw.length > maxForFile;
-    const content = truncated ? raw.slice(0, maxForFile) : raw;
-    totalChars += content.length;
-
-    loaded.push({
-      relativePath: path.relative(skillDir, fullPath).replaceAll("\\", "/"),
-      language: inferLanguageFromPath(fullPath),
-      content,
-      truncated,
-    });
-  }
-
-  return {
-    detectedLinks: requiredLinks,
-    loaded,
-    skipped,
-  };
-}
-
-function formatRequiredResourceSkipReason(reason: RequiredResourceSkipReason): string {
-  switch (reason) {
-    case "not_found":
-      return "not found";
-    case "read_error":
-      return "read error";
-    case "file_limit":
-      return `file limit (${SKILL_REQUIRED_AUTOLOAD_MAX_FILES})`;
-    case "char_limit":
-      return `char limit (${SKILL_REQUIRED_AUTOLOAD_MAX_CHARS_TOTAL})`;
-    default:
-      return reason;
-  }
 }
 
 /**

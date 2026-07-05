@@ -53,7 +53,7 @@ function StepIndicator({
   );
 }
 
-function ModelSelect({
+export function ModelSelect({
   value,
   models,
   loading,
@@ -224,13 +224,19 @@ function ApiKeyInput({
   );
 }
 
-function useModels(
+export function useModels(
   provider: string,
   apiKey: string,
   requiresApiKey: boolean,
   type: "chat" | "embedding" = "chat",
   baseUrl?: string,
-  envApiKeyAvailable: boolean = false
+  envApiKeyAvailable: boolean = false,
+  // When true, skip the client-side key guard and attempt the catalog fetch
+  // regardless — `/api/models` resolves the provider key SERVER-SIDE from
+  // settings/env. Used by the Skeptic panel picker, where the client only
+  // holds masked keys but the server can still list models. Defaults false so
+  // every existing wizard caller keeps its exact prior gating (zero regression).
+  forceFetch: boolean = false
 ) {
   const [models, setModels] = useState<Array<{ id: string; name: string }>>([]);
   const [loading, setLoading] = useState(false);
@@ -242,7 +248,7 @@ function useModels(
     // settings-stored apiKey: backend resolves `process.env.<PROVIDER>_API_KEY`
     // server-side. Without this, users who only configured `.env.local`
     // saw the Custom Swarm Configuration model list grayed out.
-    if (requiresApiKey && !apiKey && !envApiKeyAvailable) return;
+    if (requiresApiKey && !apiKey && !envApiKeyAvailable && !forceFetch) return;
     const providerConfig = MODEL_PROVIDERS[provider];
 
     setLoading(true);
@@ -346,7 +352,7 @@ function useModels(
     } finally {
       setLoading(false);
     }
-  }, [provider, apiKey, requiresApiKey, type, baseUrl, envApiKeyAvailable]);
+  }, [provider, apiKey, requiresApiKey, type, baseUrl, envApiKeyAvailable, forceFetch]);
 
   useEffect(() => {
     void fetchModels();
@@ -748,6 +754,107 @@ export function ModelConfigWizard({
   );
 }
 
+
+/**
+ * Providers offered for the Skeptic model. MUST stay a SUBSET of
+ * `KNOWN_PROVIDERS` in `moa-personas.ts` — the server re-validates a skeptic
+ * override via `isValidSkepticOverride` and 400s an unknown provider. CLI
+ * providers (codex-cli / gemini-cli) are intentionally excluded: the validator
+ * rejects them, so offering them here would only yield a 400. `mock` is a
+ * test-only provider and is likewise omitted from the production UI.
+ */
+export const SKEPTIC_PROVIDERS = [
+  "openrouter",
+  "ollama",
+  "openai",
+  "anthropic",
+  "google",
+  "sglang",
+  "vllm",
+  "custom",
+] as const;
+
+/**
+ * DDD — shared Skeptic model picker: a provider `<select>` (restricted to the
+ * server-accepted set above) plus the SAME searchable model catalog
+ * (`useModels` → `/api/models`) the orchestrator wizard uses. Reused by BOTH
+ * Skeptic surfaces so the Skeptic is chosen exactly like the orchestrator:
+ *   - Settings → "Direct Skeptic Model" (writes `proposerTiers.skeptic`), and
+ *   - the per-request chat panel (writes the Zustand override).
+ * Emits `{provider, model}` only — the server re-validates and resolves the key
+ * (the client never supplies one). `forceFetch` lets the panel list a catalog
+ * even though it only holds masked keys (server-side key resolution).
+ */
+export function SkepticModelFields({
+  settings,
+  provider,
+  model,
+  onChange,
+  forceFetch = false,
+}: {
+  settings: AppSettings;
+  provider: string;
+  model: string;
+  onChange: (provider: string, model: string) => void;
+  forceFetch?: boolean;
+}) {
+  const providerConfig = MODEL_PROVIDERS[provider];
+  const requiresApiKey = providerConfig?.requiresApiKey ?? true;
+
+  // Best-effort client-visible key for the catalog fetch (may be masked/empty —
+  // `forceFetch` + server-side resolution in `/api/models` covers that).
+  const providerApiKeys = settings.providerApiKeys as
+    | Record<string, string | undefined>
+    | undefined;
+  const envApiKeys = settings.envApiKeys as
+    | Record<string, boolean | undefined>
+    | undefined;
+  const keyFromVault = providerApiKeys?.[provider] || "";
+  const keyFromChat =
+    settings.chatModel?.provider === provider ? settings.chatModel?.apiKey || "" : "";
+  const keyFromUtility =
+    settings.utilityModel?.provider === provider ? settings.utilityModel?.apiKey || "" : "";
+  const effectiveApiKey = keyFromVault || keyFromChat || keyFromUtility;
+  const envApiKeyAvailable = envApiKeys?.[provider] === true;
+
+  const { models, loading, error } = useModels(
+    provider,
+    effectiveApiKey,
+    requiresApiKey,
+    "chat",
+    providerConfig?.baseUrl,
+    envApiKeyAvailable,
+    forceFetch
+  );
+
+  return (
+    <div className="flex flex-col gap-2 sm:flex-row">
+      <select
+        value={provider}
+        onChange={(e) => onChange(e.target.value, "")}
+        aria-label="Skeptic provider"
+        className="rounded-md border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+      >
+        {SKEPTIC_PROVIDERS.map((p) => (
+          <option key={p} value={p}>
+            {MODEL_PROVIDERS[p]?.name ?? p}
+          </option>
+        ))}
+      </select>
+      <div className="flex-1">
+        <ModelSelect
+          value={model}
+          models={models}
+          loading={loading}
+          error={error}
+          disabled={!provider}
+          onChange={(m) => onChange(provider, m)}
+          placeholder="Search & select a model…"
+        />
+      </div>
+    </div>
+  );
+}
 
 export function ChatModelWizard({ settings, updateSettings }: { settings: AppSettings; updateSettings: UpdateSettingsFn; }) {
   return <ModelConfigWizard settings={settings} updateSettings={updateSettings} configKey="chatModel" title="Chat Model (Orchestrator / Brain)" />;

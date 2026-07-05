@@ -100,3 +100,140 @@ describe("createAgentTools — registration + gating contract (F-15)", () => {
     expect(await exec({ message: "done" }, {})).toBe("done");
   });
 });
+
+/**
+ * Full-inventory characterization (§10 tool.ts decomposition).
+ *
+ * Pins the EXACT tool-name set `createAgentTools` returns for a fully-featured
+ * context and the exact delta each gate removes. This is the parity net for
+ * the family-file split: the facade recomposition must reproduce this
+ * inventory byte-for-byte. Adding/removing a tool is a deliberate contract
+ * change — update the list here in the same PR (that is the point).
+ */
+describe("createAgentTools — full inventory characterization", () => {
+  const fullCtx = () =>
+    ctx({
+      data: { telegram: { botToken: "token", chatId: 42 } },
+    } as Partial<AgentContext>);
+
+  const FULL_INVENTORY = [
+    "call_subordinate",
+    "code_execution",
+    "copy_file",
+    "create_goal_tree",
+    "create_project",
+    "create_skill",
+    "cron",
+    "delete_mcp_server",
+    "delete_skill",
+    "fetch_webpage",
+    "get_current_project",
+    "inject_mcp_defaults",
+    "install_packages",
+    "install_skill_from_github",
+    "knowledge_query",
+    "list_projects",
+    "load_skill",
+    "load_skill_resource",
+    "memory_delete",
+    "memory_load",
+    "memory_save",
+    "process",
+    "read_pdf_file",
+    "read_text_file",
+    "replace_in_file",
+    "response",
+    "search_blackboard",
+    "search_web",
+    "switch_project",
+    "telegram_send_file",
+    "update_skill",
+    "update_task_status",
+    "upsert_mcp_server",
+    "web_task",
+    "write_skill_file",
+    "write_text_file",
+    "write_to_blackboard",
+  ];
+
+  function names(tools: Record<string, unknown>): string[] {
+    return Object.keys(tools).sort();
+  }
+
+  function removedByGate(gatedTools: Record<string, unknown>): string[] {
+    const gated = new Set(Object.keys(gatedTools));
+    return FULL_INVENTORY.filter((name) => !gated.has(name));
+  }
+
+  it("a fully-featured context yields the exact expected inventory", () => {
+    expect(names(createAgentTools(fullCtx(), settings()))).toEqual(FULL_INVENTORY);
+  });
+
+  it("no projectId removes exactly the project-scoped tools", () => {
+    const tools = createAgentTools(
+      ctx({
+        projectId: undefined,
+        data: { telegram: { botToken: "token", chatId: 42 } },
+      } as Partial<AgentContext>),
+      settings()
+    );
+    expect(removedByGate(tools)).toEqual([
+      "create_skill",
+      "delete_mcp_server",
+      "delete_skill",
+      "install_skill_from_github",
+      "load_skill",
+      "load_skill_resource",
+      "search_blackboard",
+      "update_skill",
+      "upsert_mcp_server",
+      "write_skill_file",
+      "write_to_blackboard",
+    ]);
+  });
+
+  it("codeExecution disabled removes exactly the execution family", () => {
+    const tools = createAgentTools(
+      fullCtx(),
+      settings({ codeExecution: { enabled: false } })
+    );
+    expect(removedByGate(tools)).toEqual([
+      "code_execution",
+      "install_packages",
+      "process",
+    ]);
+  });
+
+  it("memory disabled removes exactly the memory family", () => {
+    const tools = createAgentTools(fullCtx(), settings({ memory: { enabled: false } }));
+    expect(removedByGate(tools)).toEqual([
+      "memory_delete",
+      "memory_load",
+      "memory_save",
+    ]);
+  });
+
+  it("unusable search removes exactly search_web", () => {
+    const tools = createAgentTools(
+      fullCtx(),
+      settings({ search: { enabled: false, provider: "none" } })
+    );
+    expect(removedByGate(tools)).toEqual(["search_web"]);
+  });
+
+  it("missing telegram runtime removes exactly telegram_send_file", () => {
+    const tools = createAgentTools(ctx(), settings());
+    expect(removedByGate(tools)).toEqual(["telegram_send_file"]);
+  });
+
+  it("agentNumber at max depth removes exactly call_subordinate", () => {
+    const tools = createAgentTools(
+      ctx({
+        agentNumber: 3,
+        data: { telegram: { botToken: "token", chatId: 42 } },
+      } as Partial<AgentContext>),
+      settings()
+    );
+    expect(removedByGate(tools)).toEqual(["call_subordinate"]);
+  });
+});

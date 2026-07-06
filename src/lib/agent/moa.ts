@@ -250,6 +250,19 @@ export interface MoAResult {
    */
   bypassed?: boolean;
   /**
+   * True when the swarm was SUPPOSED to run (not bypassed) but produced NO
+   * usable consensus — every proposer failed, so zero drafts survived
+   * `isSuccessfulDraft`. The caller injects no consensus and the final stream
+   * answers as a plain single agent WITHOUT any swarm input (and, critically,
+   * without the Skeptic's audit). Distinct from `bypassed` (a DELIBERATE
+   * Router decision on a trivial prompt): this is an UNINTENDED degradation
+   * the operator must see — otherwise a swarm turn that silently collapsed to
+   * one agent is indistinguishable from a healthy one. Surfaced by `runAgent`
+   * as a UI note + `log.warn`. Root cause is almost always unreliable proposer
+   * models (free-tier 429s under parallel load — see CLAUDE.md §1).
+   */
+  degradedToSingleAgent?: boolean;
+  /**
    * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). When
    * set, the default synthesis aggregator did NOT run: `runAgent`'s final
    * tool-capable `streamText` must synthesize these drafts inline (ONE brain
@@ -889,10 +902,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   const successfulDrafts = drafts.filter((d) => isSuccessfulDraft(d.text));
   console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded.`);
 
-  // If zero drafts succeeded, return a fallback
+  // If zero drafts succeeded, return a fallback. The `degradedToSingleAgent`
+  // flag lets `runAgent` surface the collapse to the operator (the swarm was
+  // meant to run but produced nothing — the final stream answers alone, with
+  // no Skeptic audit). Without the flag this path was silent: the string-
+  // matched "All MoA proposer agents failed" text skips consensus injection
+  // and the turn looks like a healthy single-agent answer.
   if (successfulDrafts.length === 0) {
     return {
       text: "All MoA proposer agents failed. Please check your model configuration and API keys.",
+      degradedToSingleAgent: true,
       drafts,
       aggregationLatencyMs: 0,
       totalLatencyMs: Date.now() - totalStart,

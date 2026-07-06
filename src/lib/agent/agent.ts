@@ -778,6 +778,23 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // stream follows below. This line makes the "two generations per swarm
         // turn" visible in logs for before/after comparison.
         console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total). A final tool-capable stream follows → 2 brain generations this turn (aggregator + stream).`);
+      } else if (moaResult.degradedToSingleAgent) {
+        // Every proposer failed → the swarm produced no consensus and the
+        // stream below answers as a plain single agent WITHOUT the Skeptic
+        // audit. This is UNINTENDED (distinct from a Router bypass), and was
+        // previously silent — the operator saw a normal answer with no hint
+        // the swarm collapsed. Surface it like the sibling crash branch so a
+        // degraded turn is visibly degraded. Root cause is almost always
+        // unreliable proposer models (free-tier 429s — CLAUDE.md §1).
+        console.warn(
+          `[MoA] Swarm degraded: 0/${moaResult.drafts.length} proposers produced a usable draft — answering with a single agent, NO Skeptic audit this turn. Check proposer model reliability (free-tier models 429 under parallel load).`
+        );
+        publishUiSyncEvent({
+          topic: "chat",
+          chatId: options.chatId,
+          projectId: options.projectId ?? null,
+          reason: `[MoA] Swarm stopped: all ${moaResult.drafts.length} expert proposers failed. This answer is from a single agent with no Skeptic audit. Likely cause: unreliable proposer models (e.g. free-tier rate limits).`,
+        });
       } else if (moaResult.bypassed) {
         console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);
       }

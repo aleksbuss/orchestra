@@ -46,7 +46,7 @@ vi.mock("@/lib/providers/llm-provider", () => ({
 
 import { generateObject } from "ai";
 import { generateDynamicSwarm, classifyRouterError } from "./moa-router";
-import { MOA_PROPOSERS } from "./moa-personas";
+import { MOA_PROPOSERS, detectProposerRole } from "./moa-personas";
 import { log } from "@/lib/observability/logger";
 import type { ModelConfig } from "@/lib/types";
 import type { ModelMessage } from "ai";
@@ -163,12 +163,17 @@ describe("generateDynamicSwarm — happy path", () => {
     expect(result.personas[2].modelTier).toBe("balanced");
   });
 
-  it("requiresSwarm: false short-circuits the skeptic force-inject (bypass path)", async () => {
+  it("requiresSwarm: false STILL injects the skeptic (PM #91 — forceSwarm can resurrect the swarm)", async () => {
     mockedGenerateObject.mockResolvedValue(
       fakeObjectResult({
         requiresSwarm: false,
         personas: [
-          // No reviewer here — but bypass means we don't run the swarm at all.
+          // No reviewer here. Pre-PM-91 the injection was skipped on the
+          // bypass verdict "because the swarm isn't even going to run" — but
+          // `forceSwarm` overrides the bypass at the fan-out site (moa.ts) and
+          // fans these out with NO Skeptic. The Router can't see `forceSwarm`,
+          // so it must guarantee the skeptic unconditionally; on a genuine
+          // bypass the injected critic is harmlessly discarded.
           {
             id: "x",
             role: "Generic",
@@ -192,9 +197,13 @@ describe("generateDynamicSwarm — happy path", () => {
     );
     const result = await generateDynamicSwarm("hi", [], STUB_MODEL, false);
     expect(result.requiresSwarm).toBe(false);
-    // Personas are returned as-is; the canonical critic is NOT injected
-    // because the swarm isn't even going to run.
-    expect(result.personas.find((p) => p.id === "critic")).toBeUndefined();
+    // PM #91 — the canonical critic IS now injected even on the bypass
+    // verdict, so a forceSwarm-over-bypass turn fans out WITH the guaranteed
+    // Skeptic instead of silently dropping the anti-sycophancy audit.
+    expect(result.personas.some((p) => p.id === "critic")).toBe(true);
+    expect(
+      result.personas.some((p) => detectProposerRole(p) === "reviewer")
+    ).toBe(true);
   });
 });
 

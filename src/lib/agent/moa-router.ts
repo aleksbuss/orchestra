@@ -160,7 +160,19 @@ INSTRUCTIONS:
       (p) => detectProposerRole(p) === "reviewer"
     );
     let personas = object.personas as MoAProposer[];
-    if (object.requiresSwarm && !hasSkeptic) {
+    // PM #91 — inject UNCONDITIONALLY (was gated on `object.requiresSwarm`).
+    // The old gate skipped injection whenever the Router judged the prompt
+    // trivial (`requiresSwarm: false`). But `forceSwarm` (the user's "run the
+    // swarm anyway" override) resurrects exactly that swarm at the fan-out site
+    // in `moa.ts`, and the Router never receives `forceSwarm` — so it could not
+    // know these personas would actually run. Gating here left the
+    // `forceSwarm` + trivial-verdict corner fanning out with NO guaranteed
+    // Skeptic, breaking the CLAUDE.md §1 invariant. Injecting always is FREE on
+    // the genuine-bypass path: the personas are discarded before any proposer
+    // runs, so no extra LLM call is made. It also mirrors the catch/fallback
+    // branch below, which already guarantees a skeptic via the same
+    // `!hasSkeptic` check with no `requiresSwarm` gate.
+    if (!hasSkeptic) {
       console.warn(
         `[MoA] DPG output missing a Skeptic persona — force-injecting canonical 'critic' (PM #37). Roles received: ${object.personas.map((p) => p.id).join(", ")}`
       );

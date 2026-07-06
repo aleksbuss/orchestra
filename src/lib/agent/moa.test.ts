@@ -553,10 +553,16 @@ describe("runMoAEnsemble — forceSwarm overrides Router bypass (2026-05-20)", (
       forceSwarm: true,
     });
 
-    // 3 proposers + 1 aggregator = 4 generateText calls. If forceSwarm were
-    // ignored, it would be exactly 1 (the bypass direct-answer call).
-    expect(mockedGenerateText).toHaveBeenCalledTimes(4);
-    expect(result.drafts.length).toBe(3);
+    // PM #91 — the Router now injects the canonical critic even on the bypass
+    // verdict, so forceSwarm fans out 4 personas (the 3 returned + the injected
+    // critic) + 1 aggregator = 5 generateText calls. Pre-PM-91 this was 3
+    // proposers + 1 aggregator = 4, fanning out WITHOUT the guaranteed Skeptic
+    // — the exact invariant break this test used to silently encode. If
+    // forceSwarm were ignored entirely it would be exactly 1 (bypass answer).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(5);
+    expect(result.drafts.length).toBe(4);
+    // The guaranteed Skeptic actually reached the fan-out (not just the roster).
+    expect(result.drafts.some((d) => d.proposerId === "critic")).toBe(true);
   }, 30_000);
 
   it("forceSwarm=false (the default) still respects the Router's bypass decision", async () => {

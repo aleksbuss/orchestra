@@ -45,7 +45,14 @@ vi.mock("@modelcontextprotocol/sdk/client/streamableHttp", () => ({
   },
 }));
 
-import { connectMcpServer, isMcpToolReadOnly, buildMcpToolDocsBlock } from "./client";
+import {
+  connectMcpServer,
+  isMcpToolReadOnly,
+  buildMcpToolDocsBlock,
+  getProjectMcpToolsForContext,
+} from "./client";
+import type { AgentContext } from "@/lib/agent/types";
+import type { AppSettings } from "@/lib/types";
 
 describe("buildMcpToolDocsBlock — MCP tool docs injected into the system prompt", () => {
   const metas = [
@@ -305,5 +312,67 @@ describe("connectMcpServer — connect timeout bounds a hanging MCP handshake", 
     const conn = await p;
     expect(conn).toBeNull();
     expect(mcpMock.transportClose).toHaveBeenCalled();
+  });
+});
+
+describe("PM #92 — getProjectMcpToolsForContext withholds MCP from untrusted triggers", () => {
+  const ctx = (over: Partial<AgentContext> = {}): AgentContext =>
+    ({
+      chatId: "c1",
+      projectId: "p-nonexistent-pm92",
+      memorySubdir: "main",
+      knowledgeSubdirs: [],
+      history: [],
+      agentNumber: 0,
+      ...over,
+    }) as AgentContext;
+
+  const settings = (allowExternalTriggers: boolean): AppSettings =>
+    ({
+      codeExecution: {
+        enabled: true,
+        timeout: 600,
+        maxOutputLength: 1000,
+        allowExternalTriggers,
+      },
+    }) as unknown as AppSettings;
+
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  const securityWithheld = () =>
+    warnSpy.mock.calls.some(
+      (c) =>
+        String(c[0]).includes("[Security]") &&
+        String(c[0]).includes("MCP tools withheld")
+    );
+
+  it("untrusted trigger + no opt-in → returns null and withholds (attacker input gets no MCP)", async () => {
+    const result = await getProjectMcpToolsForContext(
+      ctx({ untrustedTrigger: true }),
+      settings(false)
+    );
+    expect(result).toBeNull();
+    expect(securityWithheld()).toBe(true);
+  });
+
+  it("untrusted trigger + allowExternalTriggers opt-in → gate opens (does NOT withhold)", async () => {
+    // With the opt-in the gate must NOT fire; it delegates to getProjectMcpTools
+    // (which returns null here only because the throwaway project has no servers).
+    await getProjectMcpToolsForContext(ctx({ untrustedTrigger: true }), settings(true));
+    expect(securityWithheld()).toBe(false);
+  });
+
+  it("trusted trigger (flag undefined) → gate opens (operator/cron path unaffected)", async () => {
+    await getProjectMcpToolsForContext(
+      ctx({ untrustedTrigger: undefined }),
+      settings(false)
+    );
+    expect(securityWithheld()).toBe(false);
   });
 });

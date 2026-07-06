@@ -293,6 +293,11 @@ export async function handleExternalMessage(
     currentPath: currentPath || undefined,
     runtimeData: input.runtimeData,
     abortSignal: input.abortSignal,
+    // SECURITY (PM #92) — this is UNTRUSTED external input (a Telegram /
+    // external-API message from a non-operator). Mark the run so RCE-class
+    // tools (code_execution / install_packages / process) are withheld unless
+    // the operator explicitly opted in via codeExecution.allowExternalTriggers.
+    untrustedTrigger: true,
   });
 
   const afterChat = await getChat(resolvedChatId);

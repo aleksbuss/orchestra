@@ -62,6 +62,41 @@ describe("createAgentTools — registration + gating contract (F-15)", () => {
     ).toBeUndefined();
   });
 
+  it("SECURITY (PM #92): withholds the RCE-class family from an UNTRUSTED trigger by default", () => {
+    // External (Telegram / external-API) trigger + code execution enabled but
+    // NO explicit opt-in → the whole host-shell family (code_execution,
+    // install_packages, process) must be absent. This is the prompt-injection
+    // → RCE guard: `codeExecution.enabled` defaults to true, so without this an
+    // external message could run arbitrary code on the operator's box.
+    const untrusted = createAgentTools(
+      ctx({ untrustedTrigger: true }),
+      settings({ codeExecution: { enabled: true } })
+    );
+    expect(untrusted.code_execution).toBeUndefined();
+    expect(untrusted.install_packages).toBeUndefined();
+    expect(untrusted.process).toBeUndefined();
+  });
+
+  it("SECURITY (PM #92): a TRUSTED (operator / cron / interactive) trigger keeps code_execution", () => {
+    // The default path leaves untrustedTrigger undefined — must be unaffected.
+    expect(
+      createAgentTools(
+        ctx({ untrustedTrigger: undefined }),
+        settings({ codeExecution: { enabled: true } })
+      ).code_execution
+    ).toBeTruthy();
+  });
+
+  it("SECURITY (PM #92): allowExternalTriggers opt-in re-enables the family for untrusted triggers", () => {
+    const optedIn = createAgentTools(
+      ctx({ untrustedTrigger: true }),
+      settings({ codeExecution: { enabled: true, allowExternalTriggers: true } })
+    );
+    expect(optedIn.code_execution).toBeTruthy();
+    expect(optedIn.install_packages).toBeTruthy();
+    expect(optedIn.process).toBeTruthy();
+  });
+
   it("gates memory tools on settings.memory.enabled", () => {
     expect(createAgentTools(ctx(), settings({ memory: { enabled: true } })).memory_save).toBeTruthy();
     expect(

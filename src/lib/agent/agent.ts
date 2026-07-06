@@ -1284,6 +1284,14 @@ export async function runAgentText(options: {
    * the upstream LLM stream instead of completing and silently billing.
    */
   abortSignal?: AbortSignal;
+  /**
+   * SECURITY (PM #92) — set `true` by the external-message handler (Telegram /
+   * external-API relay) so RCE-class tools (code_execution / install_packages /
+   * process) are withheld from a non-operator trigger. Cron leaves it undefined
+   * (operator-scheduled = trusted). Threaded into the AgentContext and, from
+   * there, into every tool-family gate + propagated to subordinate agents.
+   */
+  untrustedTrigger?: boolean;
 }): Promise<string> {
   const settings = await getSettings();
   // PM #47 — Privacy Mode air-gap must hold on EVERY LLM entry point, not
@@ -1308,6 +1316,7 @@ export async function runAgentText(options: {
     knowledgeSubdirs: options.projectId ? [`${options.projectId}`, "main"] : ["main"],
     history: [],
     agentNumber: options.agentNumber ?? 0,
+    untrustedTrigger: options.untrustedTrigger,
     data: {
       ...(options.runtimeData ?? {}),
       currentUserMessage: options.userMessage,
@@ -1505,6 +1514,13 @@ export async function runSubordinateAgent(options: {
    * always pass it now.
    */
   parentChatId?: string;
+  /**
+   * SECURITY (PM #92) — the parent run's untrusted-trigger flag, propagated by
+   * `call_subordinate`. Without this, an untrusted external run (denied
+   * code_execution at level 0) could launder RCE by spawning a subordinate that
+   * rebuilds its own toolset and gets the host-shell tools back. Propagate it.
+   */
+  untrustedTrigger?: boolean;
 }): Promise<SubordinateResult> {
   const settings = await getSettings();
   // PM #47 — defense-in-depth: the subordinate is normally entered via a
@@ -1534,6 +1550,7 @@ export async function runSubordinateAgent(options: {
       : ["main"],
     history: [],
     agentNumber: options.parentAgentNumber + 1,
+    untrustedTrigger: options.untrustedTrigger,
     data: {},
   };
 

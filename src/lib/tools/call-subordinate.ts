@@ -350,7 +350,12 @@ export async function callSubordinate(
   parentAgentNumber: number,
   parentHistory: ModelMessage[],
   abortSignal?: AbortSignal,
-  parentChatId?: string
+  parentChatId?: string,
+  // SECURITY (PM #92) — the parent run's untrusted-trigger flag. Propagated to
+  // the subordinate so an untrusted external run (denied code_execution at
+  // level 0) cannot launder RCE by delegating to a subordinate that rebuilds
+  // its own toolset. The caller MUST pass `context.untrustedTrigger`.
+  untrustedTrigger?: boolean
 ): Promise<string> {
   try {
     // Budget gate first — cheap, no LLM call, fails fast on over-cap chats.
@@ -384,6 +389,8 @@ export async function callSubordinate(
           // bypasses budget enforcement AND spend bubble-up — both
           // would target a phantom chat.
           parentChatId,
+          // SECURITY (PM #92) — carry the trust context down so the gate holds.
+          untrustedTrigger,
         })
       )
     );

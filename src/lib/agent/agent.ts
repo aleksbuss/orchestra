@@ -18,7 +18,7 @@ import {
 import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
 import { createAgentTools } from "@/lib/tools/tool";
-import { getProjectMcpTools } from "@/lib/mcp/client";
+import { getProjectMcpToolsForContext } from "@/lib/mcp/client";
 import { agentSemaphore } from "./semaphore";
 import type { AgentContext } from "@/lib/agent/types";
 import { History, mergeConsecutiveSameRole } from "@/lib/agent/history";
@@ -208,7 +208,7 @@ async function runSubAgent(
   let tools = baseTools;
   let mcpDocs: string | undefined;
   if (parentContext.projectId) {
-    const mcp = await getProjectMcpTools(parentContext.projectId, role);
+    const mcp = await getProjectMcpToolsForContext(parentContext, settings, role);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpDocs = mcp.mcpSystemPrompt(4096); // Default to safe limit for sub-agents without contextWindow prop
@@ -583,7 +583,7 @@ export async function runAgent(options: RunAgentOptions) {
   let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
-    const mcp = await getProjectMcpTools(options.projectId);
+    const mcp = await getProjectMcpToolsForContext(context, settings);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
@@ -1340,7 +1340,7 @@ export async function runAgentText(options: {
   let mcpDocs: string | undefined;
   let tools = baseTools;
   if (options.projectId) {
-    const mcp = await getProjectMcpTools(options.projectId);
+    const mcp = await getProjectMcpToolsForContext(context, settings);
     if (mcp) {
       tools = { ...baseTools, ...mcp.tools };
       mcpCleanup = mcp.cleanup;
@@ -1557,7 +1557,7 @@ export async function runSubordinateAgent(options: {
   let tools = createAgentTools(context, settings);
   let mcpCleanupSub: (() => Promise<void>) | undefined;
   if (options.projectId) {
-    const mcp = await getProjectMcpTools(options.projectId);
+    const mcp = await getProjectMcpToolsForContext(context, settings);
     if (mcp) {
       tools = { ...tools, ...mcp.tools };
       mcpCleanupSub = mcp.cleanup;

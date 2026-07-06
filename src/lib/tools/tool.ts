@@ -106,7 +106,10 @@ export function createAgentTools(
           context.agentNumber,
           context.history,
           abortSignal,
-          context.chatId
+          context.chatId,
+          // SECURITY (PM #92) — propagate the parent's untrusted-trigger flag so
+          // an external run can't launder RCE through call_subordinate.
+          context.untrustedTrigger
         );
       },
     });

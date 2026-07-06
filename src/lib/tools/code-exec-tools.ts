@@ -55,6 +55,26 @@ export function createCodeExecTools(
     return {};
   }
 
+  // SECURITY (PM #92) — this whole family (code_execution runs host shell,
+  // install_packages runs arbitrary post-install hooks, process spawns
+  // children) is arbitrary code execution on the operator's machine. The
+  // EXTERNAL path (a Telegram / external-API message → handleExternalMessage →
+  // runAgentText) inherits the global toolset with no per-trust-context gate,
+  // and `codeExecution.enabled` defaults to TRUE — so without this check a
+  // prompt-injection from ANY user of ANY connected bot could drive RCE /
+  // secret exfiltration (env is scrubbed, PM #28, but files on disk are not).
+  // Deny the family to untrusted triggers unless the operator explicitly
+  // accepts the risk. The flag is propagated to subordinate agents so a single
+  // `call_subordinate` hop cannot launder an untrusted run into a trusted one.
+  if (context.untrustedTrigger && !settings.codeExecution.allowExternalTriggers) {
+    console.warn(
+      `[Security] code_execution family withheld from an UNTRUSTED (external) trigger for chat ${context.chatId}. ` +
+        `A non-operator message must not reach host-shell tools. Set settings.codeExecution.allowExternalTriggers=true ` +
+        `to allow it (NOT recommended — this exposes RCE to every user of every connected bot).`
+    );
+    return {};
+  }
+
   const tools: ToolSet = {};
 
   tools.code_execution = tool({

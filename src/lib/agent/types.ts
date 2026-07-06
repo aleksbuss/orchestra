@@ -19,6 +19,16 @@ export interface AgentContext {
   history: ModelMessage[];
   agentNumber: number;
   parentContext?: AgentContext;
+  /**
+   * SECURITY (PM #92) — true when this run was triggered by UNTRUSTED external
+   * input (a Telegram / external-API message from a non-operator), NOT the
+   * operator's own interactive or cron use. RCE-class tools (code_execution,
+   * install_packages, process) are withheld from untrusted triggers unless the
+   * operator explicitly opts in via `settings.codeExecution.allowExternalTriggers`.
+   * MUST be propagated to subordinate agents (`call_subordinate`) so the gate
+   * cannot be laundered through one hop of delegation.
+   */
+  untrustedTrigger?: boolean;
   data: Record<string, unknown>;
 }
 

@@ -2,6 +2,8 @@
 
 How the app processes a user message: from API entry to response streaming.
 
+> **Scope.** §1–§8 trace the **single-agent** path (swarm OFF, or the Router's bypass). When **Swarm is ON**, an MoA ensemble runs *inside* `runAgent` before the final stream — see **§7.5**. How the finished answer reaches the live UI is **§9**. For the deep MoA contracts see `CLAUDE.md` §1 and `docs/swarm-architecture.md`.
+
 ---
 
 ## 1. App Entry Point
@@ -121,7 +123,8 @@ The final system prompt string is joined and sent to the model call.
 
 1. **Vercel AI SDK** `streamText` is called with:
    - `model`, `system`, `messages`, `tools`;
-   - `stopWhen: stepCountIs(15)` (max 15 steps: model outputs + tool calls);
+   - `stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")]` — the per-turn step budget is **50** for the primary agent (`25` for subordinates), NOT 15. This is a cost/safety bound, not a task-sizing target; a heavy task spans several "Continue"s. When the budget is exhausted with no answer, `resolveTurnContinuation` emits a deterministic "press Continue" pause (NOT a forced fake completion).
+   - `prepareStep: createTokenGovernor(...)` — prunes the payload between steps so an in-loop payload can't overflow the context window.
    - `temperature`, `maxOutputTokens`.
 2. The model receives:
    - **system**: assembled system prompt (base + identity + tool prompts + project + skills metadata + date);
@@ -132,20 +135,52 @@ The final system prompt string is joined and sent to the model call.
    - call one or more **tools** (for example, `code_execution`, `memory_load`, `load_skill`) -> SDK runs `execute`, injects tool output into the conversation, and calls the model again (next round).
 4. The loop continues until:
    - **response** is called, or
-   - step limit (15) is reached, or
+   - the step limit (`MAX_TOOL_STEPS_PER_TURN = 50`, subordinate `25`) is reached, or
    - an error occurs.
 
 When **`load_skill`** is called, the tool reads the selected skill's full **SKILL.md** body and returns it into the conversation. The model then sees those instructions in message history and can follow them in subsequent steps.
 
 ---
 
+## 7.5 Swarm path (MoA ensemble — when Swarm is ON)
+
+**File:** `src/lib/agent/moa.ts` -> `runMoAEnsemble()`, called inside `runAgent` BEFORE the §7 stream.
+
+The ensemble's output is **never terminal** — the §7 `streamText` always runs afterward and re-answers. The ensemble only produces *advisory context* injected into the system prompt.
+
+1. **Router / DPG** (`moa-router.ts`, on `settings.utilityModel`): one `generateObject` spawns 3–5 task-specific expert personas. A canonical Skeptic/critic is **always injected** if the LLM omitted one (PM #91 — unconditional, so `forceSwarm`-over-bypass still gets it).
+2. **Bypass check:** if `requiresSwarm === false` and the user did not set `forceSwarm`, the ensemble returns a bypass signal and the single-agent stream (§7) answers directly.
+3. **Fan-out:** personas become proposers, run in parallel through `agentSemaphore` (2 permits), each on its tier model (`proposerTiers`), tool-less by default, bounded by a 2-min timeout + output cap. A proposer that throws returns an `[Error:…]` draft (the ensemble does not collapse).
+4. **Filter + branch** (`isSuccessfulDraft`): **0** successful → `degradedToSingleAgent` (surfaced to the operator); **1** → skip aggregation; **≥2** → aggregate.
+5. **Inline-synthesis collapse (default ON):** instead of a separate aggregator generation, the drafts + a synthesis directive are injected into the §7 stream's SYSTEM prompt, so that one final stream synthesizes them — one brain generation, tool-capable.
+6. **Reflection / Deep Audit (optional):** a critic→revisor loop runs to convergence when `reflection.enabled` (or the per-request `deepAudit` toggle) is set.
+
+Cross-cutting: every LLM call here receives `abortSignal` (PM #23), goes through the Privacy-Mode air-gap (PM #58), and wraps its tools in `applyGlobalToolLoopGuard` (PM #76). Usage is folded into `MoAResult.cumulativeUsage` for the cost banner.
+
+---
+
 ## 8. After Response (onFinish)
 
 - When streaming completes, **onFinish** runs.
-- In **chat-store**, the chat is updated with:
+- In **chat-store**, the chat is updated (via `safeWriteFile` — atomic temp+rename) with:
   - the latest user message;
-  - the final assistant reply (`event.text`);
+  - the final assistant reply (`event.text`), after `unwrapSerializedResponseCall` / hallucinated-tool-call recovery (PM #61/#81);
+- Trace-memory capture (few-shots for future Routers) and `detectPrematureCompletion` (surfaces a "claimed done over a failing check" note, PM #84) run here.
 - Chat title may be updated (typically from the first message).
+- MoA usage (`turnExtraUsage`) is merged with the stream's usage so the cost banner reflects the whole turn.
+
+---
+
+## 9. Realtime sync & persistence (server → UI)
+
+**Files:** `src/lib/realtime/event-bus.ts`, `src/app/api/events/route.ts`, `src/hooks/use-background-sync.ts`
+
+The stream returned in §1 delivers *this* request's tokens. Everything else (background jobs, swarm DAG nodes, another tab's edits) reaches the UI over a separate **SSE** channel:
+
+1. Any backend state change calls `publishUiSyncEvent({ topic, chatId })` — an emitter on `globalThis` (survives Next's split module graphs, PM #71).
+2. `GET /api/events` is an SSE `ReadableStream`: it subscribes, sends a `ready` event, and heartbeats. **There is no replay buffer** — an event lost in a network blink is gone.
+3. The frontend keeps **one shared `EventSource`** per tab (`use-background-sync`, browser caps at 6/origin), with backoff-reconnect and `visibilitychange`/`focus` resync.
+4. On every `ready`, the hook bumps `syncTick`; consumers like `chat-panel` refetch `GET /api/chat/history?id=…`. **The on-disk `data/chats/<id>.json` is the source of truth** — the UI reconciles against it after every gap (this is the PM #5 fix).
 
 ---
 
@@ -157,19 +192,23 @@ When **`load_skill`** is called, the tool reads the selected skill's full **SKIL
 [route.ts] extract message, resolve chatId, runAgent(...)
        v
 [agent.ts] runAgent:
-   1. getSettings() -> model, settings
+   1. getSettings() -> assertPrivacyModeAllowsSettings() -> createModel   // air-gap BEFORE the model (PM #58)
    2. getChat(chatId) -> context.history
-   3. createAgentTools(context, settings) -> tools (response, code_execution, memory_*, knowledge_query, search_web?, load_skill?, call_subordinate?)
+   3. createAgentTools(context, settings) -> applyGlobalToolLoopGuard(tools)  // response, code_execution, memory_*, knowledge_query, search_web?, load_skill?, call_subordinate?
    4. buildSystemPrompt(projectId, agentNumber, toolNames) ->
         system.md + Agent Identity + tool-*.md per tool + Active Project + project.instructions + loadProjectSkillsMetadata -> <available_skills> + date/time
    5. messages = history + { user, userMessage }
+   5.5 IF swarm ON: runMoAEnsemble() -> Router(DPG+forced Skeptic) -> bypass? -> proposers -> drafts
+        -> inline-synthesis handoff injected into the SYSTEM prompt (or degradedToSingleAgent)   // §7.5
    6. logLLMRequest(...)  // server console
-   7. streamText(model, system, messages, tools, stopWhen(15), ...)
+   7. streamText(model, system, messages, tools, stopWhen[stepCountIs(50), hasToolCall("response")], prepareStep=tokenGovernor, ...)
        v
 [SDK + provider] loop: model -> tool calls -> execute -> model -> ... -> response -> stream
        v
-[route.ts] result.toUIMessageStreamResponse() -> client
-[onFinish] saveChat(chat) -> persist user + assistant messages
+[route.ts] result.toUIMessageStreamResponse() -> client (this turn's tokens)
+[onFinish] safeWriteFile(chat) -> persist; trace capture; detectPrematureCompletion
+       v
+[event-bus] publishUiSyncEvent -> [/api/events SSE] -> [shared EventSource] -> syncTick -> chat-panel refetches /api/chat/history (disk = source of truth)   // §9
 ```
 
 **Prompts** define baseline behavior and text instructions per tool.  

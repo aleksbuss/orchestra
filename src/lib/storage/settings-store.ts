@@ -40,6 +40,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     enabled: true,
     timeout: 600,
     maxOutputLength: 120000,
+    // SECURITY (PM #92) — secure by default: RCE-class tools are NOT exposed to
+    // untrusted external (Telegram / external-API) triggers. Flip to true only
+    // if you fully trust every user of every connected bot.
+    allowExternalTriggers: false,
   },
   memory: {
     enabled: true,

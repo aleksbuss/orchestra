@@ -60,6 +60,16 @@ export interface AppSettings {
      * limits come from `timeout` + `maxOutputLength` above.
      */
     proposerAccess?: boolean;
+    /**
+     * SECURITY (PM #92) — opt-in to expose the RCE-class tools (code_execution,
+     * install_packages, process) to UNTRUSTED external triggers (a Telegram /
+     * external-API message from a non-operator). Default `false`/undefined:
+     * external-triggered runs get NO host-shell tools even when `enabled` is
+     * true, because `code_execution` runs arbitrary code on the operator's box
+     * and the external message is attacker-controlled (prompt-injection → RCE).
+     * Leave OFF unless you fully trust every user of every connected bot.
+     */
+    allowExternalTriggers?: boolean;
   };
   memory: {
     enabled: boolean;

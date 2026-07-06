@@ -405,6 +405,49 @@ describe("R1 — a failed reviewer (Skeptic) must NOT collapse the ensemble", ()
   }, 30_000);
 });
 
+describe("degradation signal — ALL proposers fail sets degradedToSingleAgent", () => {
+  afterEach(() => {
+    mockedGenerateText.mockReset();
+  });
+
+  it("0 successful drafts → degradedToSingleAgent: true (so runAgent can surface the silent single-agent collapse)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Systems Analyst", systemPrompt: "You are a Systems Analyst.", color: "blue" },
+          { id: "pragmatist", role: "Pragmatist", systemPrompt: "You are a Pragmatist.", color: "green" },
+          { id: "critic", role: "Adversarial Critic", systemPrompt: "You are an Adversarial Critic and Red-Teamer.", color: "rose" },
+        ],
+      },
+    } as never);
+
+    // EVERY proposer's model is down (primary + no-tools fallback both throw) —
+    // the free-tier-429-under-parallel-load scenario. The ensemble must NOT
+    // throw; it returns the failure text WITH the degradation flag so the
+    // caller shows "swarm stopped, single-agent answer, no Skeptic audit".
+    mockedGenerateText.mockImplementation((async () => {
+      throw new Error("proposer model rate-limited (429)");
+    }) as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.degradedToSingleAgent).toBe(true);
+    expect(result.text).toMatch(/^All MoA proposer agents failed/);
+    // Every draft is an error stub (nothing survived isSuccessfulDraft).
+    expect(result.drafts.length).toBeGreaterThan(0);
+    expect(result.drafts.every((d) => d.text.startsWith("[Error:"))).toBe(true);
+    // A healthy or bypassed run must NOT carry the flag (guard against a
+    // future refactor setting it unconditionally).
+    expect(result.bypassed).toBeUndefined();
+  }, 30_000);
+});
+
 describe("runMoAEnsemble — Aggregator must NOT receive consecutive user messages (PM #2)", () => {
   it("aggregator generateText call has exactly one message, role=user, no history", async () => {
     mockedGenerateObject.mockRejectedValueOnce(new Error("force fallback to MOA_PROPOSERS"));

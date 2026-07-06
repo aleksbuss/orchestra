@@ -7,7 +7,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp";
-import type { McpServerConfig } from "@/lib/types";
+import type { McpServerConfig, AppSettings } from "@/lib/types";
+import type { AgentContext } from "@/lib/agent/types";
 import type { ToolSet, ToolExecutionOptions } from "ai";
 import { dynamicTool } from "ai";
 import { z } from "zod";
@@ -592,6 +593,36 @@ export async function closeMcpConnection(conn: McpConnection): Promise<void> {
   } catch (err) {
     console.error(`[MCP] Error closing server "${conn.serverId}":`, err);
   }
+}
+
+/**
+ * SECURITY (PM #92) — trust-context-aware wrapper around `getProjectMcpTools`.
+ * MCP servers can mutate state, spawn processes, or make outbound requests
+ * (SSRF), and the read-only ALLOW decision is a NAME heuristic (see
+ * `isMcpToolReadOnly`) — too weak a boundary for attacker-controlled input. So
+ * an UNTRUSTED external trigger (Telegram / external-API message from a
+ * non-operator) gets NO MCP tools at all unless the operator explicitly opts in
+ * via `settings.codeExecution.allowExternalTriggers` — the SAME escape hatch
+ * that ungates the code-exec family (`allowExternalTriggers` = "treat external
+ * triggers as fully trusted"). Trusted operator / cron runs are unaffected.
+ * This is the single chokepoint every agent MCP callsite must route through so
+ * the gate cannot drift across the 4 entry points (PM #58 lesson).
+ */
+export async function getProjectMcpToolsForContext(
+  context: AgentContext,
+  settings: AppSettings,
+  role?: string
+): Promise<Awaited<ReturnType<typeof getProjectMcpTools>>> {
+  if (!context.projectId) return null;
+  if (context.untrustedTrigger && !settings.codeExecution.allowExternalTriggers) {
+    console.warn(
+      `[Security] MCP tools withheld from an UNTRUSTED (external) trigger for chat ${context.chatId}. ` +
+        `MCP servers can mutate/exec/SSRF and the read-only filter is name-based — not a boundary for ` +
+        `attacker input. Set settings.codeExecution.allowExternalTriggers=true to allow (NOT recommended).`
+    );
+    return null;
+  }
+  return getProjectMcpTools(context.projectId, role);
 }
 
 /**

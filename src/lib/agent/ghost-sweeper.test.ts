@@ -204,6 +204,32 @@ describe("sweepGhostTasks — skip cases", () => {
 
     expect(publishUiSyncEvent).not.toHaveBeenCalled();
   });
+
+  it("PM #93 — skips goals whose chat is NOT in the live set (deleted-chat orphan)", async () => {
+    // A goal file left behind by a deleted chat. When a live set is passed and
+    // it doesn't include this chat, the sweeper must not process it — no
+    // in_progress→failed rewrite and no spurious "ghost tasks recovered" UI
+    // event for a chat that no longer exists (sweepOrphanGoals deletes the file).
+    const { publishUiSyncEvent } = await import("@/lib/realtime/event-bus");
+    await plantGoal("c-deleted", goal({ tasks: [task({ status: "in_progress" })] }));
+
+    const m = await loadModule();
+    await m.sweepGhostTasks(new Set(["c-alive"])); // c-deleted is NOT live
+
+    const untouched = await readGoal("c-deleted");
+    expect(untouched.tasks[0].status).toBe("in_progress");
+    expect(publishUiSyncEvent).not.toHaveBeenCalled();
+  });
+
+  it("PM #93 — still sweeps a live-set chat's ghost tasks (the skip is scoped, not blanket)", async () => {
+    await plantGoal("c-alive", goal({ tasks: [task({ status: "in_progress" })] }));
+
+    const m = await loadModule();
+    await m.sweepGhostTasks(new Set(["c-alive"]));
+
+    const updated = await readGoal("c-alive");
+    expect(updated.tasks[0].status).toBe("failed");
+  });
 });
 
 describe("sweepGhostTasks — boot resilience", () => {

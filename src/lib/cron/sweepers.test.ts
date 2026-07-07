@@ -191,6 +191,44 @@ describe("PM #32 — sweepOrphanQueueEntries", () => {
   });
 });
 
+describe("PM #93 — sweepOrphanGoals", () => {
+  it("returns zero-result if data/goals does not exist", async () => {
+    const out = await sweepers.sweepOrphanGoals(new Set());
+    expect(out.scanned).toBe(0);
+    expect(out.removed).toBe(0);
+  });
+
+  it("deletes goal files for chatIds NOT in the live set, keeps the rest", async () => {
+    const goals = path.join(tmpDir, "data", "goals");
+    await fs.mkdir(goals, { recursive: true });
+    await fs.writeFile(path.join(goals, "live-1.json"), "{}");
+    await fs.writeFile(path.join(goals, "orphan-a.json"), "{}");
+    await fs.writeFile(path.join(goals, "orphan-b.json"), "{}");
+    // Non-json file — ignored entirely.
+    await fs.writeFile(path.join(goals, "stray.txt"), "x");
+
+    const out = await sweepers.sweepOrphanGoals(new Set(["live-1"]));
+
+    expect(out.scanned).toBe(3);
+    expect(out.removed).toBe(2);
+    expect(out.errors).toBe(0);
+    expect(out.removedSample.sort()).toEqual(["orphan-a.json", "orphan-b.json"]);
+
+    const remaining = (await fs.readdir(goals)).sort();
+    expect(remaining).toEqual(["live-1.json", "stray.txt"]);
+  });
+
+  it("empty live set deletes every goal file (all chats gone)", async () => {
+    const goals = path.join(tmpDir, "data", "goals");
+    await fs.mkdir(goals, { recursive: true });
+    await fs.writeFile(path.join(goals, "g1.json"), "{}");
+    await fs.writeFile(path.join(goals, "g2.json"), "{}");
+
+    const out = await sweepers.sweepOrphanGoals(new Set());
+    expect(out.removed).toBe(2);
+  });
+});
+
 describe("runAllSweepers — fail-safe when getAllChats throws (review bug_002)", () => {
   it("SKIPS orphan-keyed sweeps and preserves queue + chat-files on transient FS error", async () => {
     // Plant exactly the data a buggy `chatIds = new Set()` fallback would
@@ -202,6 +240,11 @@ describe("runAllSweepers — fail-safe when getAllChats throws (review bug_002)"
     const chatDir = path.join(tmpDir, "data", "chat-files", "chat-1");
     await fs.mkdir(chatDir, { recursive: true });
     await fs.writeFile(path.join(chatDir, "a.png"), "x");
+    // PM #93 — a goal tree must ALSO survive: a `chatIds = new Set()` fallback
+    // would mass-delete every goal file. Fail-safe means skip, not wipe.
+    const goalsDir = path.join(tmpDir, "data", "goals");
+    await fs.mkdir(goalsDir, { recursive: true });
+    await fs.writeFile(path.join(goalsDir, "goal-1.json"), "{}");
 
     vi.resetModules();
     vi.doMock("@/lib/storage/chat-store", () => ({
@@ -219,8 +262,10 @@ describe("runAllSweepers — fail-safe when getAllChats throws (review bug_002)"
     // Orphan-keyed sweeps were skipped, not run-with-empty-set.
     expect(out.queue.skipped).toBe(true);
     expect(out.chatFiles.skipped).toBe(true);
+    expect(out.goals.skipped).toBe(true);
     expect(out.queue.removed).toBe(0);
     expect(out.chatFiles.removed).toBe(0);
+    expect(out.goals.removed).toBe(0);
 
     // The data is still on disk — the whole point.
     await expect(
@@ -228,6 +273,9 @@ describe("runAllSweepers — fail-safe when getAllChats throws (review bug_002)"
     ).resolves.toBeUndefined();
     await expect(
       fs.access(path.join(chatDir, "a.png"))
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(goalsDir, "goal-1.json"))
     ).resolves.toBeUndefined();
 
     vi.doUnmock("@/lib/storage/chat-store");

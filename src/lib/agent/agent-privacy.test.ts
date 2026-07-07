@@ -6,7 +6,7 @@
  * in chatModel, utilityModel, or embeddingsModel produces a fatal
  * throw with a clear operator-facing message naming the violations.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import {
   assertPrivacyModeAllowsSettings,
   assertPrivacyModeAllowsSkepticOverride,
@@ -460,5 +460,42 @@ describe("DDD A5 — proposerTiers.skeptic slot + per-request override", () => {
         undefined
       )
     ).not.toThrow();
+  });
+});
+
+describe("Sprint 4 — resolveGuardedAgentSettings (settings + air-gap, one atomic step)", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.doUnmock("@/lib/storage/settings-store");
+  });
+
+  it("returns settings when Privacy Mode allows them (all-local)", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/storage/settings-store", () => ({
+      getSettings: vi.fn(async () => baseSettings()),
+    }));
+    const { resolveGuardedAgentSettings } = await import("./agent-privacy");
+    await expect(resolveGuardedAgentSettings()).resolves.toMatchObject({
+      chatModel: { provider: "ollama" },
+    });
+  });
+
+  it("throws the air-gap error when getSettings resolves a cloud model under Privacy Mode", async () => {
+    // The PM #58 leak: a new entry point that used bare getSettings() would
+    // ship this to the cloud. Routing through resolveGuardedAgentSettings makes
+    // that structurally impossible — the guard fires inside acquisition.
+    vi.resetModules();
+    vi.doMock("@/lib/storage/settings-store", () => ({
+      getSettings: vi.fn(async () =>
+        baseSettings({
+          privacyMode: { enabled: true },
+          chatModel: { provider: "openai", model: "gpt-4o" },
+        })
+      ),
+    }));
+    const { resolveGuardedAgentSettings } = await import("./agent-privacy");
+    await expect(resolveGuardedAgentSettings()).rejects.toThrow(
+      /Privacy Mode is enabled/
+    );
   });
 });

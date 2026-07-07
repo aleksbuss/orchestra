@@ -15,7 +15,6 @@ import {
   PLAIN_CHAT_TOOL_OVERRIDE,
   loadSynthesisInlineDirective,
 } from "@/lib/agent/prompts";
-import { getSettings } from "@/lib/storage/settings-store";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
 import { createAgentTools } from "@/lib/tools/tool";
 import { getProjectMcpToolsForContext } from "@/lib/mcp/client";
@@ -370,19 +369,19 @@ export interface RunAgentOptions {
 export {
   assertPrivacyModeAllowsSettings,
   assertPrivacyModeAllowsSkepticOverride,
+  resolveGuardedAgentSettings,
 } from "@/lib/agent/agent-privacy";
 import {
-  assertPrivacyModeAllowsSettings,
   assertPrivacyModeAllowsSkepticOverride,
+  resolveGuardedAgentSettings,
 } from "@/lib/agent/agent-privacy";
 
 export async function runAgent(options: RunAgentOptions) {
-  const settings = await getSettings();
-
-  // PM #47 — Privacy Mode enforcement. Fail fast before any LLM call so
-  // the operator/sharing-friends see the error in the chat UI rather
-  // than a partial run with cloud telemetry already in flight.
-  assertPrivacyModeAllowsSettings(settings);
+  // Sprint 4 — acquire settings + the Privacy-Mode air-gap as ONE atomic step.
+  // A bare getSettings() + a hand-copied guard line is exactly what two of the
+  // three entry points forgot (PM #58 P0 egress leak). See
+  // resolveGuardedAgentSettings.
+  const settings = await resolveGuardedAgentSettings();
   // A5 — the per-request Skeptic override is NOT in settings; guard it
   // separately (route checks too — defense in depth, PM #58 posture).
   assertPrivacyModeAllowsSkepticOverride(settings, options.skepticModelOverride);
@@ -1293,13 +1292,11 @@ export async function runAgentText(options: {
    */
   untrustedTrigger?: boolean;
 }): Promise<string> {
-  const settings = await getSettings();
-  // PM #47 — Privacy Mode air-gap must hold on EVERY LLM entry point, not
-  // just the interactive `runAgent`. This is the cron + Telegram-relay path
-  // (the Telegram webhook is unauthenticated); without the guard a cloud
-  // `chatModel` would silently ship user data off-box while the UI shows
-  // Privacy Mode ON.
-  assertPrivacyModeAllowsSettings(settings);
+  // Sprint 4 — settings + the Privacy-Mode air-gap in ONE atomic step. This is
+  // the cron + Telegram-relay path (the webhook is unauthenticated); it must
+  // NOT ship user data to a cloud model with Privacy Mode ON. PM #58 was this
+  // exact guard, forgotten here.
+  const settings = await resolveGuardedAgentSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
   const model = createModel(settings.chatModel, {
     projectId: options.projectId,
@@ -1522,12 +1519,10 @@ export async function runSubordinateAgent(options: {
    */
   untrustedTrigger?: boolean;
 }): Promise<SubordinateResult> {
-  const settings = await getSettings();
-  // PM #47 — defense-in-depth: the subordinate is normally entered via a
-  // parent `runAgent` that already enforced the air-gap, but the recursive
-  // path (Sprint 9) and any future direct caller must not be able to reach
-  // a cloud provider with Privacy Mode ON. One line, settings already in scope.
-  assertPrivacyModeAllowsSettings(settings);
+  // Sprint 4 — settings + the Privacy-Mode air-gap in ONE atomic step
+  // (defense in depth: the recursive path and any future direct caller must
+  // not reach a cloud provider with Privacy Mode ON). PM #58.
+  const settings = await resolveGuardedAgentSettings();
   const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
   const model = createModel(settings.chatModel, {
     projectId: options.projectId,

@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 93. Deleted chats orphaned their GoalTree files forever — no cleanup, no orphan sweep, spurious ghost-recovery events for dead chats
+**Date:** 2026-07
+**Status:** RESOLVED
+**Severity:** P2 — a slow resource leak (orphaned `data/goals/*.json` accumulate without bound) plus wasted work + spurious UI events. Not data loss; the cross-store inconsistency is benign per event but unbounded over time.
+**Symptoms:** After `deleteChat`, the chat's `data/goals/<chatId>.json` GoalTree stayed on disk forever. The boot + 6h `sweepGhostTasks` kept `readdir`-ing every goal file including the orphans, rewriting their `in_progress` tasks to `failed` and publishing "ghost tasks recovered" UI sync events for chats that no longer exist.
+**Detection:** Architecture review — a crash-consistency / cross-store audit (a cross-model DoubleTake pass flagged "a logical operation spanning multiple JSON stores has no transaction / reconciliation"). Grep-traced to ground truth: `deleteChat` (`chat-store.ts`) soft-deletes the chat JSON + removes the index entry but does NOT touch the goal tree; `runAllSweepers` reconciled orphan queue entries + orphan chat-files dirs + ghost in-progress tasks, but there was **no orphan-goal-FILE sweep**; and `sweepGhostTasks` processed every goal file regardless of whether its chat still existed.
+**Root Cause:** Goals were the one per-chat store that never received the "atomic cleanup on deletion + orphan-sweeper backstop" lifecycle that `queue` and `chat-files` already have. The stores are deliberately loosely-coupled (no cross-store transaction — correct for a local-first tool), and the design's answer to crash/tearing is **boot reconciliation**, not transactions — but goals were simply missing from that reconciliation set.
+**Resolution:** `sweepOrphanGoals(existingChatIds)` ([`cron/sweepers.ts`](src/lib/cron/sweepers.ts)) — a fail-safe orphan sweep (mirrors `sweepOrphanQueueEntries`) that deletes `data/goals/<chatId>.json` whose chatId ∉ the live chat set, wired into `runAllSweepers` with the SAME null-set skip (PM #60 — a transient `getAllChats` failure skips the sweep entirely rather than mass-deleting every goal tree). Plus `sweepGhostTasks(liveChatIds?)` now skips goals whose chat isn't live, so there are no spurious dead-chat events regardless of concurrent sweep ordering (a `null`/absent set → process all, exact pre-PM-93 behavior). **Deliberately reconciliation-only** (no `deleteChat` change): the chat is soft-deleted and restorable (PM #63) and goals are secondary/regenerable, so keying the sweep on the live index — exactly as `chat-files` does — is the consistent choice; hard-deleting the goal inside `deleteChat` would lose it on a trash-restore.
+**Regression Coverage:** [`sweepers.test.ts`](src/lib/cron/sweepers.test.ts) — `sweepOrphanGoals` deletes non-live / keeps live / ignores non-json, and the fail-safe test now plants a goal file and asserts it SURVIVES a `getAllChats` throw (skip, not wipe). [`ghost-sweeper.test.ts`](src/lib/agent/ghost-sweeper.test.ts) — skips a non-live chat's goal (no rewrite, no event) yet still sweeps a live chat's ghost tasks (scoped, not blanket).
+**Doc Updates:** `CLAUDE.md` §"Data Layout" (goals row retention) + the sweepers list.
+**Rule:** every per-chat store under `data/` needs BOTH halves of the lifecycle — cleanup tied to the higher-level deletion AND an orphan-sweeper backstop keyed on the LIVE chat set (fail-safe, PM #60). When you add a per-`<chatId>` file/dir, add its orphan sweep in the same PR — the Data Layout retention column must never be "never swept → leaks." And any boot reconciler that walks a per-chat store must be scoped to live chats, or it processes (and emits UI events for) deleted ones.
+
+---
+
 ## 92. Untrusted external (Telegram) triggers inherited RCE-class tools — prompt-injection → arbitrary code execution on the operator's box
 **Date:** 2026-07
 **Status:** RESOLVED

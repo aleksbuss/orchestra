@@ -39,6 +39,7 @@ const TMP_DIR = path.join(DATA_DIR, "tmp");
 const QUEUE_DIR = path.join(DATA_DIR, "queue");
 const CHAT_FILES_DIR = path.join(DATA_DIR, "chat-files");
 const CHAT_TRASH_DIR = path.join(DATA_DIR, ".trash", "chats");
+const GOALS_DIR = path.join(DATA_DIR, "goals");
 
 /** Files in `data/tmp/` older than this are eligible for deletion. */
 export const TMP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -293,6 +294,63 @@ export async function sweepOrphanChatFiles(
 }
 
 /**
+ * Delete `data/goals/<chatId>.json` GoalTree files whose chatId no longer
+ * exists in the chat index. PM #93 — `deleteChat` removes the chat JSON + the
+ * index entry but NOT the associated goal tree, so deleting a chat orphans its
+ * goal file forever. Worse, the boot/6h `sweepGhostTasks` keeps `readdir`-ing
+ * every goal file and processing the orphan (marking in_progress → failed and
+ * publishing a "ghost tasks recovered" UI event for a chat that no longer
+ * exists). This is the missing RECONCILIATION half of the "atomic cleanup on
+ * deletion + orphan-sweeper backstop" pattern that queue + chat-files already
+ * have; goals never got it.
+ *
+ * The chat-id set is injected so the unit test can stub it without booting
+ * chat-store. Fail-safe by construction: `runAllSweepers` passes `chatIds` ONLY
+ * when it could enumerate the live chats — a `null` set skips this sweep
+ * entirely (PM #60), so a transient `getAllChats` failure never mass-deletes
+ * every goal tree.
+ */
+export async function sweepOrphanGoals(
+  existingChatIds: ReadonlySet<string>
+): Promise<SweepResult> {
+  const result: SweepResult = {
+    scanned: 0,
+    removed: 0,
+    errors: 0,
+    removedSample: [],
+  };
+  let files: string[];
+  try {
+    files = await fs.readdir(GOALS_DIR);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return result;
+    throw err;
+  }
+
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    result.scanned += 1;
+    const chatId = file.slice(0, -".json".length);
+    if (existingChatIds.has(chatId)) continue;
+    const filePath = path.join(GOALS_DIR, file);
+    try {
+      await fs.unlink(filePath);
+      result.removed += 1;
+      if (result.removedSample.length < 20) {
+        result.removedSample.push(file);
+      }
+    } catch (err) {
+      result.errors += 1;
+      console.warn(
+        `[sweepers] sweepOrphanGoals failed for ${file}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+  }
+  return result;
+}
+
+/**
  * One-shot sweep of every supported subsystem. Resolves the chat id set
  * lazily so this module doesn't pull the full chat-store at import time
  * (which would in turn install the SIGTERM-flush handler — fine in prod,
@@ -314,6 +372,7 @@ export async function runAllSweepers(): Promise<{
   trash: SweepResult;
   queue: SweepResult;
   chatFiles: SweepResult;
+  goals: SweepResult;
   ghost: { ok: boolean };
 }> {
   // Dynamic import: keeps the module dependency-light at boot and lets
@@ -346,7 +405,7 @@ export async function runAllSweepers(): Promise<{
     skipped: true,
   });
 
-  const [tmp, trash, queue, chatFiles, ghost] = await Promise.all([
+  const [tmp, trash, queue, chatFiles, goals, ghost] = await Promise.all([
     sweepTempDir().catch((err) => {
       console.warn("[sweepers] sweepTempDir threw:", err);
       return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
@@ -368,13 +427,25 @@ export async function runAllSweepers(): Promise<{
           return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
         })
       : Promise.resolve(skippedResult()),
+    // PM #93 — orphan GoalTree files (deleted chat left its goal behind).
+    chatIds
+      ? sweepOrphanGoals(chatIds).catch((err) => {
+          console.warn("[sweepers] sweepOrphanGoals threw:", err);
+          return { scanned: 0, removed: 0, errors: 1, removedSample: [] };
+        })
+      : Promise.resolve(skippedResult()),
     // Dynamic import keeps sweepers.ts independent of the agent layer —
     // the only edge it adds is a single fn call, and tests can stub the
     // module without touching the daemon/goal-store wiring.
     (async () => {
       try {
         const { sweepGhostTasks } = await import("@/lib/agent/ghost-sweeper");
-        await sweepGhostTasks();
+        // PM #93 — pass the live chat set so ghost-sweeper skips goals for
+        // chats that no longer exist (deleted-chat orphans), independent of
+        // whether sweepOrphanGoals (which deletes those files) has finished
+        // this cycle. A null set (getAllChats failed) → undefined → process
+        // all, exactly the pre-PM-93 behavior.
+        await sweepGhostTasks(chatIds ?? undefined);
         return { ok: true };
       } catch (err) {
         console.warn("[sweepers] sweepGhostTasks threw:", err);
@@ -396,6 +467,10 @@ export async function runAllSweepers(): Promise<{
       scanned: chatFiles.scanned,
       removed: chatFiles.removed,
       errors: chatFiles.errors,
+    })}, goals ${JSON.stringify({
+      scanned: goals.scanned,
+      removed: goals.removed,
+      errors: goals.errors,
     })}, trash ${JSON.stringify({
       scanned: trash.scanned,
       removed: trash.removed,
@@ -403,7 +478,7 @@ export async function runAllSweepers(): Promise<{
     })}, ghost ${JSON.stringify(ghost)}`
   );
 
-  return { tmp, trash, queue, chatFiles, ghost };
+  return { tmp, trash, queue, chatFiles, goals, ghost };
 }
 
 /**

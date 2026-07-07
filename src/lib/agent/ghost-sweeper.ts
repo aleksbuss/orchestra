@@ -9,7 +9,9 @@ import { getDataDir } from "@/lib/storage/data-dir";
 const DATA_DIR = getDataDir();
 const GOALS_DIR = path.join(DATA_DIR, "goals");
 
-export async function sweepGhostTasks(): Promise<void> {
+export async function sweepGhostTasks(
+  liveChatIds?: ReadonlySet<string>
+): Promise<void> {
   try {
     await ensureGoalsDir();
     const files = await fs.readdir(GOALS_DIR);
@@ -17,6 +19,15 @@ export async function sweepGhostTasks(): Promise<void> {
     for (const file of files) {
       if (!file.endsWith(".json")) continue;
       const chatId = file.replace(".json", "");
+
+      // PM #93 — skip goal files whose chat no longer exists (a deleted-chat
+      // orphan `deleteChat` left behind). Otherwise the sweeper marks the
+      // orphan's in_progress tasks failed and publishes a "ghost tasks
+      // recovered" UI event for a chat that is gone. `sweepOrphanGoals` deletes
+      // these files; this guard makes the skip independent of sweep ordering.
+      // When `liveChatIds` is undefined (standalone/legacy call), process all —
+      // the exact pre-PM-93 behavior.
+      if (liveChatIds && !liveChatIds.has(chatId)) continue;
 
       // If a job is legitimately running for this chat right now, skip sweeping.
       if (isJobActive(chatId)) continue;

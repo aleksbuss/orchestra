@@ -8,6 +8,7 @@
  */
 
 import { isLocalProvider } from "@/lib/providers/llm-provider";
+import { getSettings } from "@/lib/storage/settings-store";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
 
@@ -117,4 +118,32 @@ export function assertPrivacyModeAllowsSkepticOverride(
         `Pick a local Skeptic model (ollama, sglang, vllm) or disable Privacy Mode.`
     );
   }
+}
+
+/**
+ * Sprint 4 (guarded AgentSession) — acquire settings for an agent run AND
+ * enforce the Privacy-Mode air-gap in ONE atomic step. Every agent entry point
+ * (`runAgent`, `runAgentText`, `runSubordinateAgent`, and any future one) MUST
+ * acquire settings through this, NEVER through a bare `getSettings()` followed
+ * by a hand-copied `assertPrivacyModeAllowsSettings(settings)`.
+ *
+ * Why: PM #58 was a P0 data-egress leak caused by exactly that hand-copied
+ * line being present at the interactive `runAgent` but FORGOTTEN at
+ * `runAgentText` (cron + the unauthenticated Telegram webhook) and
+ * `runSubordinateAgent` — so cron ticks and Telegram messages shipped prompts
+ * to cloud vendors while the UI showed Privacy Mode ON. Folding the guard into
+ * settings acquisition makes it structurally impossible to obtain agent
+ * settings that have not passed the air-gap: a new entry point that copies the
+ * existing pattern inherits the guard for free instead of inheriting ZERO
+ * guards.
+ *
+ * Scope: this guards the SETTINGS-resolved models (chatModel, utilityModel,
+ * embeddingsModel, proposerTiers, tournament judge). A per-request Skeptic
+ * override is NOT in settings — guard it separately via
+ * `assertPrivacyModeAllowsSkepticOverride` (runAgent + the `/api/chat` route).
+ */
+export async function resolveGuardedAgentSettings(): Promise<AppSettings> {
+  const settings = await getSettings();
+  assertPrivacyModeAllowsSettings(settings);
+  return settings;
 }

@@ -19,6 +19,9 @@ import fs from "node:fs/promises";
 vi.mock("@/lib/storage/project-store", () => ({
   getProject: vi.fn(),
   getProjectMcpServersPath: vi.fn(),
+}));
+// MCP load/save moved to project-mcp (§8 decomposition) — mock it there.
+vi.mock("@/lib/storage/project-mcp", () => ({
   loadProjectMcpServers: vi.fn(),
   saveProjectMcpServersContent: vi.fn(),
 }));
@@ -27,9 +30,11 @@ import { GET, PUT } from "./route";
 import {
   getProject,
   getProjectMcpServersPath,
+} from "@/lib/storage/project-store";
+import {
   loadProjectMcpServers,
   saveProjectMcpServersContent,
-} from "@/lib/storage/project-store";
+} from "@/lib/storage/project-mcp";
 
 const mockedGet = vi.mocked(getProject);
 const mockedPath = vi.mocked(getProjectMcpServersPath);

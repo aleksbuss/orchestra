@@ -6,7 +6,7 @@ import type { McpServerConfig } from "@/lib/types";
 import {
   upsertProjectMcpServer,
   deleteProjectMcpServer,
-} from "@/lib/storage/project-store";
+} from "@/lib/storage/project-mcp";
 
 /**
  * Project MCP server-config tool family (project-scoped): CRUD on the

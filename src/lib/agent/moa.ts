@@ -28,7 +28,8 @@ import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import type { AppSettings } from "@/lib/types";
-import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
+import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
+import { resolveEnsembleSetup } from "@/lib/agent/moa-setup";
 import { agentSemaphore } from "./semaphore";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
@@ -66,12 +67,10 @@ export {
 import {
   detectProposerRole,
   resolveProposerModelConfig,
-  resolveSkepticModelConfig,
   resolveWorkerKey,
   warnSkepticFamilyOverlapOnce, type SkepticModelOverride,
 } from "@/lib/agent/moa-personas";
 export { createWindowResolver } from "@/lib/agent/moa-window";
-import { createWindowResolver } from "@/lib/agent/moa-window";
 
 
 // ── Dynamic Persona Generation (DPG) ────────────────────────────────────
@@ -84,7 +83,6 @@ export {
 } from "@/lib/agent/moa-router";
 
 import { generateDynamicSwarm } from "@/lib/agent/moa-router";
-import { isSearchUsable } from "@/lib/tools/search-engine";
 
 
 /**
@@ -134,81 +132,19 @@ import {
 } from "@/lib/agent/moa-proposer-tools";
 
 
-// ── Aggregator Prompt ───────────────────────────────────────────────────
-// PM #40 — synthesis prompt adapted from Together AI's MoA paper template
-// (togethercomputer/MoA `prompts.py`), which was validated at 65.1% on
-// AlpacaEval and beat GPT-4o (57.5%) using only open-source models.
-//
-// Key adaptations from the original:
-//   - Orchestra-specific code-block preservation rule (genuinely useful
-//     for the operator's primary workflows).
-//   - "No meta-commentary" rule (cuts the "Based on the drafts above..."
-//     preamble that bloats outputs).
-//   - Cross-reference to the PM #39 disagreement marker — when present in
-//     the user content, the synthesizer is reminded to follow its
-//     instructions explicitly.
-//
-// The system role carries IDENTITY + RULES (stable across turns); the
-// user content carries DATA (original request + numbered drafts). This
-// is the cleaner split — previously the system was a one-liner and the
-// rules were duplicated in the user content.
-
-export const AGGREGATOR_SYSTEM_PROMPT = `You are the Aggregator at the final stage of a Mixture-of-Agents (MoA) pipeline. You have been provided with a set of responses from specialized expert agents who analyzed the user's request in parallel. Your task is to synthesize these responses into a single, high-quality reply.
-
-It is crucial to critically evaluate the information in the expert responses, recognizing that some of it may be biased, incomplete, or incorrect. Your response should NOT simply replicate or vote-aggregate the drafts — it should offer a refined, accurate, and comprehensive reply that goes beyond any individual draft.
-
-Strict rules:
-1. PRESERVE TECHNICAL DETAIL. Specific version numbers, library names, API signatures, configuration values — keep them. Do NOT summarize them away.
-2. CODE BLOCK INTEGRITY. Include all relevant code from the drafts. When drafts disagree on implementation, pick the most robust + production-ready version (or merge with explanatory comments). NEVER skip code to save space.
-3. NO META-COMMENTARY. Start directly with the answer. Do NOT begin with "Based on the drafts" / "Here is the synthesis" / "Looking at the responses" / "After analyzing the experts".
-4. CONFLICT RESOLUTION. If experts disagree on a factual claim (library version, API behavior, etc.), use your knowledge to pick the most accurate and modern choice. If you see a "<<DISAGREEMENT_DETECTED>>" marker in the user content, follow its additional instructions exactly — surface the conflict to the user, do not smooth it away.
-5. MATCH USER'S FORMAT. Mirror the user's expected output structure (code-only, markdown with headers, JSON, plain prose) — don't add ceremony the user didn't ask for.
-6. CORRECT SILENTLY. If you spot factual errors in the drafts, correct them in your synthesis without explicitly calling out the original mistake.
-
-Adhere to the highest standards of accuracy and reliability.`;
-
-function buildAggregatorPrompt(userMessage: string, drafts: { role: string; text: string }[]): string {
-  // Numbered format matches Together MoA's reference template — empirically
-  // tuned for LLM synthesis quality. Role label stays as a hint, not a
-  // hierarchy ("expert N (role: ...)") so the synthesizer doesn't infer
-  // implicit priority from order.
-  const draftBlock = drafts
-    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
-    .join("\n\n");
-
-  return `Original user request:
-${userMessage}
-
-Responses from expert agents (treat each as a candidate, not as authority):
-
-${draftBlock}
-
-Now produce the final synthesized response.`;
-}
-
-/**
- * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). Assemble
- * the block appended to the orchestrator system prompt on the collapsed synthesis
- * path: the ported synthesis `directive`, the optional PM #39 disagreement
- * `marker`, then the numbered expert drafts. The numbering/role-label format
- * mirrors `buildAggregatorPrompt` so the collapsed synthesizer sees the same
- * draft shape the standalone aggregator did. The drafts go in the SYSTEM prompt
- * (not a second user message) — a consecutive `user` turn crashes strict models
- * (PM #2). Pure + exported for unit testing.
- */
-export function buildInlineSynthesisInjection(
-  directive: string,
-  drafts: { role: string; text: string }[],
-  disagreementMarker: string
-): string {
-  const draftBlock = drafts
-    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
-    .join("\n\n");
-  const marker = disagreementMarker.trim()
-    ? `\n\n${disagreementMarker.trim()}`
-    : "";
-  return `\n\n${directive.trim()}${marker}\n\n## Expert Drafts to Synthesize\n\n${draftBlock}`;
-}
+// ── Aggregator prompts ──────────────────────────────────────────────────
+// §10 (Sprint 5) — the pure prompt builders (AGGREGATOR_SYSTEM_PROMPT,
+// buildAggregatorPrompt, buildInlineSynthesisInjection) moved to
+// `moa-prompts.ts`. Re-exported here for external callers/tests (agent.ts,
+// moa.test.ts); imported below for internal use.
+export {
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildInlineSynthesisInjection,
+} from "@/lib/agent/moa-prompts";
+import {
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildAggregatorPrompt,
+} from "@/lib/agent/moa-prompts";
 
 // ── MoA Ensemble Runner ─────────────────────────────────────────────────
 
@@ -323,39 +259,24 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     settings,
     abortSignal,
     forceSwarm,
-    skepticModelOverride,
-    deepAudit,
   } = options;
 
-  // DDD — the operator's Skeptic model, resolved ONCE; feeds both surfaces.
-  const skepticConfig = resolveSkepticModelConfig(settings, skepticModelOverride);
-  // A8 — request-aware reflection: the Deep Audit toggle overrides the settings
-  // default (kept OFF so inline-collapse survives normal turns). Feeds BOTH the
-  // collapse gate and the reflection block below.
-  const reflectionEnabled = deepAudit ?? settings.reflection?.enabled ?? false;
-
-  // Audit fix #4 — memoize context-window resolution for THIS ensemble run.
-  // resolveContextWindow probes live Ollama (/api/ps) per call; without this,
-  // N proposers + the aggregator fire up to N+1 redundant probes per turn,
-  // usually for the SAME config. Shared per provider|model|baseUrl.
-  const resolveWindow = createWindowResolver(abortSignal);
-
-  // ── Step 1: Resolve model configs ──────────────────────────────────
-  const workerConfig = resolveWorkerKey(
-    preset && preset !== "custom" ? getWorkerConfig(preset, settings.chatModel) : settings.utilityModel,
-    settings
-  );
-
-  // Brain model = the main resolved config (already resolved in runAgent)
-  // We'll use the same chatModel for aggregation since runAgent handles it.
-
-  // ── Step 1.5: Prepare safe history ─────────────────────────────────
-  // We cannot simply slice(-N) because it might break tool-call sequences.
-  // Instead, extract only text-based interactions for the proposers to read.
-  const safeHistory = history.filter((msg) => 
-    msg.role === "user" || 
-    (msg.role === "assistant" && typeof msg.content === "string")
-  );
+  // ── Step 1: Resolve ensemble setup ─────────────────────────────────
+  // All pure per-run derivations (Skeptic model, reflection toggle, memoized
+  // context-window resolver, worker/router configs, proposer-safe history,
+  // search-usable gate, clamped swarm size) live in `resolveEnsembleSetup`
+  // (moa-setup.ts, §10 Sprint 5). Each derivation's rationale is documented
+  // there; `options` is structurally assignable to the setup input.
+  const {
+    skepticConfig,
+    reflectionEnabled,
+    resolveWindow,
+    workerConfig,
+    safeHistory,
+    routerConfig,
+    searchEnabled,
+    maxSwarmSize,
+  } = resolveEnsembleSetup(options);
 
   // ── Step 1.8: Generate Dynamic Personas ────────────────────────────
   const routerNodeId = crypto.randomUUID();
@@ -373,18 +294,6 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       startedAt: new Date().toISOString(),
     },
   });
-
-  // Use the cheaper utility model for routing decisions (not the expensive brain model).
-  // Fall back to chatModel if utilityModel is not properly configured (e.g., missing model string).
-  const routingModelConfig = settings.utilityModel?.model
-    ? settings.utilityModel
-    : settings.chatModel;
-  const routerConfig = resolveWorkerKey(routingModelConfig, settings);
-  
-  // PM #68 — gate proposer search tools on search being USABLE (key present),
-  // not merely enabled, so the Skeptic/researcher aren't handed a search_web
-  // that can only return "key not configured".
-  const searchEnabled = isSearchUsable(settings.search);
 
   // PM #51 — fetch past successful traces similar to this prompt and
   // render them as few-shots for the Router. When trace memory is off
@@ -412,15 +321,6 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     );
   }
 
-  // C3 — thread the operator's maxSwarmSize, clamped to [3, 7]. The clamp is
-  // mandatory: the Router's zod schema is `.min(3).max(maxSwarmSize)`, so a
-  // value < 3 would make min > max and crash the Router on every turn (R4).
-  // Guard non-finite too: a corrupt settings value (e.g. a string) → NaN →
-  // `.max(NaN)` also throws every turn; fall back to the default 5.
-  const rawSwarmSize = settings.maxSwarmSize;
-  const maxSwarmSize = Number.isFinite(rawSwarmSize)
-    ? Math.min(7, Math.max(3, Math.floor(rawSwarmSize as number)))
-    : 5;
   const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock, maxSwarmSize);
 
   publishUiSyncEvent({

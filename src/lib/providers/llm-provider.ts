@@ -22,7 +22,10 @@ import {
   getWorkDir,
   loadProjectMcpServers,
 } from "@/lib/storage/project-store";
-import { resolveCliOAuthCredentialSync } from "@/lib/providers/provider-auth";
+import {
+  resolveCliOAuthCredentialSync,
+  getValidGeminiAccessToken,
+} from "@/lib/providers/provider-auth";
 import { cliProviderEnv, scrubProcessEnv } from "@/lib/security/scrub-env";
 import { MODEL_PROVIDERS } from "@/lib/providers/model-config";
 import {
@@ -688,7 +691,13 @@ function createGeminiNativeOauthModel(config: ModelConfig): LanguageModel {
       "X-Goog-Api-Client": `gl-node/${process.versions.node}`,
       "Client-Metadata": metadata,
     },
-    fetch: createGeminiOauthFetch(credential.accessToken),
+    // Refresh the OAuth access token per-request via the stored refresh_token
+    // (the on-disk token expires ~hourly). sessionKey stays stable across
+    // refreshes so the conversational session id survives.
+    fetch: createGeminiOauthFetch({
+      getAccessToken: () => getValidGeminiAccessToken(),
+      sessionKey: credential.refreshToken || credential.accessToken || "gemini-cli",
+    }),
     name: "google-gemini-cli",
   });
   const modelId = config.model || "gemini-2.5-pro";

@@ -678,15 +678,28 @@ export function rewriteGeminiCodeAssistSseStream(
   });
 }
 
-export function createGeminiOauthFetch(accessToken: string) {
+export type GeminiTokenSource = {
+  /** Returns a currently-valid access token, refreshing under the hood. */
+  getAccessToken: () => Promise<string>;
+  /** Stable per-credential key for the session-id cache (NOT the rotating token). */
+  sessionKey?: string;
+};
+
+export function createGeminiOauthFetch(token: string | GeminiTokenSource) {
+  const getAccessToken =
+    typeof token === "string" ? () => Promise.resolve(token) : token.getAccessToken;
+  // Key the session id on a STABLE identifier, not the (rotating) access token —
+  // a token refresh must not regenerate the conversational session id.
+  const sessionKey = typeof token === "string" ? token : token.sessionKey ?? "default";
   const apiClient = `gl-node/${process.versions.node}`;
   const sessionId =
-    geminiSessionIdCache.get(accessToken) || (() => {
+    geminiSessionIdCache.get(sessionKey) || (() => {
       const value = crypto.randomUUID();
-      geminiSessionIdCache.set(accessToken, value);
+      geminiSessionIdCache.set(sessionKey, value);
       return value;
     })();
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const accessToken = await getAccessToken();
     const request = new Request(input, init);
     const headers = new Headers(request.headers);
     headers.delete("x-goog-api-key");

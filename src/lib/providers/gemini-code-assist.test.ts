@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  createGeminiOauthFetch,
   sanitizeGeminiCodeAssistSchema,
   sanitizeGeminiCodeAssistRequest,
   buildGeminiCodeAssistRequestBody,
@@ -343,5 +344,102 @@ describe("extractGeminiOperationName", () => {
 describe("resolveGeminiCodeAssistPlatform", () => {
   it("returns a valid Code Assist platform enum for the host", () => {
     expect(["WINDOWS", "MACOS", "PLATFORM_UNSPECIFIED"]).toContain(resolveGeminiCodeAssistPlatform());
+  });
+});
+
+// ---- createGeminiOauthFetch (integration — the OAuth/SSE orchestration) -----
+// Added post cross-model audit: the highest-risk moved code (fetch interceptor:
+// project-resolve -> sanitize -> wrap -> 500-retry ladder -> unwrap) was pure-helper
+// tested only. GOOGLE_CLOUD_PROJECT short-circuits project discovery so the only
+// mocked fetch is the Code Assist POST itself.
+
+describe("createGeminiOauthFetch", () => {
+  type FetchImpl = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  const OLD_PROJECT = process.env.GOOGLE_CLOUD_PROJECT;
+
+  beforeEach(() => {
+    process.env.GOOGLE_CLOUD_PROJECT = "test-proj";
+  });
+  afterEach(() => {
+    if (OLD_PROJECT === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+    else process.env.GOOGLE_CLOUD_PROJECT = OLD_PROJECT;
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("wraps a unary request in the Code Assist envelope and unwraps the response", async () => {
+    const fetchMock = vi.fn<FetchImpl>(
+      async () =>
+        new Response(JSON.stringify({ response: { candidates: [{ text: "hi" }] } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const f = createGeminiOauthFetch("tok-1");
+    const res = await f(
+      "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+      { method: "POST", body: JSON.stringify({ contents: [{ parts: [{ text: "hi" }] }] }) }
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0] as [unknown, RequestInit];
+    expect(String(calledUrl)).toContain("v1internal:generateContent");
+    const sent = JSON.parse(String(calledInit.body));
+    expect(sent.model).toBe("gemini-2.5-pro");
+    expect(sent.project).toBe("test-proj");
+    expect(sent.request.contents).toEqual([{ parts: [{ text: "hi" }] }]);
+    expect(await res.json()).toEqual({ candidates: [{ text: "hi" }] }); // unwrapped
+  });
+
+  it("targets the SSE endpoint and rewrites the stream for streamGenerateContent", async () => {
+    const fetchMock = vi.fn<FetchImpl>(
+      async () => new Response(streamFromString('data: {"response":{"a":1}}\n\n'), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const f = createGeminiOauthFetch("tok-2");
+    const res = await f(
+      "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:streamGenerateContent",
+      { method: "POST", body: JSON.stringify({ contents: [1] }) }
+    );
+
+    expect(String(fetchMock.mock.calls[0][0])).toContain("v1internal:streamGenerateContent?alt=sse");
+    expect(await readStreamToString(res.body!)).toBe('data: {"a":1}\n\n');
+  });
+
+  it("retries with a reduced body on a 500 internal error and recovers", async () => {
+    const fetchMock = vi
+      .fn<FetchImpl>()
+      .mockResolvedValueOnce(new Response("Internal error encountered", { status: 500 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ response: { ok: true } }), { status: 200 })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const f = createGeminiOauthFetch("tok-3");
+    const res = await f(
+      "https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+      { method: "POST", body: JSON.stringify({ contents: [1], tools: ["t"], toolConfig: "tc" }) }
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // initial 500 + one fallback
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("passes non-POST requests through without wrapping", async () => {
+    const fetchMock = vi.fn<FetchImpl>(async () => new Response("ok", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const f = createGeminiOauthFetch("tok-4");
+    await f("https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent", {
+      method: "GET",
+    });
+
+    // GET is forwarded verbatim (no Code Assist rewrite of the URL/body).
+    const arg = fetchMock.mock.calls[0][0] as Request;
+    expect(arg.url).toContain("models/gemini-2.5-pro:generateContent");
+    expect(arg.url).not.toContain("v1internal:");
   });
 });

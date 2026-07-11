@@ -442,4 +442,22 @@ describe("createGeminiOauthFetch", () => {
     expect(arg.url).toContain("models/gemini-2.5-pro:generateContent");
     expect(arg.url).not.toContain("v1internal:");
   });
+
+  it("accepts a token source and sends the refreshed token per request", async () => {
+    const getAccessToken = vi.fn(async () => "fresh-tok");
+    const fetchMock = vi.fn<FetchImpl>(
+      async () => new Response(JSON.stringify({ response: { ok: true } }), { status: 200 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const f = createGeminiOauthFetch({ getAccessToken, sessionKey: "stable-key" });
+    await f("https://cloudcode-pa.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent", {
+      method: "POST",
+      body: JSON.stringify({ contents: [1] }),
+    });
+
+    expect(getAccessToken).toHaveBeenCalled();
+    const [, init] = fetchMock.mock.calls[0];
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer fresh-tok");
+  });
 });

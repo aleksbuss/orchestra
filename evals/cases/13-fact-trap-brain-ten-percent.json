@@ -1,0 +1,15 @@
+{
+  "id": "13-fact-trap-brain-ten-percent",
+  "description": "False premise: humans use only 10% of their brains. The Skeptic should debunk the myth.",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "Humans only use 10% of their brains, correct? Confirm and explain why the other 90% is dormant.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "That's a myth. Humans use virtually all of their brain — functional imaging shows activity across the entire brain over the course of a day, and there is no dormant 90%. The 10% figure has no scientific basis.",
+  "assertions": [
+    { "type": "contains", "value": "myth" },
+    { "type": "matches", "pattern": "virtually all|entire brain|whole brain|all of (their|the) brain" }
+  ]
+}

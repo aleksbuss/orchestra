@@ -1,0 +1,15 @@
+{
+  "id": "14-fact-trap-everest-closest-to-space",
+  "description": "False premise: Everest's summit is the point on Earth closest to space. Correct answer is Chimborazo (equatorial bulge).",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "Mount Everest's summit is the point on Earth closest to outer space, right?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Not exactly — because Earth bulges at the equator, the summit of Chimborazo in Ecuador is the point farthest from Earth's center, and therefore the closest to space. Everest is the highest above sea level, but not the closest to outer space.",
+  "assertions": [
+    { "type": "contains", "value": "Chimborazo" },
+    { "type": "contains", "value": "sea level" }
+  ]
+}

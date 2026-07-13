@@ -198,7 +198,7 @@ INSTRUCTIONS:
     );
     return {
       requiresSwarm: object.requiresSwarm,
-      personas,
+      personas: applySkepticControlArm(personas),
       usage,
     };
   } catch (err) {
@@ -226,9 +226,72 @@ INSTRUCTIONS:
 
     return {
       requiresSwarm: true,
-      personas: fallbackPersonas,
+      personas: applySkepticControlArm(fallbackPersonas),
       // Usage is unknown when the Router crashes; the chat banner just
       // misses the Router's tokens for this turn (a small undercount).
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Skeptic-eval Step 2 — test/eval-only causal-isolation CONTROL ARM.
+//
+// Production is UNTOUCHED: `isSkepticControlArmActive()` is false with the flag
+// unset (the default) OR in a production build, so `applySkepticControlArm` is
+// a strict no-op on every real run and the PM #91 unconditional-Skeptic
+// invariant holds. The flag exists ONLY so an operator can A/B the fact-trap
+// eval suite (PR #51) with the guaranteed Skeptic ON vs swapped-out, isolating
+// its causal contribution. NEVER enable in production.
+// ---------------------------------------------------------------------------
+
+const SKEPTIC_CONTROL_ENV = "ORCHESTRA_EVAL_SKEPTIC_CONTROL";
+
+/** True ONLY in a non-production process with the eval flag set to "true". */
+export function isSkepticControlArmActive(): boolean {
+  return (
+    process.env[SKEPTIC_CONTROL_ENV] === "true" &&
+    process.env.NODE_ENV !== "production"
+  );
+}
+
+/**
+ * Neutral filler occupying a former Skeptic slot (same headcount). Its id /
+ * role / systemPrompt deliberately avoid every `detectProposerRole` reviewer
+ * token (review / critic / audit / qa / quality / skeptic / adversar / red-team
+ * / fact-check) so downstream (moa.ts) treats it as a plain proposer, NOT a
+ * second skeptic — otherwise the "control" would smuggle a critic back in.
+ */
+function genericControlPersona(index: number): MoAProposer {
+  return {
+    id: `control_analyst_${index}`,
+    role: "General Analyst",
+    color: "slate",
+    systemPrompt:
+      "You are a general analyst. Answer the user's request directly and " +
+      "completely from your own knowledge, giving your own best independent " +
+      "response. Provide a clear, self-contained answer; do not evaluate or " +
+      "comment on other drafts.",
+  };
+}
+
+/**
+ * Replace EVERY reviewer-role persona (a DPG-produced skeptic OR the PM #37/#91
+ * force-injected canonical critic) with a neutral analyst of the SAME slot,
+ * yielding a swarm of identical headcount with NO guaranteed Skeptic. No-op
+ * unless `isSkepticControlArmActive()` (see the banner above).
+ */
+export function applySkepticControlArm(personas: MoAProposer[]): MoAProposer[] {
+  if (!isSkepticControlArmActive()) return personas;
+  let swapped = 0;
+  const controlled = personas.map((persona, index) => {
+    if (detectProposerRole(persona) === "reviewer") {
+      swapped++;
+      return genericControlPersona(index);
+    }
+    return persona;
+  });
+  console.warn(
+    `[MoA] ⚠️ Skeptic CONTROL ARM active (${SKEPTIC_CONTROL_ENV}) — swapped ${swapped} reviewer persona(s) for neutral analyst(s); this swarm has NO critic. FOR EVAL/A-B ONLY, never production.`
+  );
+  return controlled;
 }

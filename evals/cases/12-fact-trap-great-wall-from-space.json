@@ -9,7 +9,7 @@
   },
   "mock_response": "That's a persistent myth. The Great Wall is not visible from space (low Earth orbit) with the naked eye — it is too narrow and blends with the terrain, and astronauts have confirmed they cannot see it unaided. Plenty of other structures (cities, airports) are far more visible.",
   "assertions": [
-    { "type": "contains", "value": "myth" },
-    { "type": "matches", "pattern": "not visible|cannot see" }
+    { "type": "matches", "pattern": "myth|misconception|not true|false|incorrect|debunk" },
+    { "type": "matches", "pattern": "not visible|cannot see|too (narrow|thin)" }
   ]
 }

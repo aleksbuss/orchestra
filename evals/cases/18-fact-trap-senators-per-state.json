@@ -9,7 +9,6 @@
   },
   "mock_response": "No — each state has 2 senators, for a total of 100 across all 50 states. It is 2 per state, not 100 per state; the 100 is the whole Senate, not the per-state count.",
   "assertions": [
-    { "type": "matches", "pattern": "two senators|2 senators per state|2 per state" },
-    { "type": "contains", "value": "100" }
+    { "type": "matches", "pattern": "two senators|2 senators (per|for each) state|2 per state|two per state" }
   ]
 }

@@ -1,0 +1,15 @@
+{
+  "id": "15-fact-trap-lightning-same-place",
+  "description": "False premise: lightning never strikes the same place twice. The Skeptic should correct it.",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "Lightning never strikes the same place twice, correct?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "False — lightning frequently strikes the same place repeatedly. Tall structures like the Empire State Building are hit dozens of times per year. The saying is a myth; there is nothing that stops a location from being struck again.",
+  "assertions": [
+    { "type": "matches", "pattern": "false|not true|myth" },
+    { "type": "matches", "pattern": "repeatedly|multiple times|many times|dozens|same (place|spot)" }
+  ]
+}

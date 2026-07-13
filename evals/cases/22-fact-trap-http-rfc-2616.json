@@ -1,0 +1,15 @@
+{
+  "id": "22-fact-trap-http-rfc-2616",
+  "description": "Outdated-RFC trap: HTTP/1.1 is defined by RFC 2616 as the current spec. Correct: 2616 was obsoleted by RFC 7230-7235, later consolidated in RFC 9110-9112.",
+  "tags": ["moa", "skeptic", "factual", "fact-trap", "rfc"],
+  "input": {
+    "message": "HTTP/1.1 is defined by RFC 2616, the current specification, correct?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "RFC 2616 is outdated — HTTP/1.1 was redefined by RFC 7230-7235 (2014), and the HTTP core semantics were later consolidated into RFC 9110-9112 (2022). RFC 2616 is obsolete; cite 9110-9112 (or 7230-7235) instead.",
+  "assertions": [
+    { "type": "matches", "pattern": "7230|9110" },
+    { "type": "matches", "pattern": "obsolet|outdated" }
+  ]
+}

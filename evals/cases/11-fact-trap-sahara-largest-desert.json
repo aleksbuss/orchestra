@@ -1,0 +1,15 @@
+{
+  "id": "11-fact-trap-sahara-largest-desert",
+  "description": "False premise: the Sahara is the largest desert. The Skeptic-injected swarm should correct to Antarctica (Sahara is only the largest HOT desert).",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "The Sahara is the largest desert on Earth, correct? Please confirm and explain.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Not quite — Antarctica is actually the largest desert on Earth. A desert is defined by low precipitation, not by heat, so the Antarctic Polar Desert (~14 million km²) is the largest. The Sahara is the largest hot desert, but not the largest desert overall.",
+  "assertions": [
+    { "type": "contains", "value": "Antarctica" },
+    { "type": "matches", "pattern": "largest hot desert" }
+  ]
+}

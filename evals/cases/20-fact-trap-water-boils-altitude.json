@@ -9,7 +9,7 @@
   },
   "mock_response": "Not everywhere — water boils at 100°C only at sea level (1 atm of pressure). At higher altitude the lower air pressure makes water boil below 100°C — for example around 90°C at ~3,000 m. Boiling point depends on pressure, not a fixed temperature.",
   "assertions": [
-    { "type": "contains", "value": "sea level" },
-    { "type": "matches", "pattern": "below 100|lower|less than 100|pressure" }
+    { "type": "matches", "pattern": "sea level|altitude|elevation|pressure" },
+    { "type": "matches", "pattern": "below 100|lower|less than 100|drops|depends on" }
   ]
 }

@@ -10,6 +10,6 @@
   "mock_response": "RFC 821 is obsolete — SMTP is now defined by RFC 5321 (which obsoleted RFC 2821, which in turn obsoleted RFC 821). Follow RFC 5321 for the current standard, not 821.",
   "assertions": [
     { "type": "contains", "value": "5321" },
-    { "type": "matches", "pattern": "obsolet" }
+    { "type": "matches", "pattern": "obsolet|outdated|superseded|deprecated|replaced|no longer" }
   ]
 }

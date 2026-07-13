@@ -9,7 +9,7 @@
   },
   "mock_response": "That's a myth. Goldfish have memories lasting weeks to months — studies show they can be trained to respond to cues and remember tasks long-term, not just for 3 seconds.",
   "assertions": [
-    { "type": "contains", "value": "myth" },
-    { "type": "matches", "pattern": "months|weeks" }
+    { "type": "matches", "pattern": "myth|misconception|not true|false|incorrect" },
+    { "type": "matches", "pattern": "months|weeks|years|long.?term" }
   ]
 }

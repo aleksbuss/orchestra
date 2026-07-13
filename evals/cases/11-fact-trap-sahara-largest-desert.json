@@ -10,6 +10,6 @@
   "mock_response": "Not quite — Antarctica is actually the largest desert on Earth. A desert is defined by low precipitation, not by heat, so the Antarctic Polar Desert (~14 million km²) is the largest. The Sahara is the largest hot desert, but not the largest desert overall.",
   "assertions": [
     { "type": "contains", "value": "Antarctica" },
-    { "type": "matches", "pattern": "largest hot desert" }
+    { "type": "matches", "pattern": "antarctica[^.]*larg" }
   ]
 }

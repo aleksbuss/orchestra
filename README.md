@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-3210%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-90%20documented-purple)](./POST_MORTEMS.md)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-93%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -25,7 +25,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 | --- | --- | --- |
 | **Agent Architecture** | Single-agent chat loop | **Mixture-of-Agents (MoA)** ensemble with parallel proposers |
 | **Consensus & Verification**| Trust the single model | Code-guaranteed **Skeptic**, Disagreement Detection, Tournament Aggregation |
-| **Resilience & Testing** | Basic test suite | **79 Documented Post-Mortems**, a comprehensive unit-test suite, Trace-memory |
+| **Resilience & Testing** | Basic test suite | **93 Documented Post-Mortems**, a comprehensive unit-test suite, Trace-memory |
 | **Cost Transparency** | Unknown API usage | Live per-chat cost banner with USD estimates and tokens |
 | **Security** | Basic serverless API | Code-enforced SSRF guards, Path traversal guards, Sandbox constraints |
 
@@ -40,7 +40,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 
 Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The synthesis then runs **inline in the final tool-capable stream by default** — the standalone aggregator is collapsed away, so a swarm turn costs **one brain generation, not two**, and the synthesizer can call tools mid-synthesis (set `aggregator.inlineSynthesis: false` to opt back into a standalone aggregator). If the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the synthesis output and applies a revisor pass when issues are flagged (enabling reflection, or setting `inlineSynthesis: false`, falls back to the standalone aggregator; tournament mode swaps synthesis for judge-ranking).
 
-If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (79 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
+If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (93 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA) (validated at 65.1% AlpacaEval, beating GPT-4o on OSS models). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
 
@@ -59,12 +59,13 @@ flowchart LR
     R -->|requiresSwarm=true<br/>+ force-injected Skeptic| P1[Proposer 1]
     R --> P2[Proposer 2]
     R --> P3[Proposer N]
-    R --> PS[Skeptic<br/>guaranteed]
+    R --> PS[Skeptic<br/>guaranteed · operator-pinnable model]
     P1 --> DD{Disagreement<br/>detector<br/>cosine &gt; 0.35}
     P2 --> DD
     P3 --> DD
     PS --> DD
     DD -->|DEFAULT: drafts + conflict marker<br/>injected into system prompt| FS[Final tool-capable stream<br/>brain-model · streams · calls tools]
+    DD -->|0–1 drafts survive ·<br/>degraded → single agent, surfaced| FS
     DD -->|reflection ON ·<br/>inlineSynthesis:false| AGG[Standalone aggregator<br/>brain-model]
     DD -->|tournament mode| TQ[Tournament<br/>K judges · Borda · verbatim winner]
     AGG --> REF{Reflection<br/>enabled?}
@@ -76,7 +77,7 @@ flowchart LR
     OUT --> CB[Cost banner<br/>tokens + USD]
 ```
 
-> **Inline-synthesis collapse (default since 2c, 2026-06).** On the default synthesis path the swarm does **not** run a separate aggregator generation. `runMoAEnsemble` hands the raw drafts (plus the disagreement marker) up to `runAgent`, which injects them into the **system prompt** of the final tool-capable stream — so that one stream synthesizes the experts inline, **one brain generation per turn instead of two**, and can call tools mid-synthesis. Backed by an N=8 live A/B: quality held, latency −31%, completion tokens −16%. The collapse fires only with **≥2 successful drafts** and `aggregatorMode === "synthesis"`. The **standalone aggregator** (its own brain generation, injected back into the final stream as reference context) runs instead whenever reflection is enabled or `aggregator.inlineSynthesis: false`; **tournament** mode replaces synthesis with judge-ranking. If only 0–1 drafts survive, there is no synthesis at all — the lone draft (or a failure note) is passed straight up and injected as reference. Either way the Router's `requiresSwarm=false` bypass also defers to the same final stream — no proposers, no redundant pre-generation.
+> **Inline-synthesis collapse (default since 2c, 2026-06).** On the default synthesis path the swarm does **not** run a separate aggregator generation. `runMoAEnsemble` hands the raw drafts (plus the disagreement marker) up to `runAgent`, which injects them into the **system prompt** of the final tool-capable stream — so that one stream synthesizes the experts inline, **one brain generation per turn instead of two**, and can call tools mid-synthesis. Backed by an N=8 live A/B: quality held, latency −31%, completion tokens −16%. The collapse fires only with **≥2 successful drafts** and `aggregatorMode === "synthesis"`. The **standalone aggregator** (its own brain generation, injected back into the final stream as reference context) runs instead whenever reflection is enabled or `aggregator.inlineSynthesis: false`; **tournament** mode replaces synthesis with judge-ranking. If only 0–1 drafts survive, there is no synthesis at all — the lone draft (or a failure note) is passed straight up and injected as reference. When **zero** proposers survive, the swarm collapses to a single agent and that degradation is now **surfaced** to the operator (a distinct signal from the Router's deliberate bypass), so a silently-degraded turn can't masquerade as a healthy one. Either way the Router's `requiresSwarm=false` bypass also defers to the same final stream — no proposers, no redundant pre-generation.
 
 ![The Swarm Activity panel, live — for a locking question the Router spun up a Database Architect, Concurrency Engineer, Performance Optimizer, and a code-guaranteed QA Auditor / Skeptic, then synthesized their drafts](docs/assets/orchestra-swarm-activity.png)
 
@@ -87,7 +88,7 @@ Each stage maps to a [`POST_MORTEMS.md`](./POST_MORTEMS.md) entry that documents
 | Stage | What | Why it exists |
 |---|---|---|
 | **Router (DPG)** | Generates 3-5 hyper-specialized personas based on prompt; decides `requiresSwarm` | Static role lists miss domain-specific expertise; dynamic generation tunes per-prompt. Trivial prompts ("thanks", "hi") skip the fan-out — overridable with the **Force Swarm** toggle (PM #22) |
-| **Force-injected Skeptic** | Post-validates DPG output, injects Adversarial Critic if missing | PM #37 — prompt-as-contract is unreliable; weak utility-models drop the "MUST include skeptic" instruction silently |
+| **Force-injected Skeptic** | Post-validates DPG output, injects the Adversarial Critic if missing — **unconditionally** (even on a "trivial" verdict, so a Force-Swarm-over-bypass turn still gets it). The Skeptic **model** is operator-pinnable, with a per-request override | PM #37 (prompt-as-contract is unreliable) + PM #90/#91 (guarantee the persona wherever the swarm can fan out; let the operator own the critic model) |
 | **Parallel proposers** | 3-5 LLM calls fanned out via `Promise.all` with stagger + per-proposer timeout | Latency cost is parallel, not serial; 1 slow proposer doesn't block the others |
 | **Disagreement detector** | Pairwise cosine distance over draft embeddings; emits a "surface the conflict" marker | PM #39 — academic frameworks call silent smoothing "sycophantic consensus"; threshold 0.35 catches divergent recommendations. The marker rides along to whichever synthesis path runs (inline or standalone aggregator) |
 | **Synthesis (default: inline)** | Drafts + marker injected into the final stream's system prompt; that stream synthesizes the experts itself | PM #40 synthesis rules ported into the injected directive. Default since Sprint 2c — **one brain generation**, synthesizer can call tools mid-synthesis. Fires only with ≥2 drafts; with 0–1 the lone draft / failure note is passed straight through |
@@ -151,7 +152,10 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 
 ### Core agent runtime
 - **Mixture-of-Agents** with dynamic persona generation (3-5 experts per substantive turn)
-- **Force-injected Skeptic** — every swarm includes a fact-checker, enforced in code
+- **Force-injected Skeptic** — every swarm includes a fact-checker, enforced in code (injected unconditionally — PM #91)
+- **Operator-owned Skeptic** — the Skeptic/critic model (swarm reviewer *and* reflection critic) is pinned by the operator, with a Privacy-Mode-guarded **per-request override** to swap it for a single turn (PM #90)
+- **Per-request Deep Audit** — enable the reflection critic for one turn without paying its latency on every swarm turn
+- **Degraded-swarm surfacing** — if every proposer fails, the turn collapses to a single agent and says so (never a silent downgrade)
 - **Disagreement detection** — cosine-distance over embeddings; the synthesizer surfaces conflicts explicitly
 - **Inline-synthesis collapse** — the final tool-capable stream synthesizes the drafts itself (one brain generation per turn) and can call tools mid-synthesis
 - **Reflection loop** (opt-in) — generator-critic-revisor for one extra pass when needed
@@ -180,7 +184,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 
 ### Observability
 - **`/api/_debug/chat/<id>`** — single-shot diagnostic endpoint
-- **`POST_MORTEMS.md`** — 70 architectural failure modes documented with regression-test pointers
+- **`POST_MORTEMS.md`** — 93 architectural failure modes documented with regression-test pointers
 - **Structured JSONL logs** with `traceId` propagation
 
 ### Local-first design
@@ -201,10 +205,10 @@ npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
 ```
 
-Coverage focus (measured via v8, `src/lib` aggregate ≈61% lines, global ≈46%):
-- **High (>90% lines):** `lib/security/` (99%), `lib/memory/` (97%), `lib/cost/` (97%), `lib/auth/` (91%)
-- **Mid:** `lib/storage/` (~78%), `lib/cron/` (~69%), `lib/agent/` (~63%)
-- **Lower:** `lib/tools/` (~40%; the large `tool.ts` registry is ~24%), `lib/providers/` (~43%), `lib/mcp/` (~8%), and most of `components/` — exercised via smoke / integration / the live debug endpoint rather than full unit coverage. Per-module floors in `vitest.config.ts` gate the high-blast-radius files (auth, security, the path sandbox) at 60–90%.
+Coverage focus (re-measured via v8, 2026-07; `src/lib` aggregate ≈54% lines, global floor `lines: 43`):
+- **High (>90% lines):** `lib/security/` (99%), `lib/cost/` (97%), `lib/memory/` (97%), `lib/auth/` (91%)
+- **Mid:** `lib/agent/` (~80%), `lib/storage/` (~78%), `lib/mcp/` (~69%)
+- **Lower:** `lib/tools/` (~49%; the `tool.ts` registry ~41% after its 2026-07 decomposition), `lib/providers/` (~45%; the biggest single gap is `llm-provider.ts`'s CLI/OAuth surface), and most of `components/` — exercised via smoke / integration / the live debug endpoint rather than full unit coverage. Per-module floors in `vitest.config.ts` gate the high-blast-radius files (auth, security, the path sandbox) at 60–90%.
 
 ---
 

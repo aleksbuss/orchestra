@@ -11,9 +11,18 @@ This is that missing control arm — **test/eval-only**, production untouched.
 `ORCHESTRA_EVAL_SKEPTIC_CONTROL=true` (honored **only** when `NODE_ENV !== "production"`). When active, `applySkepticControlArm` ([`moa-router.ts`](../src/lib/agent/moa-router.ts)) replaces **every** reviewer-role persona — a DPG-produced skeptic **and** the PM #37/#91 force-injected canonical critic — with a neutral `General Analyst` of the **same slot**. Result: a swarm of identical headcount with **no** guaranteed Skeptic.
 
 - Flag unset (default) **or** a production build → strict no-op. The PM #91 invariant holds on every real run.
-- The neutral persona's id/role/systemPrompt deliberately avoid every `detectProposerRole` reviewer token, so downstream (`moa.ts`) treats it as a plain tool-less proposer, not a smuggled second critic.
+- The neutral persona's id/role/systemPrompt deliberately avoid every `detectProposerRole` reviewer token, so downstream (`moa.ts`) does not re-classify it as a second skeptic. (Its `General Analyst` role classifies as `researcher`, which gets the same tools as a reviewer — see **Confounds** below.)
 
 **Never set this in production.**
+
+## Confounds — what this DOES and does NOT isolate
+
+A skeptical review (self-audit + a DoubleTake cross-model second opinion) raised two confounds; both are addressed:
+
+- **Tools held constant (no `search_web` confound).** A reviewer/skeptic persona gets `search_web` (+ a fact-check mandate) when a search key is configured; a bare proposer does not ([`moa-proposer-tools.ts`](../src/lib/agent/moa-proposer-tools.ts)). The control persona's role is `General Analyst`, which `detectProposerRole` classifies as **`researcher`** — and reviewer AND researcher get the SAME tool treatment. So both arms have identical tools (search + mandate when a key is set; none otherwise); the ONLY variable that changes is the skeptic **persona prompt**. Pinned by a test (`detectProposerRole(controlPersona) === "researcher"`).
+- **Topology unchanged.** MoA proposers (the skeptic included) run in **parallel**; a separate Aggregator synthesizes their drafts ([`moa.ts`](../src/lib/agent/moa.ts)). The skeptic is a parallel proposer, not the synthesizer — swapping its persona changes one proposer's prompt, NOT the MoA topology.
+
+**So the A/B isolates exactly one variable: the guaranteed skeptic _persona prompt_ (doubt-the-premise framing) vs a neutral analyst prompt, with headcount AND tools held constant.** It does NOT measure "any fact-checking vs none" — with a search key set, the control persona still has search + the fact-check mandate; only the explicit skeptic framing is removed.
 
 ## Run it
 

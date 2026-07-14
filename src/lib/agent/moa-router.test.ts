@@ -479,6 +479,20 @@ describe("Skeptic control arm (Step 2 — eval-only, PM #91 invariant untouched)
     expect(detectProposerRole(out[2])).not.toBe("reviewer");
   });
 
+  it("the neutral filler classifies as 'researcher' — tool parity with the skeptic (no search_web confound)", () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "test");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const [swapped] = applySkepticControlArm([
+      { id: "skeptic", role: "QA Auditor", systemPrompt: "find flaws", color: "rose" },
+    ]);
+    // reviewer AND researcher both get search_web (moa-proposer-tools.ts), so the
+    // control persona landing in the researcher bucket holds TOOLS CONSTANT across
+    // the A/B arms — only the persona prompt differs. Guards a future reword from
+    // dropping it to coder/tool and reintroducing the confound.
+    expect(detectProposerRole(swapped)).toBe("researcher");
+  });
+
   it("production guard — no-op even with the flag set to true", () => {
     vi.stubEnv(ENV, "true");
     vi.stubEnv("NODE_ENV", "production");

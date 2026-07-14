@@ -205,7 +205,7 @@ npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
 ```
 
-Coverage focus (re-measured via v8, 2026-07; `src/lib` aggregate ≈54% lines, global floor `lines: 43`):
+Coverage focus (re-measured via v8, 2026-07; project-wide aggregate ≈54% lines across all files, global floor `lines: 43`; the `src/lib` subdirs below run higher):
 - **High (>90% lines):** `lib/security/` (99%), `lib/cost/` (97%), `lib/memory/` (97%), `lib/auth/` (91%)
 - **Mid:** `lib/agent/` (~80%), `lib/storage/` (~78%), `lib/mcp/` (~69%)
 - **Lower:** `lib/tools/` (~49%; the `tool.ts` registry ~41% after its 2026-07 decomposition), `lib/providers/` (~45%; the biggest single gap is `llm-provider.ts`'s CLI/OAuth surface), and most of `components/` — exercised via smoke / integration / the live debug endpoint rather than full unit coverage. Per-module floors in `vitest.config.ts` gate the high-blast-radius files (auth, security, the path sandbox) at 60–90%.

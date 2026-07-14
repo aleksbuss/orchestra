@@ -255,11 +255,16 @@ export function isSkepticControlArmActive(): boolean {
 }
 
 /**
- * Neutral filler occupying a former Skeptic slot (same headcount). Its id /
- * role / systemPrompt deliberately avoid every `detectProposerRole` reviewer
- * token (review / critic / audit / qa / quality / skeptic / adversar / red-team
- * / fact-check) so downstream (moa.ts) treats it as a plain proposer, NOT a
- * second skeptic — otherwise the "control" would smuggle a critic back in.
+ * Neutral filler occupying a former Skeptic slot (same headcount). Two
+ * properties matter, both pinned by tests:
+ *   1. It avoids every `detectProposerRole` reviewer token (review / critic /
+ *      audit / qa / quality / skeptic / adversar / red-team / fact-check) so it
+ *      is NOT re-classified as a second skeptic downstream (moa.ts).
+ *   2. Its "General Analyst" role classifies as `researcher`, and reviewer AND
+ *      researcher get the SAME tools (search_web) in moa-proposer-tools.ts — so
+ *      the A/B holds TOOLS CONSTANT and isolates ONLY the skeptic persona prompt
+ *      (no search_web confound; raised by the doubt-driven review). Do NOT
+ *      rename it to a role that drops out of the reviewer/researcher tool bucket.
  */
 function genericControlPersona(index: number): MoAProposer {
   return {
@@ -267,10 +272,9 @@ function genericControlPersona(index: number): MoAProposer {
     role: "General Analyst",
     color: "slate",
     systemPrompt:
-      "You are a general analyst. Answer the user's request directly and " +
-      "completely from your own knowledge, giving your own best independent " +
-      "response. Provide a clear, self-contained answer; do not evaluate or " +
-      "comment on other drafts.",
+      "You are a general analyst. Answer the user's request directly, " +
+      "accurately, and completely from your own knowledge. Give your own " +
+      "best, self-contained response.",
   };
 }
 

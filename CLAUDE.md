@@ -436,6 +436,8 @@ Auth bypass is one category; runtime-invariant bypass is another. Documented in 
 
 - **`ORCHESTRA_MULTI_PROCESS_OK=true`** — env var read by [`src/lib/util/multi-process-guard.ts`](src/lib/util/multi-process-guard.ts) at boot. The guard normally fatal-exits when `node:cluster.isWorker === true`, `parseInt(NODE_APP_INSTANCE) > 0` (PM2 cluster), or `NODE_UNIQUE_ID` is set — Critical Rule §1's `withFileLock` single-process invariant. Setting `ORCHESTRA_MULTI_PROCESS_OK=true` (strict string compare, same posture as `ORCHESTRA_DISABLE_AUTH`) skips the check. **Use ONLY after migrating `withFileLock` to an advisory lockfile (e.g. `proper-lockfile`)**; otherwise you trade fatal-exit for silent lost-update corruption.
 
+- **`ORCHESTRA_EVAL_SKEPTIC_CONTROL=true`** — EVAL-ONLY. Read by [`moa-router.ts`](src/lib/agent/moa-router.ts) `isSkepticControlArmActive()`; honored ONLY when ALSO `NODE_ENV !== "production"`. Swaps the guaranteed MoA Skeptic (§1, PM #91) for a neutral same-slot analyst so the Skeptic's causal value can be A/B'd ([`docs/moa-skeptic-control-ab.md`](docs/moa-skeptic-control-ab.md)). Default OFF → strict no-op. The `NODE_ENV` gate blocks a production build, but note a local-first dev process has `NODE_ENV !== "production"`, so the REAL protection is default-off + the loud stdout warn (same operator-trust posture as `ORCHESTRA_DISABLE_AUTH`). NEVER set in production.
+
 If you add another runtime-invariant escape hatch, document it here in the same PR. Cross-link from the invariant rule (e.g. Critical Rule §1 mentions this).
 
 ---

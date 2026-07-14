@@ -5,8 +5,10 @@
  * Usage: npm run scrub:secrets
  *
  * Safe to run multiple times. The settings.json file is rewritten atomically
- * via fs.rename. A timestamped backup is created next to it before any
- * modification: settings.json.backup-<unix-ms>.
+ * via fs.rename. A transient timestamped backup guards that write and is
+ * REMOVED on success — no cleartext copy is left behind (a "scrubbed" tree
+ * with a keyed backup beside it defeats the point). Real disaster recovery is
+ * the data-backups/ snapshots, not this buffer.
  */
 import fs from "fs/promises";
 import path from "path";
@@ -47,6 +49,47 @@ interface Settings {
   search?: SearchLike;
   providerApiKeys?: Record<string, string>;
   [key: string]: unknown;
+}
+
+/** True if a parsed settings object still carries a non-empty cleartext apiKey anywhere. */
+export function settingsHasCleartextKey(settings: Settings): boolean {
+  const models = [settings.chatModel, settings.utilityModel, settings.embeddingsModel];
+  if (models.some((m) => typeof m?.apiKey === "string" && m.apiKey.length > 0)) return true;
+  if (typeof settings.search?.apiKey === "string" && settings.search.apiKey.length > 0) return true;
+  if (
+    settings.providerApiKeys &&
+    Object.values(settings.providerApiKeys).some((v) => typeof v === "string" && v.length > 0)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * List `settings.json.backup*` / `.bak*` siblings in `dir` that STILL hold a
+ * cleartext key. Non-destructive: the tool won't delete operator-created files
+ * (e.g. an intentional auth:reset recovery backup), but a scrubbed tree isn't
+ * safe to share while one sits beside it, so we surface them by name.
+ */
+export async function findKeyedSiblings(dir: string): Promise<string[]> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return [];
+  }
+  const hits: string[] = [];
+  for (const name of entries) {
+    if (name === "settings.json") continue;
+    if (!/\.(backup|bak)/i.test(name)) continue;
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(dir, name), "utf-8")) as Settings;
+      if (settingsHasCleartextKey(parsed)) hits.push(name);
+    } catch {
+      // non-JSON / unreadable — can't confirm a key, don't false-alarm.
+    }
+  }
+  return hits.sort();
 }
 
 function pickEnvKey(provider: string | undefined): string | null {
@@ -160,19 +203,36 @@ async function main(): Promise<void> {
   await fs.writeFile(tmp, JSON.stringify(settings, null, 2), "utf-8");
   await fs.rename(tmp, SETTINGS_FILE);
 
+  // The backup was a rollback buffer for the atomic write above. Leaving it
+  // would re-create the exact exposure this tool exists to remove — a
+  // "scrubbed" tree with a cleartext-keyed backup beside it — so delete it now
+  // that the scrubbed settings + .env.local are both safely on disk.
+  await fs.rm(backup, { force: true });
+
   console.log("[scrub-secrets] Migrated:");
   for (const c of collected) {
     console.log(`  ${c.source.padEnd(28)} → ${c.envKey} (${c.masked})`);
   }
-  console.log(`[scrub-secrets] Backup: ${backup}`);
   console.log(`[scrub-secrets] Updated: ${ENV_LOCAL}`);
-  console.log(`[scrub-secrets] settings.json now free of plaintext API keys.`);
+  console.log(`[scrub-secrets] settings.json scrubbed; pre-scrub backup removed (no cleartext copy left behind).`);
+
+  const leftovers = await findKeyedSiblings(path.dirname(SETTINGS_FILE));
+  if (leftovers.length > 0) {
+    console.log("");
+    console.log("⚠  These files in data/settings/ STILL contain cleartext keys — delete them before sharing the tree:");
+    for (const name of leftovers) console.log(`     ${name}`);
+  }
+
   console.log("");
   console.log("⚠  Rotate these keys at the provider — anything ever written to disk in cleartext should be considered exposed.");
-  console.log("⚠  The backup above STILL CONTAINS the cleartext keys. Delete it once you've verified the migration — a 'scrubbed' tree with a keyed backup next to it defeats the point of scrubbing.");
 }
 
-main().catch((err) => {
-  console.error("[scrub-secrets] Failed:", err);
-  process.exit(1);
-});
+const invokedDirectly =
+  process.argv[1]?.endsWith("scrub-secrets.ts") ||
+  process.argv[1]?.endsWith("scrub-secrets.js");
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error("[scrub-secrets] Failed:", err);
+    process.exit(1);
+  });
+}

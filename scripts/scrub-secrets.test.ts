@@ -26,6 +26,21 @@ describe("settingsHasCleartextKey", () => {
     expect(settingsHasCleartextKey({ providerApiKeys: { openai: "" } })).toBe(false);
     expect(settingsHasCleartextKey({})).toBe(false);
   });
+
+  it("true for keys nested deeper — proposerTiers + aggregator.tournamentJudgeModel (recursive)", () => {
+    expect(
+      settingsHasCleartextKey({ proposerTiers: { frontier: { provider: "anthropic", apiKey: "sk-ant-x" } } })
+    ).toBe(true);
+    expect(
+      settingsHasCleartextKey({ aggregator: { tournamentJudgeModel: { provider: "openai", apiKey: "sk-x" } } })
+    ).toBe(true);
+    // all tiers keyless (inheriting from the provider env) → false
+    expect(
+      settingsHasCleartextKey({
+        proposerTiers: { fast: { provider: "ollama" }, frontier: { provider: "anthropic", apiKey: "" } },
+      })
+    ).toBe(false);
+  });
 });
 
 describe("findKeyedSiblings", () => {
@@ -37,9 +52,9 @@ describe("findKeyedSiblings", () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it("flags only backup/.bak siblings that still hold a key — skips the live file, clean backups, and non-JSON", async () => {
+  it("flags EVERY keyed file (any name, incl. malformed JSON); skips the live file and clean files", async () => {
     await fs.writeFile(
-      path.join(dir, "settings.json"),
+      path.join(dir, "settings.json"), // live file — excluded by name even though keyed
       JSON.stringify({ chatModel: { provider: "openrouter", apiKey: "sk-or-v1-LIVE" } })
     );
     await fs.writeFile(
@@ -47,14 +62,25 @@ describe("findKeyedSiblings", () => {
       JSON.stringify({ chatModel: { provider: "openrouter", apiKey: "sk-or-v1-LEAK" } })
     );
     await fs.writeFile(
+      path.join(dir, "settings.json.copy"), // non-backup name must still be caught
+      JSON.stringify({ proposerTiers: { frontier: { provider: "anthropic", apiKey: "sk-ant-LEAK" } } })
+    );
+    await fs.writeFile(
+      path.join(dir, "settings.json.broken"), // malformed JSON hiding a key (trailing comma)
+      '{ "chatModel": { "apiKey": "sk-or-v1-BROKEN", } '
+    );
+    await fs.writeFile(
       path.join(dir, "settings.json.bak-456"),
       JSON.stringify({ chatModel: { provider: "ollama" } }) // clean
     );
-    await fs.writeFile(path.join(dir, "notes.txt"), "sk-or-v1-not-a-backup-name"); // wrong name
+    await fs.writeFile(path.join(dir, "readme.txt"), "no secrets here"); // clean non-JSON
 
     const hits = await findKeyedSiblings(dir);
-    // live settings.json excluded by name; clean .bak not flagged; notes.txt not a backup.
-    expect(hits).toEqual(["settings.json.backup-123"]);
+    expect(hits).toEqual([
+      "settings.json.backup-123",
+      "settings.json.broken",
+      "settings.json.copy",
+    ]);
   });
 
   it("returns [] for a missing directory", async () => {

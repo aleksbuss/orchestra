@@ -5,10 +5,11 @@
  * Usage: npm run scrub:secrets
  *
  * Safe to run multiple times. The settings.json file is rewritten atomically
- * via fs.rename. A transient timestamped backup guards that write and is
- * REMOVED on success — no cleartext copy is left behind (a "scrubbed" tree
- * with a keyed backup beside it defeats the point). Real disaster recovery is
- * the data-backups/ snapshots, not this buffer.
+ * via fs.rename (old-or-new, never partial), so NO cleartext backup is written
+ * to disk — the whole point of scrubbing is defeated by a keyed copy beside it,
+ * even a transient one an indexer/rsync/tar could grab in the window. Recovery
+ * of the pre-scrub state comes from the migrated keys in .env.local and the
+ * data-backups/ snapshots, not a sibling copy.
  */
 import fs from "fs/promises";
 import path from "path";
@@ -48,28 +49,51 @@ interface Settings {
   embeddingsModel?: ModelLike;
   search?: SearchLike;
   providerApiKeys?: Record<string, string>;
+  /** Per-tier proposer models (fast/balanced/frontier/skeptic) — each a keyed ModelConfig. */
+  proposerTiers?: Record<string, ModelLike>;
+  /** Tournament judge lives under `aggregator`. */
+  aggregator?: { tournamentJudgeModel?: ModelLike; [key: string]: unknown };
   [key: string]: unknown;
 }
 
-/** True if a parsed settings object still carries a non-empty cleartext apiKey anywhere. */
-export function settingsHasCleartextKey(settings: Settings): boolean {
-  const models = [settings.chatModel, settings.utilityModel, settings.embeddingsModel];
-  if (models.some((m) => typeof m?.apiKey === "string" && m.apiKey.length > 0)) return true;
-  if (typeof settings.search?.apiKey === "string" && settings.search.apiKey.length > 0) return true;
-  if (
-    settings.providerApiKeys &&
-    Object.values(settings.providerApiKeys).some((v) => typeof v === "string" && v.length > 0)
-  ) {
-    return true;
+/**
+ * True if a settings value still carries a non-empty cleartext key ANYWHERE.
+ * Recurses so it catches every key-bearing slot — chatModel/utilityModel/
+ * embeddingsModel/search, providerApiKeys values, proposerTiers.{fast,balanced,
+ * frontier,skeptic}, aggregator.tournamentJudgeModel, and any slot added later —
+ * without enumerating them. An enumerated list rots: the doubt-driven review
+ * caught exactly that (proposerTiers + tournamentJudge were being missed).
+ */
+export function settingsHasCleartextKey(value: unknown): boolean {
+  if (value == null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(settingsHasCleartextKey);
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "apiKey" && typeof v === "string" && v.length > 0) return true;
+    if (
+      key === "providerApiKeys" &&
+      v &&
+      typeof v === "object" &&
+      Object.values(v as Record<string, unknown>).some((x) => typeof x === "string" && x.length > 0)
+    ) {
+      return true;
+    }
+    if (v && typeof v === "object" && settingsHasCleartextKey(v)) return true;
   }
   return false;
 }
 
+/** Fallback signature for files that don't JSON-parse (a keyed but malformed file). */
+const RAW_KEY_SIGNATURE =
+  /"apiKey"\s*:\s*"[^"]+"|sk-or-v1|sk-ant-|sk-[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{20,}/;
+
 /**
- * List `settings.json.backup*` / `.bak*` siblings in `dir` that STILL hold a
- * cleartext key. Non-destructive: the tool won't delete operator-created files
- * (e.g. an intentional auth:reset recovery backup), but a scrubbed tree isn't
- * safe to share while one sits beside it, so we surface them by name.
+ * List EVERY file in `dir` (other than the live settings.json) that still holds
+ * a cleartext key. Scans ALL files, not just `*.backup`/`*.bak` — a hand-made
+ * `settings.json.copy` / `.old` leaks just the same (doubt-driven review). Uses
+ * the structural `settingsHasCleartextKey` when the file parses as JSON, and a
+ * raw-text signature when it does NOT (a keyed-but-malformed file must not slip
+ * through a swallowed `JSON.parse`). Non-destructive: it names leftovers, never
+ * deletes operator-created files (e.g. an intentional auth:reset recovery copy).
  */
 export async function findKeyedSiblings(dir: string): Promise<string[]> {
   let entries: string[];
@@ -81,13 +105,21 @@ export async function findKeyedSiblings(dir: string): Promise<string[]> {
   const hits: string[] = [];
   for (const name of entries) {
     if (name === "settings.json") continue;
-    if (!/\.(backup|bak)/i.test(name)) continue;
+    const full = path.join(dir, name);
+    let text: string;
     try {
-      const parsed = JSON.parse(await fs.readFile(path.join(dir, name), "utf-8")) as Settings;
-      if (settingsHasCleartextKey(parsed)) hits.push(name);
+      if (!(await fs.stat(full)).isFile()) continue;
+      text = await fs.readFile(full, "utf-8");
     } catch {
-      // non-JSON / unreadable — can't confirm a key, don't false-alarm.
+      continue; // unreadable / not a regular file
     }
+    let keyed: boolean;
+    try {
+      keyed = settingsHasCleartextKey(JSON.parse(text) as unknown);
+    } catch {
+      keyed = RAW_KEY_SIGNATURE.test(text); // malformed JSON must not hide a key
+    }
+    if (keyed) hits.push(name);
   }
   return hits.sort();
 }
@@ -190,31 +222,37 @@ async function main(): Promise<void> {
     delete settings.providerApiKeys;
   }
 
+  // Per-tier proposer models + the tournament judge are keyed ModelConfigs too
+  // (doubt-driven review caught these being skipped — they were silently left
+  // in settings.json). harvestModel migrates each to its provider's env var and
+  // strips the inline key, same as chatModel; an empty/absent key is skipped.
+  for (const [tier, m] of Object.entries(settings.proposerTiers ?? {})) {
+    harvestModel(`proposerTiers.${tier}`, m);
+  }
+  harvestModel("aggregator.tournamentJudgeModel", settings.aggregator?.tournamentJudgeModel);
+
   if (collected.length === 0) {
     console.log("[scrub-secrets] No cleartext API keys found in settings.json. Nothing to migrate.");
     return;
   }
 
-  const backup = `${SETTINGS_FILE}.backup-${Date.now()}`;
-  await fs.writeFile(backup, raw, "utf-8");
+  // Keys FIRST: .env.local carries them before settings.json loses them, so a
+  // crash between the two writes never drops a key (re-running is idempotent).
+  // Then an atomic tmp+rename swaps settings.json in one step (old-or-new, never
+  // partial). NO cleartext backup is written — recovery is .env.local +
+  // data-backups/, never a keyed sibling (not even a transient one).
   await writeEnvLocal(env);
 
   const tmp = `${SETTINGS_FILE}.tmp-${Date.now()}`;
   await fs.writeFile(tmp, JSON.stringify(settings, null, 2), "utf-8");
   await fs.rename(tmp, SETTINGS_FILE);
 
-  // The backup was a rollback buffer for the atomic write above. Leaving it
-  // would re-create the exact exposure this tool exists to remove — a
-  // "scrubbed" tree with a cleartext-keyed backup beside it — so delete it now
-  // that the scrubbed settings + .env.local are both safely on disk.
-  await fs.rm(backup, { force: true });
-
   console.log("[scrub-secrets] Migrated:");
   for (const c of collected) {
     console.log(`  ${c.source.padEnd(28)} → ${c.envKey} (${c.masked})`);
   }
   console.log(`[scrub-secrets] Updated: ${ENV_LOCAL}`);
-  console.log(`[scrub-secrets] settings.json scrubbed; pre-scrub backup removed (no cleartext copy left behind).`);
+  console.log(`[scrub-secrets] settings.json scrubbed (no cleartext backup written).`);
 
   const leftovers = await findKeyedSiblings(path.dirname(SETTINGS_FILE));
   if (leftovers.length > 0) {

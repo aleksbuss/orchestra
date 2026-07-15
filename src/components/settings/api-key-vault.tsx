@@ -119,7 +119,7 @@ export function ApiKeyVault() {
                 className={`
                   w-full px-3 py-2 pr-10 rounded-lg text-sm font-mono
                   bg-muted/30 border
-                  ${hasSavedKey[p.id] && !keys[p.id] ? "border-emerald-500/30" : "border-white/5"}
+                  ${hasSavedKey[p.id] && !keys[p.id] ? "border-emerald-500/30" : "border-border/60"}
                   text-foreground placeholder:text-muted-foreground/30
                   focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/40
                   transition-all duration-200
@@ -142,7 +142,7 @@ export function ApiKeyVault() {
       </div>
 
       {error && (
-        <div className="flex items-center gap-2 text-xs text-red-400">
+        <div className="flex items-center gap-2 text-xs text-red-600 dark:text-red-400">
           <AlertCircle className="w-3.5 h-3.5" />
           {error}
         </div>
@@ -155,7 +155,7 @@ export function ApiKeyVault() {
           flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold
           transition-all duration-300
           ${saved
-            ? "bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30"
             : "bg-primary/10 text-primary border border-primary/20 hover:bg-primary/20"
           }
           disabled:opacity-50

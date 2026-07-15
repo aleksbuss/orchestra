@@ -243,8 +243,8 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
           flex items-center gap-1.5 rounded-full px-3 py-1.5
           text-[11px] font-medium tracking-wide
           transition-all duration-200
-          border border-white/10 hover:border-white/20
-          ${isOpen ? "bg-white/15 shadow-lg" : "bg-white/5 hover:bg-white/10"}
+          border border-border/70 hover:border-foreground/20
+          ${isOpen ? "bg-foreground/15 shadow-lg" : "bg-foreground/5 hover:bg-foreground/10"}
           text-muted-foreground hover:text-foreground
           disabled:opacity-50 disabled:cursor-not-allowed
           backdrop-blur-sm
@@ -272,7 +272,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
           className="
             absolute bottom-full left-0 mb-2 z-50
             w-[340px] max-h-[420px]
-            rounded-2xl border border-white/15
+            rounded-2xl border border-border
             bg-background/95 dark:bg-[#0a0a1a]/95
             backdrop-blur-2xl shadow-2xl
             overflow-hidden
@@ -280,9 +280,9 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
           "
         >
           {/* Header */}
-          <div className="px-4 py-3 border-b border-white/10">
+          <div className="px-4 py-3 border-b border-border/70">
             <div className="flex items-center gap-2">
-              <Zap className="size-4 text-violet-400" />
+              <Zap className="size-4 text-violet-600 dark:text-violet-400" />
               <span className="text-sm font-semibold text-foreground">
                 Quick Model Switch
               </span>
@@ -293,7 +293,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
           </div>
 
           {/* Provider Chips */}
-          <div className="px-3 py-2.5 border-b border-white/10">
+          <div className="px-3 py-2.5 border-b border-border/70">
             <div className="flex flex-wrap gap-1.5">
               {providerKeys.map((key) => {
                 const isActive = selectedProvider === key;
@@ -308,10 +308,10 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
                       text-[11px] font-medium transition-all duration-150
                       ${
                         isActive
-                          ? "bg-white/15 text-foreground ring-1 ring-white/20"
+                          ? "bg-foreground/15 text-foreground ring-1 ring-foreground/20"
                           : isCurrent
-                            ? "bg-white/10 text-foreground/80"
-                            : "bg-white/5 text-muted-foreground hover:bg-white/10 hover:text-foreground"
+                            ? "bg-foreground/10 text-foreground/80"
+                            : "bg-foreground/5 text-muted-foreground hover:bg-foreground/10 hover:text-foreground"
                       }
                     `}
                   >
@@ -320,7 +320,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
                     />
                     {getProviderLabel(key)}
                     {currentProvider === key && !selectedProvider && (
-                      <Check className="size-3 text-emerald-400" />
+                      <Check className="size-3 text-emerald-600 dark:text-emerald-400" />
                     )}
                   </button>
                 );
@@ -330,16 +330,16 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
 
           {/* API Key Input (if needed) */}
           {showApiKeyInput && (
-            <div className="px-3 py-2.5 border-b border-white/10">
+            <div className="px-3 py-2.5 border-b border-border/70">
               <div className="flex items-center gap-2">
-                <KeyRound className="size-3.5 text-amber-400 shrink-0" />
+                <KeyRound className="size-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
                 <input
                   type="password"
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
                   placeholder={`${getProviderLabel(selectedProvider)} API key...`}
                   className="
-                    flex-1 rounded-lg border border-white/10 bg-white/5
+                    flex-1 rounded-lg border border-border/70 bg-foreground/5
                     px-2.5 py-1.5 text-xs text-foreground
                     placeholder:text-muted-foreground/60
                     focus:outline-none focus:border-violet-500/50
@@ -373,7 +373,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
           <div className="overflow-y-auto max-h-[260px] overscroll-contain">
             {!selectedProvider && !showApiKeyInput && (
               <div className="px-4 py-6 text-center text-xs text-muted-foreground">
-                <Zap className="size-5 mx-auto mb-2 text-violet-400/50" />
+                <Zap className="size-5 mx-auto mb-2 text-violet-600/50 dark:text-violet-400/50" />
                 Pick a provider above to see models
               </div>
             )}
@@ -442,11 +442,11 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
                         className={`
                           w-full flex items-center gap-2 px-4 py-2 text-left
                           text-xs transition-colors duration-100
-                          hover:bg-white/8 active:bg-white/12
+                          hover:bg-foreground/8 active:bg-foreground/12
                           ${
                             currentProvider === selectedProvider &&
                             currentModel === m.id
-                              ? "bg-white/10 text-foreground"
+                              ? "bg-foreground/10 text-foreground"
                               : "text-foreground/80"
                           }
                         `}
@@ -459,7 +459,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
                         </span>
                         {currentProvider === selectedProvider &&
                           currentModel === m.id && (
-                            <Check className="size-3 text-emerald-400 shrink-0" />
+                            <Check className="size-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
                           )}
                       </button>
                     ))}
@@ -482,22 +482,22 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
                             className={`
                               w-full flex items-center gap-2 px-4 py-2 text-left
                               text-xs transition-colors duration-100
-                              hover:bg-white/8 active:bg-white/12
+                              hover:bg-foreground/8 active:bg-foreground/12
                               ${
                                 currentProvider === selectedProvider &&
                                 currentModel === m.id
-                                  ? "bg-white/10 text-foreground"
+                                  ? "bg-foreground/10 text-foreground"
                                   : "text-foreground/80"
                               }
                             `}
                           >
-                            <span className="size-1.5 rounded-full bg-white/20 shrink-0" />
+                            <span className="size-1.5 rounded-full bg-foreground/20 shrink-0" />
                             <span className="flex-1 truncate">
                               {m.name || m.id}
                             </span>
                             {currentProvider === selectedProvider &&
                               currentModel === m.id && (
-                                <Check className="size-3 text-emerald-400 shrink-0" />
+                                <Check className="size-3 text-emerald-600 dark:text-emerald-400 shrink-0" />
                               )}
                           </button>
                         ))}
@@ -510,8 +510,8 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
 
           {/* Footer: saving indicator */}
           {saving && (
-            <div className="px-4 py-2 border-t border-white/10 flex items-center gap-2">
-              <Loader2 className="size-3 animate-spin text-violet-400" />
+            <div className="px-4 py-2 border-t border-border/70 flex items-center gap-2">
+              <Loader2 className="size-3 animate-spin text-violet-600 dark:text-violet-400" />
               <span className="text-[11px] text-muted-foreground">
                 Switching model...
               </span>

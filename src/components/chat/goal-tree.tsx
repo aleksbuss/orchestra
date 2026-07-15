@@ -39,7 +39,7 @@ function TaskItem({ task, depth = 0 }: { task: GoalTask; depth?: number }) {
              {task.description}
           </span>
           {task.result && task.status !== "pending" && (
-             <p className="text-xs text-muted-foreground mt-0.5 border-l-2 pl-2 border-white/10">
+             <p className="text-xs text-muted-foreground mt-0.5 border-l-2 pl-2 border-border/70">
                {task.result}
              </p>
           )}
@@ -85,7 +85,7 @@ export function GoalTree({ chatId, syncTick }: GoalTreeProps) {
     <div className="mx-auto max-w-3xl mb-4 px-4 lg:px-8">
       <div className="glass-panel rounded-xl overflow-hidden">
         <div 
-          className="flex items-center justify-between p-3 cursor-pointer bg-white/5 hover:bg-white/10 transition-colors"
+          className="flex items-center justify-between p-3 cursor-pointer bg-foreground/5 hover:bg-foreground/10 transition-colors"
           onClick={() => setIsExpanded(!isExpanded)}
         >
           <div className="flex items-center gap-2">

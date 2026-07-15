@@ -252,7 +252,7 @@ export function ChatInput({
               size="icon"
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled || !chatId}
-              className="h-10 w-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground hover:bg-white/5 transition-colors ml-1"
+              className="h-10 w-10 shrink-0 rounded-full text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors ml-1"
               title={chatId ? "Attach files" : "Send a message first to attach files"}
               aria-label="Attach files"
             >

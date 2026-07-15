@@ -64,8 +64,11 @@ export function SwarmTerminal({ chatId }: { chatId: string | null }) {
 
   if (!chatId || logs.length === 0) return null;
 
+  // The terminal is deliberately always-dark (black console aesthetic in both
+  // themes) — the white-alpha classes INSIDE it are correct; only the outer
+  // border follows the theme.
   return (
-    <div className="mt-6 border border-white/10 rounded-xl overflow-hidden bg-black/95 shadow-inner flex flex-col h-[300px] animate-in fade-in slide-in-from-top-2">
+    <div className="mt-6 border border-border rounded-xl overflow-hidden bg-black/95 shadow-inner flex flex-col h-[300px] animate-in fade-in slide-in-from-top-2">
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/10 bg-white/5">
         <Terminal className="w-4 h-4 text-green-500" />
         <span className="text-xs font-semibold text-green-500 tracking-wider uppercase">Deep Audit Terminal</span>

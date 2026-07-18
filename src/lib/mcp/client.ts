@@ -635,7 +635,7 @@ export async function getProjectMcpTools(projectId: string, role?: string): Prom
   serverIds: string[];
   mcpSystemPrompt: (contextWindow?: number) => string;
 } | null> {
-  const { loadProjectMcpServers } = await import("@/lib/storage/project-store");
+  const { loadProjectMcpServers } = await import("@/lib/storage/project-mcp");
   const config = await loadProjectMcpServers(projectId);
   if (!config?.servers?.length) return null;
 

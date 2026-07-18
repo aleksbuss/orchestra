@@ -29,8 +29,12 @@ export function SiteHeader({ title }: { title?: string }) {
           {title || "Orchestra"}
         </h1>
         
-        <div className="flex-1 flex justify-center px-4 min-w-0">
-          <div className="bg-white/[0.03] backdrop-blur-md border border-white/10 rounded-xl px-2 py-1.5 shadow-sm">
+        {/* The header height is FIXED (`--header-height` feeds the sidebar's
+            top/height math in app-sidebar.tsx), so the pill strip must never
+            wrap to a second row. On narrow viewports it scrolls horizontally
+            instead — centered while it fits, swipeable when it doesn't. */}
+        <div className="flex-1 flex justify-center min-w-0 px-1 sm:px-4">
+          <div className="max-w-full overflow-x-auto scrollbar-none rounded-xl bg-foreground/[0.03] backdrop-blur-md border border-border/70 px-2 py-1.5 shadow-sm">
             <SwarmConfig />
           </div>
         </div>

@@ -47,7 +47,7 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
       // rather than "something broke".
       return {
         container: "bg-emerald-500/10 border-emerald-500/20 text-emerald-200",
-        icon: "text-emerald-400",
+        icon: "text-emerald-600 dark:text-emerald-400",
         label: "Switched model",
       };
     case "upstream_no_tools":
@@ -56,25 +56,25 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
       // misconfigured.
       return {
         container: "bg-amber-500/10 border-amber-500/20 text-amber-200",
-        icon: "text-amber-400",
+        icon: "text-amber-600 dark:text-amber-400",
         label: "Model can't call tools",
       };
     case "upstream_rate_limit":
       return {
         container: "bg-amber-500/10 border-amber-500/20 text-amber-200",
-        icon: "text-amber-400",
+        icon: "text-amber-600 dark:text-amber-400",
         label: "Rate limited",
       };
     case "upstream_5xx":
       return {
         container: "bg-amber-500/10 border-amber-500/20 text-amber-200",
-        icon: "text-amber-400",
+        icon: "text-amber-600 dark:text-amber-400",
         label: "Provider unavailable",
       };
     case "upstream_4xx":
       return {
         container: "bg-red-500/10 border-red-500/20 text-red-200",
-        icon: "text-red-400",
+        icon: "text-red-600 dark:text-red-400",
         label: "Provider rejected the request",
       };
     case "abort":
@@ -82,14 +82,14 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
       // mostly for transparency: the user knows their stop button worked.
       return {
         container: "bg-slate-500/10 border-slate-500/20 text-slate-300",
-        icon: "text-slate-400",
+        icon: "text-slate-600 dark:text-slate-400",
         label: "Request cancelled",
       };
     case "internal":
     default:
       return {
         container: "bg-red-500/10 border-red-500/20 text-red-200",
-        icon: "text-red-400",
+        icon: "text-red-600 dark:text-red-400",
         label: "Internal error",
       };
   }

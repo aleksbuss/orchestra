@@ -18,13 +18,13 @@ interface Stage {
 }
 
 const THINKING_STAGES: readonly Stage[] = [
-  { icon: Brain,     label: "Processing request…",         color: "text-violet-400",  delay: 0 },
-  { icon: Zap,       label: "Analyzing context…",          color: "text-amber-400",   delay: 3000 },
-  { icon: Cpu,       label: "Running tools…",              color: "text-cyan-400",    delay: 7000 },
-  { icon: Sparkles,  label: "Composing response…",         color: "text-emerald-400", delay: 12000 },
-  { icon: Activity,  label: "Deep reasoning in progress…", color: "text-pink-400",    delay: 30000 },
-  { icon: Hourglass, label: "Complex task — still working…", color: "text-orange-400", delay: 60000 },
-  { icon: Clock,     label: "Almost there, finalizing…",   color: "text-teal-400",    delay: 120000 },
+  { icon: Brain,     label: "Processing request…",         color: "text-violet-600 dark:text-violet-400",  delay: 0 },
+  { icon: Zap,       label: "Analyzing context…",          color: "text-amber-600 dark:text-amber-600 dark:text-amber-400",   delay: 3000 },
+  { icon: Cpu,       label: "Running tools…",              color: "text-cyan-600 dark:text-cyan-400",    delay: 7000 },
+  { icon: Sparkles,  label: "Composing response…",         color: "text-emerald-600 dark:text-emerald-600 dark:text-emerald-400", delay: 12000 },
+  { icon: Activity,  label: "Deep reasoning in progress…", color: "text-pink-600 dark:text-pink-400",    delay: 30000 },
+  { icon: Hourglass, label: "Complex task — still working…", color: "text-orange-600 dark:text-orange-400", delay: 60000 },
+  { icon: Clock,     label: "Almost there, finalizing…",   color: "text-teal-600 dark:text-teal-400",    delay: 120000 },
 ] as const;
 
 /* ─── Ambient Messages — rotate to keep UI alive ─── */
@@ -47,7 +47,7 @@ function PulsingProgressBar({ elapsedMs }: { elapsedMs: number }) {
   const progress = Math.min(95, Math.log2(1 + elapsedMs / 1000) * 12);
 
   return (
-    <div className="w-full h-1 rounded-full bg-white/5 overflow-hidden mt-2">
+    <div className="w-full h-1 rounded-full bg-foreground/5 overflow-hidden mt-2">
       <div
         className="h-full rounded-full transition-all duration-1000 ease-out relative"
         style={{ width: `${progress}%` }}
@@ -55,7 +55,7 @@ function PulsingProgressBar({ elapsedMs }: { elapsedMs: number }) {
         {/* Gradient bar */}
         <div className="absolute inset-0 bg-gradient-to-r from-violet-500 via-purple-500 to-pink-500 rounded-full" />
         {/* Shimmer overlay */}
-        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-shimmer rounded-full" />
+        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-foreground/20 to-transparent animate-shimmer rounded-full" />
       </div>
     </div>
   );
@@ -153,8 +153,8 @@ export function ThinkingIndicator({ isLoading, status }: ThinkingIndicatorProps)
       <div className="flex-1 min-w-0">
         <div className="
           rounded-2xl rounded-tl-md px-4 py-3
-          bg-white/5 dark:bg-white/[0.03]
-          border border-white/10
+          bg-foreground/5 dark:bg-foreground/[0.03]
+          border border-border/70
           backdrop-blur-sm
         ">
           {/* Stage indicator */}
@@ -186,10 +186,10 @@ export function ThinkingIndicator({ isLoading, status }: ThinkingIndicatorProps)
                     className={`
                       flex items-center justify-center rounded-full transition-all duration-300
                       ${isActive
-                        ? `size-6 ${s.color} bg-white/10 ring-1 ring-current/30`
+                        ? `size-6 ${s.color} bg-foreground/10 ring-1 ring-current/30`
                         : isCompleted
-                          ? "size-5 text-emerald-400/60"
-                          : "size-5 text-white/15"
+                          ? "size-5 text-emerald-600/60 dark:text-emerald-400/60"
+                          : "size-5 text-muted-foreground/40"
                       }
                     `}
                   >
@@ -205,8 +205,8 @@ export function ThinkingIndicator({ isLoading, status }: ThinkingIndicatorProps)
               {/* Extended stage indicator for long waits */}
               {stageIndex >= 4 && (
                 <div className="flex items-center gap-1 ml-1 animate-in fade-in slide-in-from-left-2 duration-300">
-                  <div className="w-3 h-px bg-white/20" />
-                  <div className={`size-6 flex items-center justify-center rounded-full bg-white/10 ring-1 ring-current/30 ${stage.color}`}>
+                  <div className="w-3 h-px bg-foreground/20" />
+                  <div className={`size-6 flex items-center justify-center rounded-full bg-foreground/10 ring-1 ring-current/30 ${stage.color}`}>
                     <IconComponent className="size-3 animate-pulse" />
                   </div>
                 </div>
@@ -215,7 +215,7 @@ export function ThinkingIndicator({ isLoading, status }: ThinkingIndicatorProps)
 
             {/* Timer */}
             <span className={`text-[10px] tabular-nums ml-auto ${
-              seconds >= 60 ? "text-orange-400/70" : "text-muted-foreground/50"
+              seconds >= 60 ? "text-orange-600/70 dark:text-orange-400/70" : "text-muted-foreground/50"
             }`}>
               {timeDisplay}
             </span>
@@ -244,7 +244,7 @@ export function ThinkingIndicator({ isLoading, status }: ThinkingIndicatorProps)
                 <div className="size-1 rounded-full bg-emerald-400 animate-bounce [animation-delay:150ms]" />
                 <div className="size-1 rounded-full bg-emerald-400 animate-bounce [animation-delay:300ms]" />
               </div>
-              <span className="text-[10px] text-emerald-400/70">
+              <span className="text-[10px] text-emerald-600/70 dark:text-emerald-400/70">
                 Streaming response…
               </span>
             </div>

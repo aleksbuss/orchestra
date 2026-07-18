@@ -3,9 +3,11 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   getProject,
   getProjectMcpServersPath,
+} from "@/lib/storage/project-store";
+import {
   loadProjectMcpServers,
   saveProjectMcpServersContent,
-} from "@/lib/storage/project-store";
+} from "@/lib/storage/project-mcp";
 
 function isNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;

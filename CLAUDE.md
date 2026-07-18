@@ -539,15 +539,13 @@ Four files cross the §8 1500-line "MUST decompose next substantive PR" line (`t
 - `llm-provider.ts` becomes a registry: `createModel(config, opts)` dispatches by `config.provider`. Keep the `modelSupportsTools` helper here OR move to `providers/tool-support.ts` (currently lives separately — PM #17 single source of truth).
 - Pre-extraction guard: `tool-support.test.ts`'s universal cross-provider regression test (PM #17) must stay green; add positive cases for any provider whose extraction you didn't touch so the test surface widens at the same time.
 
-**`src/lib/storage/project-store.ts` (1564 LOC, no hot edits)** — multiple resources in one file.
-- Natural seams:
-  - `project-meta.ts` (~300): `getProject`, `getAllProjects`, `saveProject`, `deleteProject`, project-id validation, getWorkDir.
-  - `project-blackboard.ts` (~250): `.orchestra_blackboard.json` read/write.
-  - `project-knowledge.ts` (~300): `getProjectFiles`, `importKnowledgeFile`, the audited-route filename push-down.
-  - `project-mcp.ts` (~400): `loadProjectMcpServers`, `upsertProjectMcpServer`, `deleteProjectMcpServer`, `saveProjectMcpServersContent`.
-  - `project-files.ts` (~200): direct file CRUD inside the project workspace.
-- This is the LOWEST-RISK of the five — most callsites use one resource at a time, so the cross-file edge is thin.
-- Pre-extraction guard: the audited-routes table in §"Security Patterns" still references `importKnowledgeFile` and `loadProjectMcpServers`; the new module paths must keep the `assertPathInside` push-down in place.
+**`src/lib/storage/project-store.ts` (~732 LOC, no hot edits — now UNDER the 800 soft cap)** — was 1564; TWO clusters extracted. (1) GitHub-skill-install → [`project-skills-github.ts`](src/lib/storage/project-skills-github.ts) (~588 LOC: URL→ref→tree-walk→download→write); shared skill helpers (`parseFrontmatter`/`validateSkillName`/`findProjectSkillDir`/`getProjectSkillsDir`/`SKILL_FILE`/`ensureDir`/`migrateLegacySkillsDir`) stay in project-store, imported one-way. (2) MCP config storage (`loadProjectMcpServers`/`upsertProjectMcpServer`/`deleteProjectMcpServer`/`saveProjectMcpServersContent` + cursor normalization) → [`project-mcp.ts`](src/lib/storage/project-mcp.ts) (~292 LOC); the MCP path helpers (`getProjectMcpDir`/`getProjectMcpServersPath`) + `ensureDir` stay in project-store (project-store uses `getProjectMcpDir` internally → keeping the paths avoids a cycle), imported one-way; 7 callers rewired off project-store. **project-store does NOT import either new module — no cycle.**
+- **The original seam guess here was WRONG (measured 2026-07): project-store holds NO blackboard/knowledge logic (those live in `lib/memory/`) — it is SKILLS-dominated.** Reality by concern:
+  - **Skills** (~940 LOC originally, the bulk) — GitHub-install now split out; the REST (`createSkill`/`updateSkill`/`deleteSkill`/`loadProjectSkills*`/`writeSkillFile`/`loadSkillInstructions` + skill-dir helpers) is the next slice → `project-skills.ts` (~440).
+  - **MCP** (~292) — ✅ DONE → [`project-mcp.ts`](src/lib/storage/project-mcp.ts) (path helpers stay in project-store to avoid a cycle; 7 callers rewired; test → `project-mcp.test.ts`).
+  - **Project CRUD** (~170): `getAllProjects`/`getProject`/`createProject`/`updateProject`/`deleteProject`.
+  - **Meta/paths + files** (~130): `getWorkDir`, path helpers, `getProjectFiles`.
+- Regression net for the cuts: [`project-store.test.ts`](src/lib/storage/project-store.test.ts) (45) + [`project-skills-github.test.ts`](src/lib/storage/project-skills-github.test.ts) (16) + [`project-mcp.test.ts`](src/lib/storage/project-mcp.test.ts) (29), each moved with its code, drive them end-to-end.
 
 **`src/lib/tools/code-execution.ts` (1177 LOC, 3 hot edits in 90d)** — security-critical surface.
 - Natural seams:

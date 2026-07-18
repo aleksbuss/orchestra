@@ -18,10 +18,8 @@ import {
   type McpServerConfig,
   type ProjectMcpConfig,
 } from "@/lib/types";
-import {
-  getWorkDir,
-  loadProjectMcpServers,
-} from "@/lib/storage/project-store";
+import { getWorkDir } from "@/lib/storage/project-store";
+import { loadProjectMcpServers } from "@/lib/storage/project-mcp";
 import { resolveCliOAuthCredentialSync } from "@/lib/providers/provider-auth";
 import { cliProviderEnv, scrubProcessEnv } from "@/lib/security/scrub-env";
 import { MODEL_PROVIDERS } from "@/lib/providers/model-config";

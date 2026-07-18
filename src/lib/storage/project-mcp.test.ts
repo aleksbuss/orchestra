@@ -41,7 +41,13 @@ let tmpRoot: string;
 let cwdSpy: any;
 
 async function loadModule() {
-  return await import("./project-store");
+  // MCP logic fns moved to project-mcp; getProjectMcpServersPath (path helper)
+  // stays in project-store. Merge both namespaces so every `m.<symbol>` resolves.
+  const [store, mcp] = await Promise.all([
+    import("./project-store"),
+    import("./project-mcp"),
+  ]);
+  return { ...store, ...mcp };
 }
 
 beforeEach(async () => {

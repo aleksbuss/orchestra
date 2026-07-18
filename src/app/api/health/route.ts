@@ -609,9 +609,8 @@ export async function GET() {
   // Returns: "ok" with a count, "warn" only when reading the project list
   // or any per-project MCP file fails outright.
   try {
-    const { getAllProjects, loadProjectMcpServers } = await import(
-      "@/lib/storage/project-store"
-    );
+    const { getAllProjects } = await import("@/lib/storage/project-store");
+    const { loadProjectMcpServers } = await import("@/lib/storage/project-mcp");
     const projects = await getAllProjects();
     // Sprint 8 collapsed sequential O(N projects) to parallel max-of-N
     // wall-clock via Promise.all. Sprint 10 follow-up: bound concurrency

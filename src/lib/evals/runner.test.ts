@@ -15,6 +15,25 @@ import {
 } from "./runner";
 import type { EvalCase } from "./types";
 
+// invokeRealAgent (the --real path) late-imports these; mock them so the
+// precedence test can assert --real is taken WITHOUT booting the agent stack.
+const { REAL_AGENT_OUTPUT } = vi.hoisted(() => ({
+  REAL_AGENT_OUTPUT: "REAL-AGENT-OVERRIDE-OUTPUT",
+}));
+vi.mock("@/lib/agent/agent", () => ({
+  runAgent: vi.fn(async () => ({
+    toUIMessageStreamResponse: () => ({ body: null }),
+  })),
+}));
+vi.mock("@/lib/storage/chat-store", () => ({
+  createChat: vi.fn(async () => {}),
+  getChat: vi.fn(async () => ({
+    messages: [{ role: "assistant", content: REAL_AGENT_OUTPUT }],
+  })),
+  deleteChat: vi.fn(async () => {}),
+  flushAllPendingChats: vi.fn(async () => {}),
+}));
+
 let tmpDir: string;
 
 beforeEach(async () => {
@@ -220,5 +239,35 @@ describe("PM #41 — runCase without mock_response + useRealAgent=false", () => 
     // Empty string fails the contains assertion — case marked failed.
     expect(r.response).toBe("");
     expect(r.passed).toBe(false);
+  });
+});
+
+describe("PM #41 — runCase precedence: --real overrides mock_response", () => {
+  it("useRealAgent=true scores the real agent, not the recorded mock", async () => {
+    const r = await runCase(
+      {
+        id: "precedence-override",
+        description: "case ships a mock, but --real is on",
+        input: { message: "anything" },
+        mock_response: "MOCK-SHOULD-BE-IGNORED",
+        assertions: [{ type: "contains", value: "OVERRIDE" }],
+      },
+      { useRealAgent: true }
+    );
+    expect(r.response).toBe(REAL_AGENT_OUTPUT);
+    expect(r.response).not.toContain("MOCK");
+    expect(r.passed).toBe(true);
+  });
+
+  it("useRealAgent=false still falls back to the recorded mock", async () => {
+    const r = await runCase({
+      id: "precedence-fallback",
+      description: "mock used when real is disabled",
+      input: { message: "anything" },
+      mock_response: "MOCK-USED",
+      assertions: [{ type: "contains", value: "MOCK-USED" }],
+    });
+    expect(r.response).toBe("MOCK-USED");
+    expect(r.passed).toBe(true);
   });
 });

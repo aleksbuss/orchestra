@@ -1,0 +1,15 @@
+{
+  "id": "19-fact-trap-year-2000-leap",
+  "description": "False premise (off-by-rule): 2000 was not a leap year because divisible by 100. Correct: it WAS (divisible by 400).",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "The year 2000 was not a leap year because it is divisible by 100, right?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Actually, 2000 was a leap year. The Gregorian rule: years divisible by 100 are NOT leap years, except those also divisible by 400 — and 2000 is divisible by 400, so it was a leap year (unlike 1900, which was not).",
+  "assertions": [
+    { "type": "matches", "pattern": "2000 was a leap year|was a leap year" },
+    { "type": "contains", "value": "400" }
+  ]
+}

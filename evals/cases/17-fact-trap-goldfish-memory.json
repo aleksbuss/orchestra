@@ -1,0 +1,15 @@
+{
+  "id": "17-fact-trap-goldfish-memory",
+  "description": "False premise: goldfish have a 3-second memory. The Skeptic should correct it (weeks to months).",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "Goldfish have a memory of only 3 seconds, correct?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "That's a myth. Goldfish have memories lasting weeks to months — studies show they can be trained to respond to cues and remember tasks long-term, not just for 3 seconds.",
+  "assertions": [
+    { "type": "matches", "pattern": "myth|misconception|not true|false|incorrect" },
+    { "type": "matches", "pattern": "months|weeks|years|long.?term" }
+  ]
+}

@@ -43,8 +43,51 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * Theme contract: `:root` is the LIGHT palette; `.dark` overrides with the
+ * dark (cyber-midnight) palette. The `.dark` class is applied pre-paint by
+ * the bootstrap script in `src/app/layout.tsx` (localStorage →
+ * prefers-color-scheme fallback) and toggled by `<ThemeSwitcher>`.
+ * `.dark` MUST redefine every variable `:root` defines — an omitted one
+ * silently leaks a light value into dark mode.
+ */
 :root {
   --radius: 0.75rem;
+  --background: #f6f8fb; /* Airy, blue-tinted light */
+  --foreground: #0f172a; /* Slate 900 */
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #0284c7; /* Sky 600 — brand cyan with AA contrast on white */
+  --primary-foreground: #f8fafc;
+  --secondary: #e2e8f0; /* Slate 200 */
+  --secondary-foreground: #0f172a;
+  --muted: #eef2f7;
+  --muted-foreground: #5b6b81; /* Slate 500/600 mix — readable on light bg */
+  --accent: #e0f2fe; /* Sky 100 */
+  --accent-foreground: #0c4a6e;
+  --destructive: #dc2626;
+  --border: #e2e8f0; /* Slate 200 */
+  --input: #cbd5e1; /* Slate 300 */
+  --ring: #0284c7;
+  --chart-1: #0284c7;
+  --chart-2: #7c3aed;
+  --chart-3: #059669;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+  --sidebar: #f0f4f9;
+  --sidebar-foreground: #0f172a;
+  --sidebar-primary: #0284c7;
+  --sidebar-primary-foreground: #f8fafc;
+  --sidebar-accent: #e2e8f0;
+  --sidebar-accent-foreground: #0f172a;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #0284c7;
+  color-scheme: light;
+}
+
+.dark {
   --background: #020617; /* Very deep midnight slate */
   --foreground: #f8fafc;
   --card: #0f172a; /* Slate 900 */
@@ -68,18 +111,15 @@
   --chart-3: #10b981;
   --chart-4: #f59e0b;
   --chart-5: #ef4444;
-  --sidebar: #020617; 
+  --sidebar: #020617;
   --sidebar-foreground: #f8fafc;
   --sidebar-primary: #38bdf8;
   --sidebar-primary-foreground: #020617;
   --sidebar-accent: #0f172a;
   --sidebar-accent-foreground: #f8fafc;
-  --sidebar-border: #0f172a; 
+  --sidebar-border: #0f172a;
   --sidebar-ring: #38bdf8;
-}
-
-.dark {
-  /* Inherit from :root which is already dark */
+  color-scheme: dark;
 }
 
 @layer base {
@@ -93,33 +133,47 @@
 
 @layer utilities {
   .glass-panel {
-    @apply bg-[#0B1120]/60 backdrop-blur-3xl border border-white/5 shadow-[0_8px_30px_rgb(0,0,0,0.6)] transition-all duration-300;
-  }
-  
-  .dark .glass-panel {
-    @apply bg-[#0B1120]/60 border-white/5;
+    @apply bg-white/65 backdrop-blur-3xl border border-black/[0.06] shadow-[0_8px_30px_rgb(15,23,42,0.08)] transition-all duration-300;
   }
 
   .glass-panel:hover {
+    @apply border-black/10;
+  }
+
+  .dark .glass-panel {
+    @apply bg-[#0B1120]/60 border-white/5 shadow-[0_8px_30px_rgb(0,0,0,0.6)];
+  }
+
+  .dark .glass-panel:hover {
     @apply border-white/10;
   }
-  
+
+  /* Class-driven (NOT media-query-driven): the `.dark` class is the single
+     source of truth for the active theme, so a user picking light on a
+     dark-OS machine still gets the light mesh. */
   .mesh-bg {
     background-color: var(--background);
-    background-image: 
+    background-image:
+      radial-gradient(at 0% 0%, hsla(210, 100%, 97%, 1) 0, transparent 50%),
+      radial-gradient(at 50% 0%, hsla(250, 100%, 95%, 0.8) 0, transparent 50%),
+      radial-gradient(at 100% 0%, hsla(320, 100%, 95%, 0.5) 0, transparent 50%);
+  }
+
+  .dark .mesh-bg {
+    background-image:
       radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.05) 0%, transparent 40%),
       radial-gradient(circle at 85% 85%, rgba(139, 92, 246, 0.04) 0%, transparent 40%);
   }
 
-  /* For light mode, make mesh gradient a bit softer and brighter */
-  @media (prefers-color-scheme: light) {
-    :root:not(.dark) .mesh-bg {
-      background-color: oklch(0.98 0 0);
-      background-image: 
-        radial-gradient(at 0% 0%, hsla(210, 100%, 97%, 1) 0, transparent 50%), 
-        radial-gradient(at 50% 0%, hsla(250, 100%, 95%, 0.8) 0, transparent 50%), 
-        radial-gradient(at 100% 0%, hsla(320, 100%, 95%, 0.5) 0, transparent 50%);
-    }
+  /* Hide the scrollbar on horizontally-scrollable pill strips (site header)
+     while keeping wheel/touch scrolling functional. */
+  .scrollbar-none {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
   }
 
   /* Shimmer animation for thinking indicator progress bar */

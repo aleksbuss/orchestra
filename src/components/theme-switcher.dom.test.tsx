@@ -104,7 +104,13 @@ describe("<ThemeSwitcher /> — click toggles theme + persists optimistically", 
 });
 
 describe("<ThemeSwitcher /> — failure recovery", () => {
-  it("on PUT failure: REVERTS the class AND localStorage to prior state", async () => {
+  it("on PUT failure: KEEPS the class AND localStorage (server sync is a background mirror)", async () => {
+    // The class + localStorage are the client-side source of truth for
+    // theming (PM #15 — the server never drives SSR theming). The old
+    // revert-on-failure contract undid the user's choice whenever the
+    // background mirror request got dropped (navigation aborting the
+    // in-flight fetch, dev-server restart), which presented as "the theme
+    // button doesn't work" — the theme flipped back moments after the click.
     fetchMock.mockRejectedValue(new Error("network down"));
     // Suppress the console.error the component logs on failure so the
     // test output stays clean.
@@ -118,14 +124,12 @@ describe("<ThemeSwitcher /> — failure recovery", () => {
 
     await user.click(button);
 
-    // Wait for the fetch's catch path to settle.
-    await waitFor(() =>
-      expect(document.documentElement.classList.contains("dark")).toBe(false)
-    );
-    // localStorage should also revert — otherwise the next page load
-    // would render dark via the bootstrap script while the server
-    // thinks light is the truth.
-    expect(localStorage.getItem("orchestra-theme")).toBe("light");
+    // Wait for the fetch's catch path to settle (it logs the failure).
+    await waitFor(() => expect(errSpy).toHaveBeenCalled());
+
+    // The user's choice survives the failed background sync.
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+    expect(localStorage.getItem("orchestra-theme")).toBe("dark");
 
     errSpy.mockRestore();
   });

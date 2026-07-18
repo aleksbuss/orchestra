@@ -34,10 +34,19 @@ export default function SettingsPage() {
       .catch(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (!settings) return;
-    document.documentElement.classList.toggle("dark", settings.general.darkMode);
-  }, [settings?.general.darkMode]);
+  // Theme is applied ONLY in response to the user toggling the checkbox —
+  // never on load. The live theme's source of truth is the `dark` class +
+  // `localStorage["orchestra-theme"]` (set pre-paint by layout.tsx and by
+  // <ThemeSwitcher>); force-applying the server's possibly-stale darkMode on
+  // mount used to override the header toggle every time Settings opened.
+  const applyTheme = useCallback((dark: boolean) => {
+    document.documentElement.classList.toggle("dark", dark);
+    try {
+      localStorage.setItem("orchestra-theme", dark ? "dark" : "light");
+    } catch {
+      // Private mode / quota — the class change still themes this session.
+    }
+  }, []);
 
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -400,9 +409,13 @@ export default function SettingsPage() {
                       id="dark-mode-enabled"
                       type="checkbox"
                       checked={settings.general.darkMode}
-                      onChange={(e) =>
-                        updateSettings("general.darkMode", e.target.checked)
-                      }
+                      onChange={(e) => {
+                        // Keep all three theme surfaces in sync: the live
+                        // class, localStorage (pre-paint bootstrap), and the
+                        // canonical server setting.
+                        applyTheme(e.target.checked);
+                        updateSettings("general.darkMode", e.target.checked);
+                      }}
                       className="rounded"
                     />
                     <Moon className="size-4 text-muted-foreground" />

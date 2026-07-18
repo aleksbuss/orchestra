@@ -663,13 +663,13 @@ export function ChatPanel() {
         <div className="absolute top-4 right-4 z-20">
           <Sheet>
             <SheetTrigger asChild>
-              <Button variant="outline" size="sm" className="glass-panel text-primary gap-2 rounded-xl border-white/10 hover:bg-white/5 transition-colors shadow-lg shadow-black/20">
+              <Button variant="outline" size="sm" className="glass-panel text-primary gap-2 rounded-xl border-border/70 hover:bg-foreground/5 transition-colors shadow-lg shadow-black/10 dark:shadow-black/20">
                 <Activity className="size-4" />
                 Swarm Activity
               </Button>
             </SheetTrigger>
-            <SheetContent className="w-[400px] sm:w-[540px] border-l border-white/10 bg-[#020617]/95 backdrop-blur-3xl overflow-y-auto p-0 z-[100] !max-w-none">
-              <SheetHeader className="p-4 border-b border-white/10 sticky top-0 bg-[#020617]/95 backdrop-blur z-10">
+            <SheetContent className="w-[400px] sm:w-[540px] border-l border-border/70 bg-background/95 backdrop-blur-3xl overflow-y-auto p-0 z-[100] !max-w-none">
+              <SheetHeader className="p-4 border-b border-border/70 sticky top-0 bg-background/95 backdrop-blur z-10">
                 <SheetTitle className="text-foreground flex items-center gap-2 text-sm font-semibold">
                   <Activity className="size-4 text-primary" />
                   Swarm Activity
@@ -690,13 +690,13 @@ export function ChatPanel() {
         <div className="mx-auto max-w-3xl w-full px-6 pt-2 animate-in fade-in slide-in-from-top-2 duration-300">
           <div className="flex items-center gap-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-4 py-2.5">
             <div className="flex items-center justify-center size-7 rounded-full bg-emerald-500/20">
-              <Plane className="size-3.5 text-emerald-400" />
+              <Plane className="size-3.5 text-emerald-600 dark:text-emerald-400" />
             </div>
             <div className="flex-1">
               <p className="text-sm font-medium text-emerald-300">Auto-Pilot active</p>
-              <p className="text-xs text-emerald-400/60">Task queued — agent is working in background. Results will appear here automatically.</p>
+              <p className="text-xs text-emerald-600/60 dark:text-emerald-400/60">Task queued — agent is working in background. Results will appear here automatically.</p>
             </div>
-            <Loader2 className="size-4 text-emerald-400 animate-spin" />
+            <Loader2 className="size-4 text-emerald-600 dark:text-emerald-400 animate-spin" />
           </div>
         </div>
       )}

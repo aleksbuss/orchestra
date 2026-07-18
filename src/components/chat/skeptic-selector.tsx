@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "@/store/app-store";
 import { useShallow } from "zustand/react/shallow";
 import { ChevronDown, ShieldQuestion } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { SkepticModelFields } from "@/components/settings/model-wizards";
 import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
 import type { AppSettings } from "@/lib/types";
@@ -23,6 +24,10 @@ import type { AppSettings } from "@/lib/types";
  * (`isValidSkepticOverride`) and resolves the API key (never trusts a
  * client-supplied key/baseUrl). "Inherit Settings" clears the per-request
  * override so `proposerTiers.skeptic` (or the tier path) wins.
+ *
+ * The panel renders through a portalled Radix Popover: the pill lives inside
+ * the header's horizontally-scrollable strip, and an absolutely-positioned
+ * dropdown would be clipped by that scroll container.
  */
 
 const DEFAULT_PROVIDER = "openrouter";
@@ -40,7 +45,6 @@ export function SkepticSelector() {
   // Provider held while the operator is mid-selection (before a model is
   // chosen). Seeded from the sticky override so re-opening shows its provider.
   const [draftProvider, setDraftProvider] = useState<string>(DEFAULT_PROVIDER);
-  const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (skepticModelOverride?.provider) setDraftProvider(skepticModelOverride.provider);
@@ -60,14 +64,6 @@ export function SkepticSelector() {
       cancelled = true;
     };
   }, []);
-
-  useEffect(() => {
-    function onMouseDown(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    }
-    if (open) document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, [open]);
 
   function handleChange(provider: string, model: string) {
     setDraftProvider(provider);
@@ -91,48 +87,47 @@ export function SkepticSelector() {
   const currentModel = skepticModelOverride?.model ?? "";
 
   return (
-    <div className="relative" ref={rootRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-label="Skeptic model override"
-        title="Skeptic model — the reviewer proposer AND the reflection critic run on this model. 'Inherit' uses your Settings default. Applies to the next turn onward."
-        className="inline-flex items-center gap-1.5 h-8 pl-2.5 pr-2 rounded-lg border border-white/10 bg-white/[0.03] text-xs font-medium text-muted-foreground hover:bg-white/[0.06] focus:outline-none focus:ring-2 focus:ring-primary/40"
-      >
-        <ShieldQuestion className="w-3.5 h-3.5 shrink-0" />
-        <span className="hidden md:inline-block">Skeptic</span>
-        <span className="max-w-[9rem] truncate text-foreground/90">{label}</span>
-        <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
-      </button>
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label="Skeptic model override"
+          title="Skeptic model — the reviewer proposer AND the reflection critic run on this model. 'Inherit' uses your Settings default. Applies to the next turn onward."
+          className="inline-flex shrink-0 items-center gap-1.5 h-8 pl-2.5 pr-2 rounded-lg border border-border/70 bg-foreground/[0.03] text-xs font-medium whitespace-nowrap text-muted-foreground hover:bg-foreground/[0.06] focus:outline-none focus:ring-2 focus:ring-primary/40"
+        >
+          <ShieldQuestion className="w-3.5 h-3.5 shrink-0" />
+          <span className="hidden md:inline-block">Skeptic</span>
+          <span className="max-w-[9rem] truncate text-foreground/90">{label}</span>
+          <ChevronDown className={`w-3.5 h-3.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </PopoverTrigger>
 
-      {open && (
-        <div className="absolute right-0 z-50 mt-1 w-[22rem] max-w-[80vw] rounded-lg border border-white/10 bg-background p-3 shadow-xl animate-in fade-in-0 zoom-in-95">
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-muted-foreground">Skeptic model (next turn onward)</span>
-            <button
-              type="button"
-              onClick={() => {
-                setSkepticModelOverride(null);
-                setOpen(false);
-              }}
-              className="text-xs text-muted-foreground underline hover:text-foreground"
-            >
-              Inherit Settings
-            </button>
-          </div>
-          {settings ? (
-            <SkepticModelFields
-              settings={settings}
-              provider={currentProvider}
-              model={currentModel}
-              onChange={handleChange}
-              forceFetch
-            />
-          ) : (
-            <div className="py-4 text-center text-xs text-muted-foreground">Loading…</div>
-          )}
+      <PopoverContent align="end" className="w-[22rem] max-w-[90vw]">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-xs font-medium text-muted-foreground">Skeptic model (next turn onward)</span>
+          <button
+            type="button"
+            onClick={() => {
+              setSkepticModelOverride(null);
+              setOpen(false);
+            }}
+            className="text-xs text-muted-foreground underline hover:text-foreground"
+          >
+            Inherit Settings
+          </button>
         </div>
-      )}
-    </div>
+        {settings ? (
+          <SkepticModelFields
+            settings={settings}
+            provider={currentProvider}
+            model={currentModel}
+            onChange={handleChange}
+            forceFetch
+          />
+        ) : (
+          <div className="py-4 text-center text-xs text-muted-foreground">Loading…</div>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

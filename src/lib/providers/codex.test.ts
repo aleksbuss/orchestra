@@ -10,9 +10,9 @@ import {
   createCodexOauthFetch,
   DEFAULT_CODEX_INSTRUCTIONS,
 } from "./codex";
-import { loadProjectMcpServers } from "@/lib/storage/project-store";
+import { loadProjectMcpServers } from "@/lib/storage/project-mcp";
 
-vi.mock("@/lib/storage/project-store", () => ({
+vi.mock("@/lib/storage/project-mcp", () => ({
   loadProjectMcpServers: vi.fn(),
 }));
 

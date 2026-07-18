@@ -16,8 +16,7 @@ import {
   loadSynthesisInlineDirective,
 } from "@/lib/agent/prompts";
 import { getChat, updateChat } from "@/lib/storage/chat-store";
-import { createAgentTools } from "@/lib/tools/tool";
-import { getProjectMcpToolsForContext } from "@/lib/mcp/client";
+import { assembleAgentToolSet, scopeSwarmRoleTools } from "@/lib/agent/agent-tools";
 import { agentSemaphore } from "./semaphore";
 import type { AgentContext } from "@/lib/agent/types";
 import { History, mergeConsecutiveSameRole } from "@/lib/agent/history";
@@ -37,7 +36,6 @@ import {
 } from "@/lib/agent/compressor";
 import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
-import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import {
   runMoAEnsemble,
@@ -203,44 +201,14 @@ async function runSubAgent(
 ): Promise<string> {
   const nodeId = crypto.randomUUID();
 
-  const baseTools = createAgentTools(parentContext, settings);
-  let tools = baseTools;
-  let mcpDocs: string | undefined;
-  if (parentContext.projectId) {
-    const mcp = await getProjectMcpToolsForContext(parentContext, settings, role);
-    if (mcp) {
-      tools = { ...baseTools, ...mcp.tools };
-      mcpDocs = mcp.mcpSystemPrompt(4096); // Default to safe limit for sub-agents without contextWindow prop
-    }
-  }
-
-  // --- Swarm Tool Pruning (Scoping) ---
-  // Read-only tools safe for all sub-agent roles
-  const readOnlyMatch = (key: string) =>
-    key.includes("search") || key.includes("read") || key.includes("list") ||
-    key.includes("view") || key.includes("blackboard") || key === "knowledge_query" ||
-    key === "memory_load" || key === "response" || key === "call_mcp_tool" || key === "mcp_get_tool_schema";
-
-  if (role === "researcher") {
-    const filteredTools: Record<string, any> = {};
-    for (const key of Object.keys(tools)) {
-      if (readOnlyMatch(key)) {
-        filteredTools[key] = tools[key];
-      }
-    }
-    tools = filteredTools;
-  } else if (role === "reviewer") {
-    const filteredTools: Record<string, any> = {};
-    for (const key of Object.keys(tools)) {
-      if (readOnlyMatch(key) || key.includes("grep")) {
-        filteredTools[key] = tools[key];
-      }
-    }
-    tools = filteredTools;
-  }
-  // "coder" retains all structural and OS execution tools.
-  // ------------------------------------
-  tools = applyGlobalToolLoopGuard(tools, { chatId: parentContext.chatId, parentNodeId: nodeId });
+  const { tools, mcpDocs } = await assembleAgentToolSet(parentContext, settings, {
+    mcpRole: role,
+    // Sub-agents lack a resolved contextWindow prop — use a safe fixed limit.
+    mcpDocsLimit: 4096,
+    // Swarm read-only role scoping runs before the loop-guard wrap.
+    scopeTools: (t) => scopeSwarmRoleTools(t, role),
+    guardContext: { chatId: parentContext.chatId, parentNodeId: nodeId },
+  });
 
   let systemPrompt = getSwarmSystemPrompt(role) + "\n\nYou must return a concise, accurate response when your work is completely done.";
   if (mcpDocs) systemPrompt += mcpDocs;
@@ -576,24 +544,16 @@ export async function runAgent(options: RunAgentOptions) {
     console.log(`[Memory] Agent context loaded: ${context.history.length} messages (from ${chat.messages.length} stored).`);
   }
 
-  // Build tools: base + optional MCP tools from project .meta/mcp
-  const baseTools = createAgentTools(context, settings);
-  let mcpCleanup: (() => Promise<void>) | undefined;
-  let mcpDocs: string | undefined;
-  let tools = baseTools;
-  if (options.projectId) {
-    const mcp = await getProjectMcpToolsForContext(context, settings);
-    if (mcp) {
-      tools = { ...baseTools, ...mcp.tools };
-      mcpCleanup = mcp.cleanup;
-      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
-    }
-  }
+  // Build tools: base + optional MCP tools from project .meta/mcp, always
+  // wrapped in the loop guard (assembleAgentToolSet — CLAUDE.md §4/§10).
   const orchestratorNodeId = options.chatId;
   const dagContext = options.swarmEnabled !== false
     ? { chatId: options.chatId, parentNodeId: orchestratorNodeId }
     : undefined;
-  tools = applyGlobalToolLoopGuard(tools, dagContext);
+  const { tools, mcpCleanup, mcpDocs } = await assembleAgentToolSet(context, settings, {
+    mcpDocsLimit: contextWindow,
+    guardContext: dagContext,
+  });
 
   // Inject Swarm P2P call_agent tool if swarm is enabled
   if (options.swarmEnabled !== false) {
@@ -1330,21 +1290,10 @@ export async function runAgentText(options: {
     context.history = history.getAll();
   }
 
-  const baseTools = createAgentTools(context, settings);
   const contextWindow = 4096; // Conservative default for dry run since model is unknown
-
-  let mcpCleanup: (() => Promise<void>) | undefined;
-  let mcpDocs: string | undefined;
-  let tools = baseTools;
-  if (options.projectId) {
-    const mcp = await getProjectMcpToolsForContext(context, settings);
-    if (mcp) {
-      tools = { ...baseTools, ...mcp.tools };
-      mcpCleanup = mcp.cleanup;
-      mcpDocs = mcp.mcpSystemPrompt(contextWindow);
-    }
-  }
-  tools = applyGlobalToolLoopGuard(tools);
+  const { tools, mcpCleanup, mcpDocs } = await assembleAgentToolSet(context, settings, {
+    mcpDocsLimit: contextWindow,
+  });
   const toolNames = Object.keys(tools);
 
   let systemPrompt = await buildSystemPrompt({
@@ -1549,16 +1498,7 @@ export async function runSubordinateAgent(options: {
     data: {},
   };
 
-  let tools = createAgentTools(context, settings);
-  let mcpCleanupSub: (() => Promise<void>) | undefined;
-  if (options.projectId) {
-    const mcp = await getProjectMcpToolsForContext(context, settings);
-    if (mcp) {
-      tools = { ...tools, ...mcp.tools };
-      mcpCleanupSub = mcp.cleanup;
-    }
-  }
-  tools = applyGlobalToolLoopGuard(tools);
+  const { tools, mcpCleanup: mcpCleanupSub } = await assembleAgentToolSet(context, settings);
   const toolNames = Object.keys(tools);
 
   const systemPrompt = await buildSystemPrompt({

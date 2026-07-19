@@ -1,0 +1,15 @@
+{
+  "id": "21-fact-trap-smtp-rfc-821",
+  "description": "Outdated-RFC trap: SMTP is defined by RFC 821 as the current standard. Correct: RFC 821 is obsoleted by RFC 5321.",
+  "tags": ["moa", "skeptic", "factual", "fact-trap", "rfc"],
+  "input": {
+    "message": "SMTP is currently defined by RFC 821, right? That is the standard I should follow.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "RFC 821 is obsolete — SMTP is now defined by RFC 5321 (which obsoleted RFC 2821, which in turn obsoleted RFC 821). Follow RFC 5321 for the current standard, not 821.",
+  "assertions": [
+    { "type": "contains", "value": "5321" },
+    { "type": "matches", "pattern": "obsolet|outdated|superseded|deprecated|replaced|no longer" }
+  ]
+}

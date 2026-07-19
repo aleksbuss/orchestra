@@ -1,0 +1,15 @@
+{
+  "id": "16-fact-trap-bulls-see-red",
+  "description": "False premise: bulls charge because they see the color red. Cattle are red-green colorblind; they react to movement.",
+  "tags": ["moa", "skeptic", "factual", "fact-trap"],
+  "input": {
+    "message": "Bulls get angry and charge because they see the color red, right?",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "mock_response": "Actually no — cattle are red-green colorblind, so bulls do not react to the color red at all. They charge at the movement of the matador's cape, not its color; a cape of any color waved the same way provokes the same response.",
+  "assertions": [
+    { "type": "matches", "pattern": "colou?r-?blind" },
+    { "type": "matches", "pattern": "movement|motion|moving|waving|the cape" }
+  ]
+}

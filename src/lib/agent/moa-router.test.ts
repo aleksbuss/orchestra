@@ -30,7 +30,7 @@
  *   - `abortSignal` is forwarded to the inner `generateObject` call
  *     (CLAUDE.md AbortSignal Propagation Contract — PM #23).
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("ai", async () => {
   const actual = await vi.importActual<typeof import("ai")>("ai");
@@ -45,7 +45,12 @@ vi.mock("@/lib/providers/llm-provider", () => ({
 }));
 
 import { generateObject } from "ai";
-import { generateDynamicSwarm, classifyRouterError } from "./moa-router";
+import {
+  generateDynamicSwarm,
+  classifyRouterError,
+  applySkepticControlArm,
+  isSkepticControlArmActive,
+} from "./moa-router";
 import { MOA_PROPOSERS, detectProposerRole } from "./moa-personas";
 import { log } from "@/lib/observability/logger";
 import type { ModelConfig } from "@/lib/types";
@@ -434,5 +439,106 @@ describe("classifyRouterError — fallback reason classification (PM #89)", () =
   it("other: anything unrecognized", () => {
     expect(classifyRouterError(new Error("kaboom"))).toBe("other");
     expect(classifyRouterError("plain string")).toBe("other");
+  });
+});
+
+describe("Skeptic control arm (Step 2 — eval-only, PM #91 invariant untouched)", () => {
+  const ENV = "ORCHESTRA_EVAL_SKEPTIC_CONTROL";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const mixedPersonas = () => [
+    { id: "analyst", role: "Senior Analyst", systemPrompt: "analyze", color: "violet" },
+    { id: "coder", role: "Senior Engineer", systemPrompt: "implement", color: "blue" },
+    { id: "skeptic", role: "QA Auditor", systemPrompt: "find flaws", color: "rose" },
+  ];
+
+  it("no-op when the flag is unset (default) — same array reference", () => {
+    vi.stubEnv(ENV, undefined);
+    const personas = mixedPersonas();
+    expect(isSkepticControlArmActive()).toBe(false);
+    expect(applySkepticControlArm(personas)).toBe(personas);
+  });
+
+  it("flag on (non-prod) swaps every reviewer for a neutral analyst, headcount preserved", () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "test");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const personas = mixedPersonas();
+    const out = applySkepticControlArm(personas);
+
+    expect(out).toHaveLength(3);
+    expect(out.some((p) => detectProposerRole(p) === "reviewer")).toBe(false);
+    // non-reviewers pass through untouched
+    expect(out[0]).toEqual(personas[0]);
+    expect(out[1]).toEqual(personas[1]);
+    // the neutral filler itself must NOT read as a reviewer downstream
+    expect(detectProposerRole(out[2])).not.toBe("reviewer");
+  });
+
+  it("the neutral filler classifies as 'researcher' — tool parity with the skeptic (no search_web confound)", () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "test");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const [swapped] = applySkepticControlArm([
+      { id: "skeptic", role: "QA Auditor", systemPrompt: "find flaws", color: "rose" },
+    ]);
+    // reviewer AND researcher both get search_web (moa-proposer-tools.ts), so the
+    // control persona landing in the researcher bucket holds TOOLS CONSTANT across
+    // the A/B arms — only the persona prompt differs. Guards a future reword from
+    // dropping it to coder/tool and reintroducing the confound.
+    expect(detectProposerRole(swapped)).toBe("researcher");
+  });
+
+  it("production guard — no-op even with the flag set to true", () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "production");
+    expect(isSkepticControlArmActive()).toBe(false);
+    const personas = mixedPersonas();
+    expect(applySkepticControlArm(personas)).toBe(personas);
+  });
+
+  it("end-to-end: flag on strips the DPG-produced skeptic (same headcount)", async () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "test");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult()); // includes a "skeptic"
+
+    const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
+    expect(result.personas).toHaveLength(3);
+    expect(result.personas.some((p) => detectProposerRole(p) === "reviewer")).toBe(false);
+  });
+
+  it("end-to-end: the PM #37/#91 force-injected critic is ALSO swapped out", async () => {
+    vi.stubEnv(ENV, "true");
+    vi.stubEnv("NODE_ENV", "test");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    mockedGenerateObject.mockResolvedValue(
+      fakeObjectResult({
+        personas: [
+          { id: "analyst", role: "Analyst", systemPrompt: "...", color: "violet" },
+          { id: "creative", role: "Brainstormer", systemPrompt: "...", color: "amber" },
+          { id: "executor", role: "Tool Operator", systemPrompt: "...", color: "emerald" },
+        ],
+      })
+    );
+    const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
+    // prod would inject the canonical critic → 4 personas; control keeps 4 with NO reviewer.
+    expect(result.personas).toHaveLength(4);
+    expect(result.personas.some((p) => p.id === "critic")).toBe(false);
+    expect(result.personas.some((p) => detectProposerRole(p) === "reviewer")).toBe(false);
+  });
+
+  it("end-to-end: flag OFF keeps the guaranteed skeptic (prod invariant intact)", async () => {
+    vi.stubEnv(ENV, undefined);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+    const result = await generateDynamicSwarm("x", [], STUB_MODEL, false);
+    expect(result.personas.some((p) => detectProposerRole(p) === "reviewer")).toBe(true);
   });
 });

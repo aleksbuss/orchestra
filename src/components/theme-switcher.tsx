@@ -47,17 +47,14 @@ export function ThemeSwitcher() {
       // no longer drives SSR dark mode; refreshing causes React to reconcile
       // the root <html> tag and wipe the 'dark' class we just applied).
     } catch (e) {
-      console.error("Failed to sync theme setting:", e);
-      // Revert optimism if network failed (optional but good practice)
-      setIsDark(isDark);
-      if (isDark) {
-        document.documentElement.classList.add("dark");
-      } else {
-        document.documentElement.classList.remove("dark");
-      }
-      try {
-        localStorage.setItem("orchestra-theme", isDark ? "dark" : "light");
-      } catch { /* ignore */ }
+      // Do NOT revert the theme here. The class + localStorage are the
+      // client-side source of truth (PM #15 — the server never drives SSR
+      // theming); this PUT is only a background mirror for the settings UI.
+      // The old revert-on-failure undid the user's choice whenever the
+      // mirror request got dropped — a navigation aborting the in-flight
+      // fetch, or a dev-server restart — which read as "the theme button
+      // doesn't work" (the theme flipped back moments after the click).
+      console.error("Failed to sync theme setting to server (theme kept):", e);
     }
   };
 

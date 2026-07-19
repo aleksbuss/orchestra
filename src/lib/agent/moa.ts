@@ -15,20 +15,19 @@ import { generateText, stepCountIs, type ModelMessage } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
 import type { ChatUsage } from "@/lib/types";
-import { reflectOnResponse, reviseWithCritique, deriveReflectionOutcome } from "@/lib/agent/reflection";
-import { log } from "@/lib/observability/logger";
-import { embedTexts } from "@/lib/memory/embeddings";
 import {
   buildDisagreementMarker,
   DEFAULT_DISAGREEMENT_THRESHOLD,
   detectDisagreement,
 } from "@/lib/agent/disagreement";
+import { runReflectionLoop } from "@/lib/agent/moa-reflection";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import type { AppSettings } from "@/lib/types";
-import { getBrainConfig, getWorkerConfig, type PresetTier } from "@/lib/agent/presets";
+import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
+import { resolveEnsembleSetup } from "@/lib/agent/moa-setup";
 import { agentSemaphore } from "./semaphore";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
@@ -66,12 +65,10 @@ export {
 import {
   detectProposerRole,
   resolveProposerModelConfig,
-  resolveSkepticModelConfig,
   resolveWorkerKey,
   warnSkepticFamilyOverlapOnce, type SkepticModelOverride,
 } from "@/lib/agent/moa-personas";
 export { createWindowResolver } from "@/lib/agent/moa-window";
-import { createWindowResolver } from "@/lib/agent/moa-window";
 
 
 // ── Dynamic Persona Generation (DPG) ────────────────────────────────────
@@ -84,7 +81,6 @@ export {
 } from "@/lib/agent/moa-router";
 
 import { generateDynamicSwarm } from "@/lib/agent/moa-router";
-import { isSearchUsable } from "@/lib/tools/search-engine";
 
 
 /**
@@ -94,24 +90,6 @@ import { isSearchUsable } from "@/lib/tools/search-engine";
  * avoids the initial thundering herd.
  */
 const PROPOSER_STAGGER_MS = 250;
-
-// ── Local cosine similarity (PM #46 convergence check) ─────────────────
-// Same algorithm as in `disagreement.ts` and `blackboard.ts`. Inlined here
-// to keep the import surface tight; if a fourth caller materialises,
-// extract to `src/lib/memory/embeddings.ts`.
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0;
-  let normA = 0;
-  let normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-}
 
 // ── Proposer role + tool plumbing (PM #42 + #50) ────────────────────────
 //
@@ -134,81 +112,19 @@ import {
 } from "@/lib/agent/moa-proposer-tools";
 
 
-// ── Aggregator Prompt ───────────────────────────────────────────────────
-// PM #40 — synthesis prompt adapted from Together AI's MoA paper template
-// (togethercomputer/MoA `prompts.py`), which was validated at 65.1% on
-// AlpacaEval and beat GPT-4o (57.5%) using only open-source models.
-//
-// Key adaptations from the original:
-//   - Orchestra-specific code-block preservation rule (genuinely useful
-//     for the operator's primary workflows).
-//   - "No meta-commentary" rule (cuts the "Based on the drafts above..."
-//     preamble that bloats outputs).
-//   - Cross-reference to the PM #39 disagreement marker — when present in
-//     the user content, the synthesizer is reminded to follow its
-//     instructions explicitly.
-//
-// The system role carries IDENTITY + RULES (stable across turns); the
-// user content carries DATA (original request + numbered drafts). This
-// is the cleaner split — previously the system was a one-liner and the
-// rules were duplicated in the user content.
-
-export const AGGREGATOR_SYSTEM_PROMPT = `You are the Aggregator at the final stage of a Mixture-of-Agents (MoA) pipeline. You have been provided with a set of responses from specialized expert agents who analyzed the user's request in parallel. Your task is to synthesize these responses into a single, high-quality reply.
-
-It is crucial to critically evaluate the information in the expert responses, recognizing that some of it may be biased, incomplete, or incorrect. Your response should NOT simply replicate or vote-aggregate the drafts — it should offer a refined, accurate, and comprehensive reply that goes beyond any individual draft.
-
-Strict rules:
-1. PRESERVE TECHNICAL DETAIL. Specific version numbers, library names, API signatures, configuration values — keep them. Do NOT summarize them away.
-2. CODE BLOCK INTEGRITY. Include all relevant code from the drafts. When drafts disagree on implementation, pick the most robust + production-ready version (or merge with explanatory comments). NEVER skip code to save space.
-3. NO META-COMMENTARY. Start directly with the answer. Do NOT begin with "Based on the drafts" / "Here is the synthesis" / "Looking at the responses" / "After analyzing the experts".
-4. CONFLICT RESOLUTION. If experts disagree on a factual claim (library version, API behavior, etc.), use your knowledge to pick the most accurate and modern choice. If you see a "<<DISAGREEMENT_DETECTED>>" marker in the user content, follow its additional instructions exactly — surface the conflict to the user, do not smooth it away.
-5. MATCH USER'S FORMAT. Mirror the user's expected output structure (code-only, markdown with headers, JSON, plain prose) — don't add ceremony the user didn't ask for.
-6. CORRECT SILENTLY. If you spot factual errors in the drafts, correct them in your synthesis without explicitly calling out the original mistake.
-
-Adhere to the highest standards of accuracy and reliability.`;
-
-function buildAggregatorPrompt(userMessage: string, drafts: { role: string; text: string }[]): string {
-  // Numbered format matches Together MoA's reference template — empirically
-  // tuned for LLM synthesis quality. Role label stays as a hint, not a
-  // hierarchy ("expert N (role: ...)") so the synthesizer doesn't infer
-  // implicit priority from order.
-  const draftBlock = drafts
-    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
-    .join("\n\n");
-
-  return `Original user request:
-${userMessage}
-
-Responses from expert agents (treat each as a candidate, not as authority):
-
-${draftBlock}
-
-Now produce the final synthesized response.`;
-}
-
-/**
- * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). Assemble
- * the block appended to the orchestrator system prompt on the collapsed synthesis
- * path: the ported synthesis `directive`, the optional PM #39 disagreement
- * `marker`, then the numbered expert drafts. The numbering/role-label format
- * mirrors `buildAggregatorPrompt` so the collapsed synthesizer sees the same
- * draft shape the standalone aggregator did. The drafts go in the SYSTEM prompt
- * (not a second user message) — a consecutive `user` turn crashes strict models
- * (PM #2). Pure + exported for unit testing.
- */
-export function buildInlineSynthesisInjection(
-  directive: string,
-  drafts: { role: string; text: string }[],
-  disagreementMarker: string
-): string {
-  const draftBlock = drafts
-    .map((d, i) => `${i + 1}. [Expert role: ${d.role}]\n${d.text}`)
-    .join("\n\n");
-  const marker = disagreementMarker.trim()
-    ? `\n\n${disagreementMarker.trim()}`
-    : "";
-  return `\n\n${directive.trim()}${marker}\n\n## Expert Drafts to Synthesize\n\n${draftBlock}`;
-}
+// ── Aggregator prompts ──────────────────────────────────────────────────
+// §10 (Sprint 5) — the pure prompt builders (AGGREGATOR_SYSTEM_PROMPT,
+// buildAggregatorPrompt, buildInlineSynthesisInjection) moved to
+// `moa-prompts.ts`. Re-exported here for external callers/tests (agent.ts,
+// moa.test.ts); imported below for internal use.
+export {
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildInlineSynthesisInjection,
+} from "@/lib/agent/moa-prompts";
+import {
+  AGGREGATOR_SYSTEM_PROMPT,
+  buildAggregatorPrompt,
+} from "@/lib/agent/moa-prompts";
 
 // ── MoA Ensemble Runner ─────────────────────────────────────────────────
 
@@ -323,39 +239,24 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     settings,
     abortSignal,
     forceSwarm,
-    skepticModelOverride,
-    deepAudit,
   } = options;
 
-  // DDD — the operator's Skeptic model, resolved ONCE; feeds both surfaces.
-  const skepticConfig = resolveSkepticModelConfig(settings, skepticModelOverride);
-  // A8 — request-aware reflection: the Deep Audit toggle overrides the settings
-  // default (kept OFF so inline-collapse survives normal turns). Feeds BOTH the
-  // collapse gate and the reflection block below.
-  const reflectionEnabled = deepAudit ?? settings.reflection?.enabled ?? false;
-
-  // Audit fix #4 — memoize context-window resolution for THIS ensemble run.
-  // resolveContextWindow probes live Ollama (/api/ps) per call; without this,
-  // N proposers + the aggregator fire up to N+1 redundant probes per turn,
-  // usually for the SAME config. Shared per provider|model|baseUrl.
-  const resolveWindow = createWindowResolver(abortSignal);
-
-  // ── Step 1: Resolve model configs ──────────────────────────────────
-  const workerConfig = resolveWorkerKey(
-    preset && preset !== "custom" ? getWorkerConfig(preset, settings.chatModel) : settings.utilityModel,
-    settings
-  );
-
-  // Brain model = the main resolved config (already resolved in runAgent)
-  // We'll use the same chatModel for aggregation since runAgent handles it.
-
-  // ── Step 1.5: Prepare safe history ─────────────────────────────────
-  // We cannot simply slice(-N) because it might break tool-call sequences.
-  // Instead, extract only text-based interactions for the proposers to read.
-  const safeHistory = history.filter((msg) => 
-    msg.role === "user" || 
-    (msg.role === "assistant" && typeof msg.content === "string")
-  );
+  // ── Step 1: Resolve ensemble setup ─────────────────────────────────
+  // All pure per-run derivations (Skeptic model, reflection toggle, memoized
+  // context-window resolver, worker/router configs, proposer-safe history,
+  // search-usable gate, clamped swarm size) live in `resolveEnsembleSetup`
+  // (moa-setup.ts, §10 Sprint 5). Each derivation's rationale is documented
+  // there; `options` is structurally assignable to the setup input.
+  const {
+    skepticConfig,
+    reflectionEnabled,
+    resolveWindow,
+    workerConfig,
+    safeHistory,
+    routerConfig,
+    searchEnabled,
+    maxSwarmSize,
+  } = resolveEnsembleSetup(options);
 
   // ── Step 1.8: Generate Dynamic Personas ────────────────────────────
   const routerNodeId = crypto.randomUUID();
@@ -373,18 +274,6 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       startedAt: new Date().toISOString(),
     },
   });
-
-  // Use the cheaper utility model for routing decisions (not the expensive brain model).
-  // Fall back to chatModel if utilityModel is not properly configured (e.g., missing model string).
-  const routingModelConfig = settings.utilityModel?.model
-    ? settings.utilityModel
-    : settings.chatModel;
-  const routerConfig = resolveWorkerKey(routingModelConfig, settings);
-  
-  // PM #68 — gate proposer search tools on search being USABLE (key present),
-  // not merely enabled, so the Skeptic/researcher aren't handed a search_web
-  // that can only return "key not configured".
-  const searchEnabled = isSearchUsable(settings.search);
 
   // PM #51 — fetch past successful traces similar to this prompt and
   // render them as few-shots for the Router. When trace memory is off
@@ -412,15 +301,6 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     );
   }
 
-  // C3 — thread the operator's maxSwarmSize, clamped to [3, 7]. The clamp is
-  // mandatory: the Router's zod schema is `.min(3).max(maxSwarmSize)`, so a
-  // value < 3 would make min > max and crash the Router on every turn (R4).
-  // Guard non-finite too: a corrupt settings value (e.g. a string) → NaN →
-  // `.max(NaN)` also throws every turn; fall back to the default 5.
-  const rawSwarmSize = settings.maxSwarmSize;
-  const maxSwarmSize = Number.isFinite(rawSwarmSize)
-    ? Math.min(7, Math.max(3, Math.floor(rawSwarmSize as number)))
-    : 5;
   const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock, maxSwarmSize);
 
   publishUiSyncEvent({
@@ -1226,205 +1106,30 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       aggResult.usage
     );
 
-    // PM #38 (single round) + PM #46 (multi-round) — generator-critic-
-    // revisor loop. When the operator enables settings.reflection.enabled,
-    // the aggregator output is reviewed by the utility-model critic; when
-    // the critic flags issues, the brain-model revisor produces a fixed
-    // version, the critic re-examines, etc.
-    //
-    // Two stopping conditions:
-    //   1. Critic returns shouldRevise=false → answer is good, exit.
-    //   2. Successive revisions are nearly identical (cosine similarity
-    //      over embeddings > convergenceThreshold) → the model is
-    //      oscillating between rephrasings; exit to avoid waste.
-    //
-    // Plus a code-level hard cap (`ABSOLUTE_MAX_REFLECTION_ROUNDS = 3`)
-    // protects against accidental runaway when the operator sets a
-    // maxRounds higher than they meant to. Cost is visible per-turn via
-    // PM #36 budget banner.
-    //
-    // PM #51 — three locals track behavior for trace-memory capture:
-    //   - reflectionRevisionsExecuted: number of times reviseWithCritique
-    //     ran (== "rounds where something needed fixing"). Zero means the
-    //     critic was clean from round 1 — strongest quality signal.
-    //   - reflectionCriticCleanedUp: true when the loop exited because
-    //     the critic said `shouldRevise=false` (not because of cap).
-    //   - reflectionHitCap: derived after the loop. True means we ran
-    //     out of rounds without the critic ever cleaning up.
-    let reflectionRevisionsExecuted = 0;
-    let reflectionCriticCleanedUp = false;
-    let reflectionHitCap = false;
-    // DDD Phase 1 (corrected) — two extra exit flags so the single
-    // `ddd_reflection_outcome` log event can classify the run.
-    let reflectionCannotFix = false;
-    let reflectionConverged = false;
-    if (reflectionEnabled) {
-      const ABSOLUTE_MAX_REFLECTION_ROUNDS = 3;
-      // A8 — read defensively: `settings.reflection` may be undefined when
-      // reflection is on via the Deep Audit toggle alone.
-      const requestedMaxRounds = Math.max(
-        1,
-        Math.floor(settings.reflection?.maxRounds ?? 1)
-      );
-      const effectiveMaxRounds = Math.min(
-        requestedMaxRounds,
-        ABSOLUTE_MAX_REFLECTION_ROUNDS
-      );
-      // DDD audit fix #9 — warn when operator's setting is capped.
-      if (requestedMaxRounds > ABSOLUTE_MAX_REFLECTION_ROUNDS) {
-        console.warn(
-          `[MoA] Reflection maxRounds ${requestedMaxRounds} exceeds cap (${ABSOLUTE_MAX_REFLECTION_ROUNDS}), using ${effectiveMaxRounds}.`
-        );
-      }
-      const convergenceThreshold = Math.min(
-        1,
-        Math.max(0, settings.reflection?.convergenceThreshold ?? 0.97)
-      );
-
-      try {
-        let previousText: string | null = null;
-        let round = 0;
-        while (round < effectiveMaxRounds) {
-          round += 1;
-          // DDD surface 2 — critic = Skeptic: operator's model wins, else brain
-          // (the revisor below stays on brain — it writes, only the judge audits).
-          const reflection = await reflectOnResponse({
-            userMessage,
-            agentResponse: finalText,
-            settings,
-            modelOverride: skepticConfig ?? brainConfig,
-            projectId,
-            chatId,
-            abortSignal,
-          });
-          if (reflection.usage && reflection.modelConfig) {
-            moaUsage = addUsageToCumulative(
-              moaUsage,
-              reflection.modelConfig.provider,
-              reflection.modelConfig.model,
-              reflection.usage
-            );
-          }
-
-          // Stopping condition 1: critic says we're done.
-          if (!reflection.shouldRevise || !reflection.critique) {
-            console.log(
-              `[MoA] Reflection round ${round}/${effectiveMaxRounds}: critic clean, stopping.`
-            );
-            reflectionCriticCleanedUp = true;
-            break;
-          }
-
-          console.log(
-            `[MoA] Reflection round ${round}/${effectiveMaxRounds}: revising. Critique: ${reflection.critique.slice(0, 120)}`
-          );
-
-          const revision = await reviseWithCritique({
-            userMessage,
-            originalResponse: finalText,
-            critique: reflection.critique,
-            suggestion: reflection.suggestion,
-            settings,
-            modelOverride: brainConfig,
-            projectId,
-            chatId,
-            abortSignal,
-          });
-          if (revision.usage && revision.modelConfig) {
-            moaUsage = addUsageToCumulative(
-              moaUsage,
-              revision.modelConfig.provider,
-              revision.modelConfig.model,
-              revision.usage
-            );
-          }
-
-          if (revision.status === "cannot_fix") {
-            console.log(`[MoA] Reflection round ${round}/${effectiveMaxRounds}: Coder cannot fix issues (${revision.explanation}). Breaking loop.`);
-            reflectionCannotFix = true;
-            break;
-          }
-
-          previousText = finalText;
-          finalText = revision.text;
-          reflectionRevisionsExecuted += 1;
-
-          // Stopping condition 2: convergence (successive revisions are
-          // nearly identical). Skip the convergence check entirely when
-          // maxRounds === 1 (no chance for oscillation; saves an embed).
-          if (effectiveMaxRounds > 1 && previousText) {
-            try {
-              const [embA, embB] = await embedTexts(
-                [
-                  previousText.slice(0, 4000),
-                  finalText.slice(0, 4000),
-                ],
-                {
-                  provider: settings.embeddingsModel.provider,
-                  model: settings.embeddingsModel.model,
-                  apiKey: settings.embeddingsModel.apiKey,
-                  baseUrl: settings.embeddingsModel.baseUrl,
-                  dimensions: settings.embeddingsModel.dimensions,
-                },
-                { abortSignal }
-              );
-              const similarity = cosineSimilarity(embA, embB);
-              if (similarity >= convergenceThreshold) {
-                console.log(
-                  `[MoA] Reflection round ${round}/${effectiveMaxRounds}: converged (cosine ${similarity.toFixed(3)} >= ${convergenceThreshold}), stopping.`
-                );
-                reflectionConverged = true;
-                break;
-              }
-              console.log(
-                `[MoA] Reflection round ${round}/${effectiveMaxRounds}: revision applied (cosine ${similarity.toFixed(3)} < ${convergenceThreshold}, continuing).`
-              );
-            } catch (embedErr) {
-              // Embedding failure is non-fatal — drop the convergence
-              // check for this round, keep looping on the critic signal.
-              console.warn(
-                "[MoA] Convergence check embedding failed (non-fatal):",
-                embedErr instanceof Error ? embedErr.message : String(embedErr)
-              );
-            }
-          }
-        }
-        if (round >= effectiveMaxRounds && effectiveMaxRounds > 1) {
-          console.log(
-            `[MoA] Reflection hit maxRounds cap (${effectiveMaxRounds}). Shipping current text.`
-          );
-          // PM #51 — hit the cap WITHOUT the critic ever cleaning up means
-          // the model couldn't converge. Recorded for trace quality score.
-          if (!reflectionCriticCleanedUp) reflectionHitCap = true;
-        }
-
-        // DDD Phase 1 (corrected) — ONE structured event per reflection run,
-        // through the EXISTING logger (data/logs/*.jsonl), instead of the
-        // originally-planned OpenTelemetry tracer module (rejected: no-APM
-        // local-first; duplicates trace-memory + cost accumulator + SSE).
-        // The roadmap's aggregate metrics are offline queries over this event:
-        //   critic_rejection_rate  = share of events with revisionsExecuted > 0
-        //   average_reflection_rounds = mean(rounds)
-        log.info("ddd_reflection_outcome", {
-          chatId,
-          rounds: round,
-          revisionsExecuted: reflectionRevisionsExecuted,
-          outcome: deriveReflectionOutcome({
-            criticCleanedUp: reflectionCriticCleanedUp,
-            cannotFix: reflectionCannotFix,
-            converged: reflectionConverged,
-            hitCap: reflectionHitCap,
-          }),
-        });
-      } catch (reflectionErr) {
-        // Reflection is a quality-improvement pass, never a blocker — log
-        // and continue with the un-revised aggregator output.
-        console.warn(
-          "[MoA] Reflection loop failed (non-fatal, keeping original):",
-          reflectionErr
-        );
-      }
-    }
+    // PM #38 (single round) + PM #46 (multi-round) — the generator-critic-
+    // revisor reflection loop. When reflection is enabled the aggregator output
+    // is reviewed by the critic (operator's Skeptic, else the brain) and revised
+    // by the brain until the critic is clean, revisions converge, or the hard
+    // cap is hit. Extracted to `runReflectionLoop` (moa-reflection.ts, §10
+    // Sprint 5) — it folds its own reflection/revisor usage and emits the single
+    // `ddd_reflection_outcome` event. The caller keeps only the two trace
+    // signals it records below (`reflectionRevisionsExecuted`, `reflectionHitCap`).
+    const reflectionResult = await runReflectionLoop({
+      reflectionEnabled,
+      initialText: finalText,
+      usage: moaUsage,
+      userMessage,
+      settings,
+      skepticConfig,
+      brainConfig,
+      projectId,
+      chatId,
+      abortSignal,
+    });
+    finalText = reflectionResult.finalText;
+    moaUsage = reflectionResult.usage;
+    const reflectionRevisionsExecuted = reflectionResult.reflectionRevisionsExecuted;
+    const reflectionHitCap = reflectionResult.reflectionHitCap;
 
     publishUiSyncEvent({
       topic: "chat",

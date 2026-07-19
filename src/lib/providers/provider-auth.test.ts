@@ -317,3 +317,100 @@ describe("resolveCliOAuthCredentialSync — throw/return contracts", () => {
     });
   });
 });
+
+describe("getValidGeminiAccessToken — OAuth token refresh", () => {
+  type FetchImpl = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+  beforeEach(async () => {
+    process.env.GEMINI_OAUTH_CREDS_FILE = geminiCredsPath();
+    // Inject the OAuth client via env so the refresh is hermetic (no dependence
+    // on a real gemini-cli install / its bundle).
+    process.env.GEMINI_OAUTH_CLIENT_ID = "test-client-id.apps.googleusercontent.com";
+    process.env.GEMINI_OAUTH_CLIENT_SECRET = "test-client-secret";
+    const mod = await loadModule();
+    mod.__resetGeminiTokenCacheForTests();
+    mod.__resetGeminiOAuthClientCacheForTests();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.GEMINI_OAUTH_CLIENT_ID;
+    delete process.env.GEMINI_OAUTH_CLIENT_SECRET;
+  });
+
+  it("returns the on-disk token when it is still valid (no network refresh)", async () => {
+    plant(geminiCredsPath(), {
+      access_token: "disk-valid",
+      refresh_token: "rt",
+      expiry_date: Date.now() + 3_600_000,
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { getValidGeminiAccessToken } = await loadModule();
+    expect(await getValidGeminiAccessToken()).toBe("disk-valid");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refreshes via the refresh_token when the on-disk token is expired", async () => {
+    plant(geminiCredsPath(), {
+      access_token: "disk-expired",
+      refresh_token: "rt-secret",
+      expiry_date: Date.now() - 1000,
+    });
+    const fetchMock = vi.fn<FetchImpl>(
+      async () =>
+        new Response(JSON.stringify({ access_token: "refreshed-tok", expires_in: 3600 }), {
+          status: 200,
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { getValidGeminiAccessToken } = await loadModule();
+
+    expect(await getValidGeminiAccessToken()).toBe("refreshed-tok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe("https://oauth2.googleapis.com/token");
+    const sentBody = String(init?.body);
+    expect(sentBody).toContain("grant_type=refresh_token");
+    expect(sentBody).toContain("refresh_token=rt-secret");
+  });
+
+  it("caches the refreshed token (second call does not re-fetch)", async () => {
+    plant(geminiCredsPath(), {
+      access_token: "disk-expired",
+      refresh_token: "rt-secret",
+      expiry_date: Date.now() - 1000,
+    });
+    const fetchMock = vi.fn<FetchImpl>(
+      async () =>
+        new Response(JSON.stringify({ access_token: "refreshed-tok", expires_in: 3600 }), {
+          status: 200,
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { getValidGeminiAccessToken } = await loadModule();
+
+    expect(await getValidGeminiAccessToken()).toBe("refreshed-tok");
+    expect(await getValidGeminiAccessToken()).toBe("refreshed-tok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when the token is expired and there is no refresh_token", async () => {
+    plant(geminiCredsPath(), { expiry_date: Date.now() - 1000 });
+    const { getValidGeminiAccessToken } = await loadModule();
+    await expect(getValidGeminiAccessToken()).rejects.toThrow(/refresh_token|Re-login/i);
+  });
+
+  it("surfaces a refresh failure (revoked refresh_token) as an error", async () => {
+    plant(geminiCredsPath(), {
+      access_token: "x",
+      refresh_token: "revoked",
+      expiry_date: Date.now() - 1000,
+    });
+    const fetchMock = vi.fn<FetchImpl>(
+      async () => new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { getValidGeminiAccessToken } = await loadModule();
+    await expect(getValidGeminiAccessToken()).rejects.toThrow(/refresh failed|invalid_grant|Re-login/i);
+  });
+});

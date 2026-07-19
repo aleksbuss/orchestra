@@ -318,22 +318,202 @@ function resolveGeminiCredential(): ResolvedCliOAuthCredential {
   const accessToken = asNonEmptyString(creds.access_token);
   const refreshToken = asNonEmptyString(creds.refresh_token) || undefined;
   const expiresAt = asEpochMs(creds.expiry_date) ?? undefined;
-  const isExpired = typeof expiresAt === "number" && Date.now() >= expiresAt;
 
-  if (!accessToken) {
-    throw new Error("Gemini OAuth access token is missing. Re-login with `gemini`.");
-  }
-
-  if (isExpired) {
-    throw new Error("Gemini OAuth access token is expired. Re-login with `gemini`.");
+  // An EXPIRED access token is no longer fatal here: the fetch layer refreshes
+  // it per-request via the refresh_token (getValidGeminiAccessToken). We only
+  // fail when there is nothing to authenticate OR refresh with. This lets the
+  // sync model factory construct even when the on-disk access token is stale.
+  if (!accessToken && !refreshToken) {
+    throw new Error(
+      "Gemini OAuth has no access or refresh token. Re-login with `gemini`."
+    );
   }
 
   return {
     provider: "gemini-cli",
-    accessToken,
+    accessToken: accessToken ?? "",
     refreshToken,
     expiresAt,
   };
+}
+
+/**
+ * gemini-cli's installed-app OAuth client (client_id + client_secret) is NOT
+ * embedded in Orchestra's source. It is PUBLIC (identical for every user, part
+ * of the published `@google/gemini-cli` package — an installed-app "secret" is
+ * public by OAuth design), but pinning it here trips secret-scanners and rots
+ * whenever Google rotates the app. Resolve it at runtime instead:
+ *   1. `GEMINI_OAUTH_CLIENT_ID` + `GEMINI_OAUTH_CLIENT_SECRET` env (operator
+ *      override + hermetic tests), else
+ *   2. extract it from the operator's installed gemini-cli bundle — the same
+ *      client the CLI itself uses, version-matched.
+ * A gemini-cli install exists by construction (the creds file comes from it),
+ * so extraction succeeds whenever this provider is usable.
+ */
+let cachedGeminiOAuthClient: { clientId: string; clientSecret: string } | null = null;
+
+/** Test-only: drop the cached gemini-cli OAuth client resolution. */
+export function __resetGeminiOAuthClientCacheForTests(): void {
+  cachedGeminiOAuthClient = null;
+}
+
+function findGeminiCliBundleDir(): string | null {
+  const pathEnv = process.env.PATH || "";
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (!dir) continue;
+    try {
+      const bin = path.join(dir, "gemini");
+      if (fs.existsSync(bin)) return path.dirname(fs.realpathSync(bin));
+    } catch {
+      // unreadable PATH entry — skip
+    }
+  }
+  return null;
+}
+
+function resolveGeminiCliOAuthClient(): { clientId: string; clientSecret: string } {
+  const envId = process.env.GEMINI_OAUTH_CLIENT_ID?.trim();
+  const envSecret = process.env.GEMINI_OAUTH_CLIENT_SECRET?.trim();
+  if (envId && envSecret) return { clientId: envId, clientSecret: envSecret };
+  if (cachedGeminiOAuthClient) return cachedGeminiOAuthClient;
+
+  const bundleDir = findGeminiCliBundleDir();
+  if (bundleDir) {
+    try {
+      const chunks = fs
+        .readdirSync(bundleDir)
+        .filter((f) => f.startsWith("chunk-") && f.endsWith(".js"));
+      for (const file of chunks) {
+        const text = fs.readFileSync(path.join(bundleDir, file), "utf8");
+        const id = text.match(
+          /OAUTH_CLIENT_ID\s*=\s*["']([^"']+\.apps\.googleusercontent\.com)["']/
+        );
+        const secret = text.match(/OAUTH_CLIENT_SECRET\s*=\s*["']([^"']{10,})["']/);
+        if (id && secret) {
+          cachedGeminiOAuthClient = { clientId: id[1], clientSecret: secret[1] };
+          return cachedGeminiOAuthClient;
+        }
+      }
+    } catch {
+      // fall through to the actionable error
+    }
+  }
+  throw new Error(
+    "Could not resolve the gemini-cli OAuth client. Install the Gemini CLI " +
+      "(`npm i -g @google/gemini-cli`) or set GEMINI_OAUTH_CLIENT_ID + " +
+      "GEMINI_OAUTH_CLIENT_SECRET."
+  );
+}
+const GOOGLE_OAUTH_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const GEMINI_TOKEN_REFRESH_TIMEOUT_MS = 15_000;
+/** Treat a token as expired this long before its real expiry (skew + in-flight). */
+const GEMINI_TOKEN_EXPIRY_SKEW_MS = 60_000;
+
+let geminiTokenCache:
+  | { refreshToken: string; accessToken: string; expiresAt: number }
+  | null = null;
+
+/** Test-only: drop the in-memory refreshed-token cache. */
+export function __resetGeminiTokenCacheForTests(): void {
+  geminiTokenCache = null;
+}
+
+/**
+ * Exchange a Gemini refresh_token for a fresh access token. Fixed Google
+ * endpoint (no user-supplied URL → no SSRF surface). Never logs the token.
+ */
+async function refreshGeminiAccessToken(
+  refreshToken: string,
+  signal?: AbortSignal
+): Promise<{ accessToken: string; expiresAt: number }> {
+  const { clientId, clientSecret } = resolveGeminiCliOAuthClient();
+  const body = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    refresh_token: refreshToken,
+    grant_type: "refresh_token",
+  });
+  const res = await fetch(GOOGLE_OAUTH_TOKEN_ENDPOINT, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+    signal: signal ?? AbortSignal.timeout(GEMINI_TOKEN_REFRESH_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    // Google returns e.g. {"error":"invalid_grant"} on a revoked refresh_token
+    // — no token material in the error body, safe to surface a short slice.
+    const detail = (await res.text().catch(() => "")).slice(0, 200);
+    throw new Error(
+      `Gemini OAuth token refresh failed (HTTP ${res.status}). Re-login with \`gemini\`. ${detail}`
+    );
+  }
+  const json = (await res.json().catch(() => null)) as
+    | { access_token?: unknown; expires_in?: unknown }
+    | null;
+  const accessToken = asNonEmptyString(json?.access_token);
+  if (!accessToken) {
+    throw new Error("Gemini OAuth token refresh returned no access_token.");
+  }
+  const expiresInSec =
+    typeof json?.expires_in === "number" && Number.isFinite(json.expires_in)
+      ? json.expires_in
+      : 3600;
+  return { accessToken, expiresAt: Date.now() + expiresInSec * 1000 };
+}
+
+/**
+ * Return a currently-valid Gemini access token, refreshing via the stored
+ * refresh_token when the on-disk token is expired. In-memory cache only (no
+ * file write-back — avoids corrupting the CLI's creds file; a fresh process
+ * simply refreshes once). Throws only when there is no way to obtain a token.
+ */
+export async function getValidGeminiAccessToken(
+  signal?: AbortSignal
+): Promise<string> {
+  const { parsed: creds } = readGeminiOauthCreds();
+  if (!creds) {
+    throw new Error(
+      "Gemini OAuth file is missing. Run `gemini` and login with Google."
+    );
+  }
+  const diskToken = asNonEmptyString(creds.access_token);
+  const refreshToken = asNonEmptyString(creds.refresh_token);
+  const diskExpiry = asEpochMs(creds.expiry_date);
+  const now = Date.now();
+
+  // 1) On-disk token still valid (the gemini CLI may have rewritten it): use it.
+  if (
+    diskToken &&
+    typeof diskExpiry === "number" &&
+    now < diskExpiry - GEMINI_TOKEN_EXPIRY_SKEW_MS
+  ) {
+    return diskToken;
+  }
+
+  if (!refreshToken) {
+    if (diskToken) return diskToken; // no refresh material; try the stale token
+    throw new Error(
+      "Gemini OAuth access token is expired and no refresh_token is present. Re-login with `gemini`."
+    );
+  }
+
+  // 2) Cached refreshed token still valid.
+  if (
+    geminiTokenCache &&
+    geminiTokenCache.refreshToken === refreshToken &&
+    now < geminiTokenCache.expiresAt - GEMINI_TOKEN_EXPIRY_SKEW_MS
+  ) {
+    return geminiTokenCache.accessToken;
+  }
+
+  // 3) Refresh via the refresh_token.
+  const refreshed = await refreshGeminiAccessToken(refreshToken, signal);
+  geminiTokenCache = {
+    refreshToken,
+    accessToken: refreshed.accessToken,
+    expiresAt: refreshed.expiresAt,
+  };
+  return refreshed.accessToken;
 }
 
 function checkGeminiOauthStatus(): ProviderAuthStatus {

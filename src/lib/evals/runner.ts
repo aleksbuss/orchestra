@@ -173,10 +173,15 @@ export async function runCase(
 ): Promise<CaseResult> {
   const start = Date.now();
   try {
-    const response = testCase.mock_response !== undefined
-      ? testCase.mock_response
-      : options.useRealAgent
-        ? await invokeRealAgent(testCase)
+    // Precedence: --real (useRealAgent) OVERRIDES any recorded mock_response,
+    // so `npm run evals -- --real` exercises the real model even on cases that
+    // ship a mock for CI. Before, `mock_response !== undefined` short-circuited
+    // first, so --real silently re-scored the hand-written mock and never hit a
+    // real model. Mock is the fallback when real is not enabled.
+    const response = options.useRealAgent
+      ? await invokeRealAgent(testCase)
+      : testCase.mock_response !== undefined
+        ? testCase.mock_response
         : ""; // no mock, real not enabled — return empty (operator chose this)
 
     const assertions = runAllAssertions(response, testCase.assertions as Assertion[]);

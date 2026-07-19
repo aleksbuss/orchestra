@@ -8,11 +8,11 @@ import {
   loadProjectSkillsMetadata,
   loadSkillInstructions,
   createSkill,
-  installSkillFromGitHub,
   updateSkill,
   deleteSkill,
   writeSkillFile,
 } from "@/lib/storage/project-store";
+import { installSkillFromGitHub } from "@/lib/storage/project-skills-github";
 import { inferLanguageFromPath } from "@/lib/tools/text-helpers";
 import {
   SKILL_RESOURCE_READ_MAX_CHARS,

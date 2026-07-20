@@ -69,8 +69,30 @@ export function computeGovernorBudget(
 export function createTokenGovernor(opts: {
   contextWindow: number;
   reservedOutputTokens: number;
+  /**
+   * PM #94-follow-up (Layer 0) — the estimated token size of the SYSTEM prompt
+   * for this streamText call. The governor prunes only the MESSAGE array, but
+   * the provider counts `system + messages` toward the window. If the system
+   * prompt (base + ~39 tool docs + inline-synthesis drafts + deep-memory recall)
+   * is NOT subtracted here, `total = systemPromptTokens + messagesBudget` can
+   * exceed the reliable window even though the message half was "within budget"
+   * — the confirmed root of a live 126840-token brain request over a 120000
+   * clamp, which squeezed the 4096 output budget and truncated a `write_text_file`
+   * tool call mid-arguments. The system prompt is FIXED for the whole streamText
+   * call (tool results accrue in `messages`, not here), so a per-call precompute
+   * is correct. Defaults to 0 → exact pre-change behaviour.
+   */
+  systemPromptTokens?: number;
 }): PrepareStepFunction {
-  const budget = computeGovernorBudget(opts.contextWindow, opts.reservedOutputTokens);
+  const fullBudget = computeGovernorBudget(opts.contextWindow, opts.reservedOutputTokens);
+  // Reserve the system-prompt half so the MESSAGE budget + system prompt stays
+  // under the window. Floored at ABSOLUTE_MIN_BUDGET: a pathologically huge
+  // system prompt can't drive the message budget negative — its own overflow is
+  // bounded at the injection site (draft cap), not here.
+  const budget = Math.max(
+    ABSOLUTE_MIN_BUDGET,
+    fullBudget - Math.max(0, opts.systemPromptTokens ?? 0)
+  );
   return ({ messages }) => {
     if (estimateTokenCount(messages) <= budget) return {};
     return { messages: governMessages(messages, budget) };

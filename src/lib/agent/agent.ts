@@ -6,7 +6,7 @@ import {
   type ModelMessage,
   type PrepareStepFunction,
 } from "ai";
-import { buildBoundedRecallBlock } from "@/lib/agent/deep-recall";
+import { buildBoundedRecallBlock, resolveRecallBudgetChars } from "@/lib/agent/deep-recall";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
@@ -35,7 +35,7 @@ import {
   AUTO_ARCHIVE_AREA,
   filterDeepRecall,
 } from "@/lib/agent/compressor";
-import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
+import { resolveContextWindow, compactionThresholdFor, effectiveContextWindow } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import {
@@ -206,7 +206,14 @@ async function buildTokenGovernor(
   const systemPromptTokens = systemPrompt
     ? estimateTokenCount([{ role: "system", content: systemPrompt }])
     : 0;
-  return createTokenGovernor({ contextWindow, reservedOutputTokens, systemPromptTokens });
+  // PM #95 — pass the model hint so the reliable-window clamp is LIFTED for
+  // known-reliable large-window families (Claude/Gemini/GPT-4o) instead of 120K.
+  return createTokenGovernor({
+    contextWindow,
+    reservedOutputTokens,
+    systemPromptTokens,
+    modelHint: { provider: windowConfig.provider, model: windowConfig.model },
+  });
 }
 
 
@@ -484,7 +491,7 @@ export async function runAgent(options: RunAgentOptions) {
     // symptom compacts at HALF that — a behavior-triggered backstop (PM #82) that
     // escapes the long-context loop even when the model degrades BELOW the static
     // reliable-window cap.
-    const contextLimit = compactionThresholdFor(contextWindow);
+    const contextLimit = compactionThresholdFor(contextWindow, resolvedModelConfig);
     const effectiveLimit = isChatDegraded(options.chatId)
       ? Math.floor(contextLimit * DEGRADED_COMPACTION_RATIO)
       : contextLimit;
@@ -671,8 +678,18 @@ export async function runAgent(options: RunAgentOptions) {
         // prompt (measured live), blowing the model's window and
         // mode-collapsing it. buildBoundedRecallBlock caps per-chunk (head+tail) +
         // total so recall stays a continuity aid, not a context bomb; full verbatim
-        // is still reachable via an explicit memory search.
-        const ragFormatted = buildBoundedRecallBlock(ragResults);
+        // is still reachable via an explicit memory search. PM #95 — the budget is
+        // WINDOW-RELATIVE (a fraction of the model's reliable window) so a
+        // big-window model (Claude 200K / Gemini 1M) carries richer recall inline
+        // instead of being pinned to the small-window char cap.
+        const recallBudget = resolveRecallBudgetChars(
+          effectiveContextWindow(contextWindow, resolvedModelConfig)
+        );
+        const ragFormatted = buildBoundedRecallBlock(
+          ragResults,
+          recallBudget.perChunkChars,
+          recallBudget.totalChars
+        );
         systemPrompt += `\n\n<deep_memory_recall>\nYou have subconscious access to past archived conversations and vectors matching the user's current query. Use this to maintain perfect context continuity:\n\n${ragFormatted}\n</deep_memory_recall>`;
         console.log(`[RAG] Deep Memory Recall injected (${ragResults.length} chunks, ${ragFormatted.length} chars after cap).`);
       }

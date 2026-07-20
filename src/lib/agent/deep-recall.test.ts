@@ -2,8 +2,12 @@ import { describe, it, expect } from "vitest";
 import {
   buildBoundedRecallBlock,
   capChunkHeadTail,
+  resolveRecallBudgetChars,
   DEEP_RECALL_PER_CHUNK_CHARS,
   DEEP_RECALL_TOTAL_CHARS,
+  DEEP_RECALL_MIN_TOTAL_CHARS,
+  DEEP_RECALL_MAX_TOTAL_CHARS,
+  RECALL_WINDOW_FRACTION,
   type RecallHit,
 } from "./deep-recall";
 
@@ -68,5 +72,35 @@ describe("buildBoundedRecallBlock — PM #94 recall bound", () => {
     const block = buildBoundedRecallBlock([hit(0.9, "y".repeat(1000))], 100, 1000);
     // per-chunk cap 100 → the one chunk is capped near 100 chars + marker/format.
     expect(block.length).toBeLessThan(400);
+  });
+});
+
+describe("resolveRecallBudgetChars — window-relative budget (PM #95)", () => {
+  it("scales the total with the effective window (~8% × 3.5 chars/token)", () => {
+    // 200K window → 0.08 * 200000 * 3.5 = 56000 chars.
+    expect(resolveRecallBudgetChars(200000).totalChars).toBe(
+      Math.round(200000 * RECALL_WINDOW_FRACTION * 3.5)
+    );
+    // A big window carries strictly more recall than a small one.
+    expect(resolveRecallBudgetChars(1000000).totalChars).toBeGreaterThan(
+      resolveRecallBudgetChars(120000).totalChars
+    );
+  });
+  it("floors a tiny window at the minimum so recall never vanishes", () => {
+    // 4096 window → 0.08 * 4096 * 3.5 ≈ 1147 < MIN → floored.
+    expect(resolveRecallBudgetChars(4096).totalChars).toBe(DEEP_RECALL_MIN_TOTAL_CHARS);
+    expect(resolveRecallBudgetChars(0).totalChars).toBe(DEEP_RECALL_MIN_TOTAL_CHARS);
+  });
+  it("caps an enormous window at the ceiling (no absurd injection)", () => {
+    // 10M window → way over the ceiling.
+    expect(resolveRecallBudgetChars(10_000_000).totalChars).toBe(DEEP_RECALL_MAX_TOTAL_CHARS);
+  });
+  it("keeps per-chunk a bounded fraction of the total (≥2000, ~35%)", () => {
+    const { perChunkChars, totalChars } = resolveRecallBudgetChars(200000);
+    expect(perChunkChars).toBeGreaterThanOrEqual(2000);
+    expect(perChunkChars).toBeLessThan(totalChars);
+  });
+  it("at the operator's ~120K window the total exceeds the old fixed 16K cap (more headroom, not less)", () => {
+    expect(resolveRecallBudgetChars(120000).totalChars).toBeGreaterThan(DEEP_RECALL_TOTAL_CHARS);
   });
 });

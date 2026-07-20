@@ -43,6 +43,20 @@ describe("computeGovernorBudget", () => {
     expect(computeGovernorBudget(1048576, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
     expect(computeGovernorBudget(200000, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
   });
+  it("LIFTS the clamp for a reliable large-window family via modelHint (PM #95)", () => {
+    // Claude 200K is trusted → full budget, NOT clamped to 120K.
+    expect(
+      computeGovernorBudget(200000, 4096, { provider: "anthropic", model: "claude-opus-4-8" })
+    ).toBe(200000 - 4096);
+    // Gemini 1M (reserve clamps to 30% of the window: 300000).
+    expect(computeGovernorBudget(1000000, 100000, { model: "google/gemini-2.0-flash" })).toBe(
+      1000000 - 100000
+    );
+    // A degrading family with a hint STILL clamps.
+    expect(computeGovernorBudget(1048576, 4096, { model: "qwen/qwen3-coder" })).toBe(
+      MAX_RELIABLE_CONTEXT_WINDOW - 4096
+    );
+  });
 });
 
 describe("createTokenGovernor", () => {

@@ -31,6 +31,47 @@ export const DEEP_RECALL_PER_CHUNK_CHARS = 4000;
 export const DEEP_RECALL_TOTAL_CHARS = 16000;
 
 /**
+ * PM #95 cross-model refinement — a FIXED char budget is safe but under-uses a
+ * big window: on a Claude 200K / Gemini 1M model the passive recall could carry
+ * far more relevant history inline instead of forcing an explicit tool call. The
+ * budget is therefore WINDOW-RELATIVE — a small fraction of the model's EFFECTIVE
+ * (reliable-capped) window — so it scales with the model's real capacity.
+ *
+ * `RECALL_WINDOW_FRACTION` (8%) keeps recall a minority of the window (the bug was
+ * 72%); `[MIN,MAX]` bound it so a tiny window never overflows and a 1M window
+ * never injects absurd amounts. At the operator's ~120K reliable window the total
+ * lands ~33.6K chars — above the old fixed 16K, but the cap rarely BINDS (typical
+ * recall is a few thousand chars), so no behavioural change on normal traffic;
+ * it only allows more headroom when there is genuinely more relevant history.
+ */
+export const RECALL_WINDOW_FRACTION = 0.08;
+const RECALL_CHARS_PER_TOKEN = 3.5;
+export const DEEP_RECALL_MIN_TOTAL_CHARS = 4000;
+export const DEEP_RECALL_MAX_TOTAL_CHARS = 200000;
+
+/**
+ * Resolve the per-chunk + total char budget for the recall injection from the
+ * model's EFFECTIVE (reliable-capped) context window in TOKENS. Pure; the caller
+ * passes the already-clamped window (`effectiveContextWindow(...)`).
+ */
+export function resolveRecallBudgetChars(effectiveWindowTokens: number): {
+  perChunkChars: number;
+  totalChars: number;
+} {
+  const raw = Math.round(
+    Math.max(0, effectiveWindowTokens) * RECALL_WINDOW_FRACTION * RECALL_CHARS_PER_TOKEN
+  );
+  const totalChars = Math.min(
+    DEEP_RECALL_MAX_TOTAL_CHARS,
+    Math.max(DEEP_RECALL_MIN_TOTAL_CHARS, raw)
+  );
+  // A single chunk may take up to ~35% of the total so one big archive can't
+  // swallow the whole budget, but chunks still grow with the window.
+  const perChunkChars = Math.max(2000, Math.round(totalChars * 0.35));
+  return { perChunkChars, totalChars };
+}
+
+/**
  * Keep the head and tail of an over-long chunk (an LLM/archive chunk carries
  * exact artifacts — stack traces, file contents — at both ends; a pure head-slice
  * drops the tail). 60% head / 40% tail, with an elision marker.

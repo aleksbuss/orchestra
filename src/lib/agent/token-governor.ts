@@ -1,7 +1,10 @@
 import { pruneMessages, type ModelMessage, type PrepareStepFunction } from "ai";
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
-import { effectiveContextWindow } from "@/lib/providers/context-window";
+import {
+  effectiveContextWindow,
+  type ModelReliabilityHint,
+} from "@/lib/providers/context-window";
 
 /**
  * Sprint A3 — in-flight token governor.
@@ -49,12 +52,15 @@ const ANCHOR_BUDGET_RATIO = 0.25;
  */
 export function computeGovernorBudget(
   contextWindow: number,
-  reservedOutputTokens: number
+  reservedOutputTokens: number,
+  modelHint?: ModelReliabilityHint
 ): number {
   // PM #82 — clamp to the model's RELIABLE working length first. An advertised
   // 1M window would otherwise make the budget ~1M and the governor never prune,
-  // the same root cause that disables pre-flight compaction.
-  const window = effectiveContextWindow(contextWindow);
+  // the same root cause that disables pre-flight compaction. PM #95 — the clamp
+  // is LIFTED for known-reliable large-window families (Claude/Gemini/GPT-4o) via
+  // the model hint, so those models get their full window instead of 120K.
+  const window = effectiveContextWindow(contextWindow, modelHint);
   const reserve = Math.min(
     Math.max(0, reservedOutputTokens),
     Math.floor(window * MAX_OUTPUT_RESERVE_RATIO)
@@ -83,8 +89,18 @@ export function createTokenGovernor(opts: {
    * is correct. Defaults to 0 → exact pre-change behaviour.
    */
   systemPromptTokens?: number;
+  /**
+   * PM #95 — the model's `{ provider, model }` so the reliable-window clamp can
+   * be LIFTED for known-reliable large-window families (Claude/Gemini/GPT-4o).
+   * Omitted → the conservative 120K clamp applies (prior behaviour).
+   */
+  modelHint?: ModelReliabilityHint;
 }): PrepareStepFunction {
-  const fullBudget = computeGovernorBudget(opts.contextWindow, opts.reservedOutputTokens);
+  const fullBudget = computeGovernorBudget(
+    opts.contextWindow,
+    opts.reservedOutputTokens,
+    opts.modelHint
+  );
   // Reserve the system-prompt half so the MESSAGE budget + system prompt stays
   // under the window. Floored at ABSOLUTE_MIN_BUDGET: a pathologically huge
   // system prompt can't drive the message budget negative — its own overflow is

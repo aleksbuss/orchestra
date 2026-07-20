@@ -552,6 +552,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             prepareStep: createTokenGovernor({
               contextWindow: proposerContextWindow,
               reservedOutputTokens: proposerMaxOutput,
+              modelHint: { provider: proposerConfig.provider, model: proposerConfig.model },
             }),
             // PM #48 — temperature/maxTokens read from the RESOLVED config
             // (proposerConfig), not workerConfig. A tier slot can override
@@ -594,6 +595,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
               prepareStep: createTokenGovernor({
                 contextWindow: proposerContextWindow,
                 reservedOutputTokens: proposerMaxOutput,
+                modelHint: { provider: proposerConfig.provider, model: proposerConfig.model },
               }),
               temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
               maxOutputTokens: proposerMaxOutput,
@@ -689,6 +691,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
               prepareStep: createTokenGovernor({
                 contextWindow: await resolveWindow(workerConfig),
                 reservedOutputTokens: proposerMaxOutput,
+                modelHint: { provider: workerConfig.provider, model: workerConfig.model },
               }),
               temperature: workerConfig.temperature ?? 0.5,
               maxOutputTokens: proposerMaxOutput,
@@ -1103,6 +1106,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       prepareStep: createTokenGovernor({
         contextWindow: aggregatorContextWindow,
         reservedOutputTokens: aggregatorMaxOutput,
+        modelHint: { provider: brainConfig.provider, model: brainConfig.model },
       }),
       temperature: 0.3,
       maxOutputTokens: aggregatorMaxOutput,

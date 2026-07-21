@@ -81,6 +81,27 @@ describe("<SkepticSelector />", () => {
     expect(useAppStore.getState().skepticModelOverride).toBeNull();
   });
 
+  it("shows an error + retry (not an indefinite 'Loading…') when the settings fetch fails", async () => {
+    // Reject the settings fetch outright — the failure path the swallowed
+    // `.catch(() => {})` used to strand on "Loading…" forever. This test fails
+    // if the component regresses to swallowing the error.
+    global.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/settings")) {
+        return Promise.reject(new Error("network down"));
+      }
+      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+    }) as unknown as typeof fetch;
+
+    render(<SkepticSelector />);
+    await userEvent.click(screen.getByRole("button", { name: /skeptic model override/i }));
+
+    // Error affordance appears...
+    expect(await screen.findByRole("button", { name: /retry/i })).toBeTruthy();
+    // ...and it is NOT stuck on the loading placeholder.
+    expect(screen.queryByText(/loading/i)).toBeNull();
+  });
+
   it("picking a model from the catalog commits {provider, model} to the store", async () => {
     render(<SkepticSelector />);
     await userEvent.click(screen.getByRole("button", { name: /skeptic model override/i }));

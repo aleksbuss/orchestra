@@ -43,6 +43,20 @@ describe("computeGovernorBudget", () => {
     expect(computeGovernorBudget(1048576, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
     expect(computeGovernorBudget(200000, 4096)).toBe(MAX_RELIABLE_CONTEXT_WINDOW - 4096);
   });
+  it("LIFTS the clamp for a reliable large-window family via modelHint (PM #95)", () => {
+    // Claude 200K is trusted → full budget, NOT clamped to 120K.
+    expect(
+      computeGovernorBudget(200000, 4096, { provider: "anthropic", model: "claude-opus-4-8" })
+    ).toBe(200000 - 4096);
+    // Gemini 1M (reserve clamps to 30% of the window: 300000).
+    expect(computeGovernorBudget(1000000, 100000, { model: "google/gemini-2.0-flash" })).toBe(
+      1000000 - 100000
+    );
+    // A degrading family with a hint STILL clamps.
+    expect(computeGovernorBudget(1048576, 4096, { model: "qwen/qwen3-coder" })).toBe(
+      MAX_RELIABLE_CONTEXT_WINDOW - 4096
+    );
+  });
 });
 
 describe("createTokenGovernor", () => {
@@ -182,5 +196,55 @@ describe("capToolResultSize", () => {
     expect(out.endsWith("TAIL")).toBe(true);
     expect(out).toContain("Orchestra truncated this tool result");
     expect(out).toContain("characters omitted");
+  });
+});
+
+describe("createTokenGovernor — systemPromptTokens (Layer 0, PM #94-follow-up)", () => {
+  // MANY messages (so the recency slide can actually drop some and get under
+  // budget — a single huge message is never pruned below the floor). Alternating
+  // roles so no pair/merge surprises. Total ~a few thousand tokens.
+  const messages: ModelMessage[] = Array.from({ length: 12 }, (_, i) => ({
+    role: (i % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+    content: big(3000),
+  }));
+
+  it("does NOT prune when the system prompt is ignored (prior behaviour, tokens=0)", async () => {
+    const window = MAX_RELIABLE_CONTEXT_WINDOW; // large window, messages fit
+    const gov = createTokenGovernor({ contextWindow: window, reservedOutputTokens: 4096 });
+    const out = await callGovernor(gov, messages);
+    expect(out.messages).toBeUndefined(); // {} → no pruning
+  });
+
+  it("PRUNES the same payload once the system-prompt size is subtracted", async () => {
+    const msgTokens = estimateTokenCount(messages);
+    const reserved = 4096;
+    const window = MAX_RELIABLE_CONTEXT_WINDOW;
+    const fullBudget = computeGovernorBudget(window, reserved);
+    // Subtract a system prompt big enough that budget-sys ≈ half the messages →
+    // the recency slide must drop the older half to fit.
+    const sysTokens = fullBudget - Math.floor(msgTokens / 2);
+    const gov = createTokenGovernor({
+      contextWindow: window,
+      reservedOutputTokens: reserved,
+      systemPromptTokens: sysTokens,
+    });
+    const out = await callGovernor(gov, messages);
+    expect(out.messages).toBeDefined(); // pruning happened (vs {} above)
+    // Ended up under the reduced budget, and strictly smaller than the input.
+    expect(estimateTokenCount(out.messages!)).toBeLessThanOrEqual(fullBudget - sysTokens);
+    expect(out.messages!.length).toBeLessThan(messages.length);
+  });
+
+  it("floors the message budget at ABSOLUTE_MIN_BUDGET when the system prompt is huge", async () => {
+    // systemPromptTokens far exceeding the window must not yield a negative budget.
+    const gov = createTokenGovernor({
+      contextWindow: MAX_RELIABLE_CONTEXT_WINDOW,
+      reservedOutputTokens: 4096,
+      systemPromptTokens: MAX_RELIABLE_CONTEXT_WINDOW * 5,
+    });
+    const out = await callGovernor(gov, messages);
+    // Still returns a non-empty pruned array (never empty, never throws).
+    expect(out.messages).toBeDefined();
+    expect(out.messages!.length).toBeGreaterThan(0);
   });
 });

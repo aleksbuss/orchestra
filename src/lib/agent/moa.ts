@@ -124,6 +124,7 @@ export {
 import {
   AGGREGATOR_SYSTEM_PROMPT,
   buildAggregatorPrompt,
+  buildProposerContextBlock,
 } from "@/lib/agent/moa-prompts";
 
 // ── MoA Ensemble Runner ─────────────────────────────────────────────────
@@ -378,6 +379,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // ── Step 2: Fan-out — Run proposers in parallel ────────────────────
   const proposerStart = Date.now();
 
+  // D1 / PM #94 — ground the proposers in the recent task context. `safeHistory`
+  // strips tool activity (goal-tracker status, file edits, command output) for
+  // pairing-safety, which blinds proposers to the ACTIVE task on a continuation
+  // prompt ("Продолжай") → each returns a "please clarify" refusal that the
+  // disagreement detector reads as consensus and lets poison the synthesis. This
+  // restores the stripped context as a plain-text block appended to the proposer
+  // SYSTEM prompt (no message re-insertion → no tool-pairing 400 hazard). Built
+  // ONCE — identical for every proposer; the persona prompt is what varies.
+  const proposerContextBlock = buildProposerContextBlock(history);
+
   const proposerPromises = dynamicProposers.map(async (proposer, index) => {
     const nodeId = crypto.randomUUID();
 
@@ -497,8 +508,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         const guardedProposerTools = proposerTools
           ? applyGlobalToolLoopGuard(proposerTools)
           : proposerTools;
+        // D1 / PM #94 — append the recent-task-context block so the proposer can
+        // resolve continuation prompts. Grounding first, then tool augmentation.
         const augmentedSystemPrompt = augmentProposerPromptForTools(
-          proposer.systemPrompt,
+          proposer.systemPrompt + proposerContextBlock,
           guardedProposerTools
         );
 
@@ -539,6 +552,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             prepareStep: createTokenGovernor({
               contextWindow: proposerContextWindow,
               reservedOutputTokens: proposerMaxOutput,
+              modelHint: { provider: proposerConfig.provider, model: proposerConfig.model },
             }),
             // PM #48 — temperature/maxTokens read from the RESOLVED config
             // (proposerConfig), not workerConfig. A tier slot can override
@@ -574,11 +588,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
             console.warn(`[MoA] Proposer "${proposer.id}" model doesn't support tools. Retrying without tools... (${msg})`);
             result = await generateText({
               model: workerModel,
-              system: proposer.systemPrompt, // original un-augmented prompt
+              // Tool-augmentation skipped (no-tools retry) but the PM #94 context
+              // grounding still applies — the proposer needs the task context.
+              system: proposer.systemPrompt + proposerContextBlock,
               messages,
               prepareStep: createTokenGovernor({
                 contextWindow: proposerContextWindow,
                 reservedOutputTokens: proposerMaxOutput,
+                modelHint: { provider: proposerConfig.provider, model: proposerConfig.model },
               }),
               temperature: proposerConfig.temperature ?? workerConfig.temperature ?? 0.5,
               maxOutputTokens: proposerMaxOutput,
@@ -665,14 +682,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
               4096
             );
 
-            // Retry without tools to maximize success chance
+            // Retry without tools to maximize success chance. PM #94 context
+            // grounding still applies on the failover model.
             const result = await generateText({
               model: fallbackModel,
-              system: proposer.systemPrompt, // original un-augmented prompt
+              system: proposer.systemPrompt + proposerContextBlock,
               messages,
               prepareStep: createTokenGovernor({
                 contextWindow: await resolveWindow(workerConfig),
                 reservedOutputTokens: proposerMaxOutput,
+                modelHint: { provider: workerConfig.provider, model: workerConfig.model },
               }),
               temperature: workerConfig.temperature ?? 0.5,
               maxOutputTokens: proposerMaxOutput,
@@ -1087,6 +1106,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       prepareStep: createTokenGovernor({
         contextWindow: aggregatorContextWindow,
         reservedOutputTokens: aggregatorMaxOutput,
+        modelHint: { provider: brainConfig.provider, model: brainConfig.model },
       }),
       temperature: 0.3,
       maxOutputTokens: aggregatorMaxOutput,

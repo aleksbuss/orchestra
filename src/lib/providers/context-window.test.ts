@@ -6,6 +6,7 @@ import {
   resolveContextWindow,
   COMPACTION_THRESHOLD_RATIO,
   effectiveContextWindow,
+  hasReliableFullWindow,
   MAX_RELIABLE_CONTEXT_WINDOW,
 } from "./context-window";
 import {
@@ -50,6 +51,61 @@ describe("effectiveContextWindow (PM #82 reliable-window cap)", () => {
     expect(effectiveContextWindow(200000)).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
     // qwen3-coder's advertised 1,048,576 — the exact bug PM #82 fixes.
     expect(effectiveContextWindow(1048576)).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
+  });
+  it("still clamps with no hint (unchanged default behaviour)", () => {
+    expect(effectiveContextWindow(200000, undefined)).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
+  });
+});
+
+describe("hasReliableFullWindow + effectiveContextWindow lift (PM #95 cross-model)", () => {
+  it("lifts the clamp for known-reliable model-id families (native or routed)", () => {
+    for (const id of [
+      "anthropic/claude-sonnet-4.6",
+      "claude-opus-4-8",
+      "openrouter/anthropic/claude-3.5-sonnet",
+      "google/gemini-2.0-flash",
+      "gemini-3-pro-preview",
+      "openai/gpt-4o",
+      "gpt-4.1",
+      "gpt-5",
+      "openai/o3-mini",
+    ]) {
+      expect(hasReliableFullWindow({ model: id })).toBe(true);
+      // A 1M advertised window is TRUSTED for these — not clamped to 120K.
+      expect(effectiveContextWindow(1000000, { model: id })).toBe(1000000);
+      expect(effectiveContextWindow(200000, { model: id })).toBe(200000);
+    }
+  });
+  it("lifts the clamp for known-reliable native providers regardless of model id", () => {
+    expect(hasReliableFullWindow({ provider: "anthropic", model: "whatever" })).toBe(true);
+    expect(hasReliableFullWindow({ provider: "google", model: "whatever" })).toBe(true);
+    expect(effectiveContextWindow(200000, { provider: "anthropic" })).toBe(200000);
+  });
+  it("KEEPS the clamp for unknown / degrading families (safe default)", () => {
+    for (const id of [
+      "qwen/qwen3-coder",
+      "qwen2.5-coder",
+      "deepseek/deepseek-v4-flash",
+      "mistralai/mixtral-8x7b",
+      "some-bespoke-model",
+    ]) {
+      expect(hasReliableFullWindow({ model: id })).toBe(false);
+      expect(effectiveContextWindow(1048576, { model: id })).toBe(MAX_RELIABLE_CONTEXT_WINDOW);
+    }
+  });
+  it("does NOT broad-match a provider it doesn't trust (openrouter alone is not reliable)", () => {
+    // provider openrouter + a degrading model id stays clamped.
+    expect(hasReliableFullWindow({ provider: "openrouter", model: "qwen/qwen3-coder" })).toBe(false);
+  });
+  it("compactionThresholdFor honours the lift for a reliable family", () => {
+    // Gemini 1M is TRUSTED → threshold at 0.75 * 1M, not 0.75 * 120K.
+    expect(compactionThresholdFor(1000000, { model: "google/gemini-2.0-flash" })).toBe(
+      Math.floor(1000000 * COMPACTION_THRESHOLD_RATIO)
+    );
+    // deepseek stays clamped.
+    expect(compactionThresholdFor(1000000, { model: "deepseek-chat" })).toBe(
+      Math.floor(MAX_RELIABLE_CONTEXT_WINDOW * COMPACTION_THRESHOLD_RATIO)
+    );
   });
 });
 

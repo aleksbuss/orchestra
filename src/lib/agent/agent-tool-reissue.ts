@@ -121,6 +121,20 @@ export const REISSUE_CORRECTION =
   "Do NOT print tool-call markup again. If you genuinely cannot call the tool, " +
   "explain the situation to the user in plain prose instead.";
 
+/**
+ * PM #97 (Layer 2) — correction for an intermittently-DROPPED native tool call.
+ * Unlike REISSUE_CORRECTION, the model did NOT print markup here — it emitted a
+ * valid native tool call that the provider (e.g. OpenRouter's deepseek→OpenAI
+ * mapping) dropped in transit, so nothing executed. Ask it to simply re-issue.
+ */
+export const DROP_REISSUE_CORRECTION =
+  "SYSTEM CORRECTION: Your previous turn ended intending to call a tool, but the " +
+  "tool call did not go through — it was lost in transit and never executed, so " +
+  "no action happened. This is a transient delivery failure, not your mistake. " +
+  "Re-issue the SAME tool/function call now through the native tool-calling " +
+  "channel. If you genuinely have nothing left to do, deliver your final answer " +
+  "to the user in plain prose instead.";
+
 export interface ToolReissueResult {
   /** The re-issue's response messages (native tool call + result + final text). */
   responseMessages: ModelMessage[];
@@ -150,6 +164,13 @@ export async function attemptToolReissue(args: {
   prepareStep: Parameters<typeof generateText>[0]["prepareStep"];
   settings: AppSettings;
   abortSignal?: AbortSignal;
+  /**
+   * PM #97 — the correction text to inject. Defaults to `REISSUE_CORRECTION`
+   * (printed-markup case, PM #81); pass `DROP_REISSUE_CORRECTION` for the
+   * dropped-native-call case (Layer 2). The rest of the re-issue machinery
+   * (budget, pairing-safe merge, executed-tool detection) is identical.
+   */
+  correction?: string;
 }): Promise<ToolReissueResult | null> {
   try {
     const result = await generateText({
@@ -158,7 +179,7 @@ export async function attemptToolReissue(args: {
       messages: mergeConsecutiveSameRole([
         ...args.baseMessages,
         ...args.priorMessages,
-        { role: "user", content: REISSUE_CORRECTION },
+        { role: "user", content: args.correction ?? REISSUE_CORRECTION },
       ]),
       providerOptions: args.providerOptions,
       tools: args.tools,

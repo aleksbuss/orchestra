@@ -37,8 +37,35 @@ import {
  * the DPG degraded to static personas, not just that it did. Coarse by design
  * (the message shapes vary per provider); "other" is the honest catch-all.
  */
+/**
+ * Extract a RICH, greppable description from a Router error. The AI SDK's
+ * `NoObjectGeneratedError` / `APICallError` frequently carry an EMPTY `.message`
+ * (the useful detail lives in `.name`, `.finishReason`, `.text` (raw model
+ * output), `.statusCode`, `.responseBody`, or `.cause`) — so logging bare
+ * `err.message` produced `error=""` and mis-classified a schema failure as
+ * "other" (observed live with a coder model as the Router). Surface all of them.
+ */
+export function describeRouterError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err) || "(non-error thrown)";
+  const parts: string[] = [];
+  if (err.name && err.name !== "Error") parts.push(err.name);
+  if (err.message) parts.push(err.message);
+  const anyErr = err as unknown as Record<string, unknown>;
+  if (typeof anyErr.statusCode === "number") parts.push(`status=${anyErr.statusCode}`);
+  if (typeof anyErr.finishReason === "string") parts.push(`finishReason=${anyErr.finishReason}`);
+  if (typeof anyErr.text === "string" && anyErr.text) parts.push(`text=${anyErr.text.slice(0, 200)}`);
+  if (typeof anyErr.responseBody === "string" && anyErr.responseBody) {
+    parts.push(`body=${anyErr.responseBody.slice(0, 200)}`);
+  }
+  const cause = anyErr.cause;
+  if (cause instanceof Error && cause.message) parts.push(`cause=${cause.message}`);
+  else if (typeof cause === "string" && cause) parts.push(`cause=${cause}`);
+  return parts.join(" | ") || "(no error detail)";
+}
+
 export function classifyRouterError(err: unknown): string {
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  const name = (err instanceof Error ? err.name : "").toLowerCase();
+  const msg = describeRouterError(err).toLowerCase();
   if (/401|403|unauthor|api key|no auth|invalid.*key|credit|402|quota|billing/.test(msg)) {
     return "auth";
   }
@@ -48,7 +75,15 @@ export function classifyRouterError(err: unknown): string {
   if (/abort|timeout|timed out|etimedout|econnreset/.test(msg)) {
     return "timeout";
   }
-  if (/schema|parse|invalid json|zod|validation|no object generated|could not parse/.test(msg)) {
+  // A structured-output failure often has an EMPTY message — key on the AI SDK
+  // error NAME too, not just the text, so an empty-message schema failure is not
+  // mis-bucketed as "other".
+  if (
+    name.includes("noobjectgenerated") ||
+    name.includes("typevalidation") ||
+    name.includes("jsonparse") ||
+    /schema|parse|invalid json|zod|validation|no object generated|could not parse/.test(msg)
+  ) {
     return "schema";
   }
   return "other";
@@ -214,7 +249,7 @@ INSTRUCTIONS:
       reason,
       provider: modelConfig.provider,
       model: modelConfig.model,
-      error: err instanceof Error ? err.message : String(err),
+      error: describeRouterError(err),
     });
 
     const fallbackPersonas = MOA_PROPOSERS.slice(0, maxSwarmSize);

@@ -1,7 +1,10 @@
 import { pruneMessages, type ModelMessage, type PrepareStepFunction } from "ai";
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
-import { effectiveContextWindow } from "@/lib/providers/context-window";
+import {
+  effectiveContextWindow,
+  type ModelReliabilityHint,
+} from "@/lib/providers/context-window";
 
 /**
  * Sprint A3 — in-flight token governor.
@@ -49,12 +52,15 @@ const ANCHOR_BUDGET_RATIO = 0.25;
  */
 export function computeGovernorBudget(
   contextWindow: number,
-  reservedOutputTokens: number
+  reservedOutputTokens: number,
+  modelHint?: ModelReliabilityHint
 ): number {
   // PM #82 — clamp to the model's RELIABLE working length first. An advertised
   // 1M window would otherwise make the budget ~1M and the governor never prune,
-  // the same root cause that disables pre-flight compaction.
-  const window = effectiveContextWindow(contextWindow);
+  // the same root cause that disables pre-flight compaction. PM #95 — the clamp
+  // is LIFTED for known-reliable large-window families (Claude/Gemini/GPT-4o) via
+  // the model hint, so those models get their full window instead of 120K.
+  const window = effectiveContextWindow(contextWindow, modelHint);
   const reserve = Math.min(
     Math.max(0, reservedOutputTokens),
     Math.floor(window * MAX_OUTPUT_RESERVE_RATIO)
@@ -69,8 +75,40 @@ export function computeGovernorBudget(
 export function createTokenGovernor(opts: {
   contextWindow: number;
   reservedOutputTokens: number;
+  /**
+   * PM #94-follow-up (Layer 0) — the estimated token size of the SYSTEM prompt
+   * for this streamText call. The governor prunes only the MESSAGE array, but
+   * the provider counts `system + messages` toward the window. If the system
+   * prompt (base + ~39 tool docs + inline-synthesis drafts + deep-memory recall)
+   * is NOT subtracted here, `total = systemPromptTokens + messagesBudget` can
+   * exceed the reliable window even though the message half was "within budget"
+   * — the confirmed root of a live 126840-token brain request over a 120000
+   * clamp, which squeezed the 4096 output budget and truncated a `write_text_file`
+   * tool call mid-arguments. The system prompt is FIXED for the whole streamText
+   * call (tool results accrue in `messages`, not here), so a per-call precompute
+   * is correct. Defaults to 0 → exact pre-change behaviour.
+   */
+  systemPromptTokens?: number;
+  /**
+   * PM #95 — the model's `{ provider, model }` so the reliable-window clamp can
+   * be LIFTED for known-reliable large-window families (Claude/Gemini/GPT-4o).
+   * Omitted → the conservative 120K clamp applies (prior behaviour).
+   */
+  modelHint?: ModelReliabilityHint;
 }): PrepareStepFunction {
-  const budget = computeGovernorBudget(opts.contextWindow, opts.reservedOutputTokens);
+  const fullBudget = computeGovernorBudget(
+    opts.contextWindow,
+    opts.reservedOutputTokens,
+    opts.modelHint
+  );
+  // Reserve the system-prompt half so the MESSAGE budget + system prompt stays
+  // under the window. Floored at ABSOLUTE_MIN_BUDGET: a pathologically huge
+  // system prompt can't drive the message budget negative — its own overflow is
+  // bounded at the injection site (draft cap), not here.
+  const budget = Math.max(
+    ABSOLUTE_MIN_BUDGET,
+    fullBudget - Math.max(0, opts.systemPromptTokens ?? 0)
+  );
   return ({ messages }) => {
     if (estimateTokenCount(messages) <= budget) return {};
     return { messages: governMessages(messages, budget) };

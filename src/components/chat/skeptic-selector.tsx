@@ -42,6 +42,13 @@ export function SkepticSelector() {
 
   const [open, setOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  // `true` once the settings fetch has failed (network error or non-2xx). Kept
+  // separate from `settings === null` so the picker can render an error state
+  // with a retry instead of an indefinite "Loading…" (a swallowed `.catch`
+  // used to strand the panel forever on any fetch failure).
+  const [settingsError, setSettingsError] = useState(false);
+  // Bump to re-run the settings fetch (the "Retry" affordance).
+  const [reloadTick, setReloadTick] = useState(0);
   // Provider held while the operator is mid-selection (before a model is
   // chosen). Seeded from the sticky override so re-opening shows its provider.
   const [draftProvider, setDraftProvider] = useState<string>(DEFAULT_PROVIDER);
@@ -50,20 +57,28 @@ export function SkepticSelector() {
     if (skepticModelOverride?.provider) setDraftProvider(skepticModelOverride.provider);
   }, [skepticModelOverride]);
 
-  // Fetch the full (masked) settings once so the picker can list catalogs.
+  // Fetch the full (masked) settings so the picker can list catalogs.
   // Keys are masked here; `forceFetch` lets `/api/models` resolve them server-side.
+  // A non-2xx response throws (so a JSON error body isn't mistaken for settings),
+  // and any failure flips `settingsError` instead of being silently swallowed.
   useEffect(() => {
     let cancelled = false;
+    setSettingsError(false);
     fetch("/api/settings")
-      .then((r) => r.json())
+      .then((r) => {
+        if (!r.ok) throw new Error(`settings fetch failed: ${r.status}`);
+        return r.json();
+      })
       .then((data: AppSettings) => {
         if (!cancelled) setSettings(data);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!cancelled) setSettingsError(true);
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadTick]);
 
   function handleChange(provider: string, model: string) {
     setDraftProvider(provider);
@@ -124,6 +139,17 @@ export function SkepticSelector() {
             onChange={handleChange}
             forceFetch
           />
+        ) : settingsError ? (
+          <div className="py-4 text-center text-xs text-muted-foreground">
+            <span className="text-destructive">Couldn&apos;t load models.</span>{" "}
+            <button
+              type="button"
+              onClick={() => setReloadTick((t) => t + 1)}
+              className="underline hover:text-foreground"
+            >
+              Retry
+            </button>
+          </div>
         ) : (
           <div className="py-4 text-center text-xs text-muted-foreground">Loading…</div>
         )}

@@ -57,6 +57,7 @@ import {
   turnHasDeliverableAnswer,
   resolveTurnContinuation,
   detectActionHallucination,
+  isDroppedNativeToolCall,
   detectPrematureCompletion,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
@@ -69,6 +70,7 @@ import {
   resetReissueBudget,
   recordChatDegradation,
   isChatDegraded,
+  DROP_REISSUE_CORRECTION,
 } from "@/lib/agent/agent-tool-reissue";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
@@ -1071,14 +1073,67 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           }
         }
 
+        // ── Layer 2 (PM #97) — intermittent NATIVE tool-call DROP recovery ──
+        // Problem C: the model emitted a VALID native tool call that the provider
+        // (OpenRouter's deepseek→OpenAI mapping) intermittently DROPPED in transit
+        // — the SDK sees finishReason="tool-calls" but ZERO tool calls parsed, no
+        // printed markup (so PM #81 didn't fire), and no delivered answer. The
+        // action silently never ran. Since the drop is intermittent, ONE bounded
+        // re-issue usually lands. NARROW gate — distinct from every other
+        // no-delivery case: NOT a hallucination (handled above), NOT a step-cap
+        // pause, tools ON, finishReason EXACTLY "tool-calls" (a real answer is
+        // "stop"), and nothing deliverable came through. Shares the PM #81 reissue
+        // budget (circuit breaker). Reads turnHasDeliverableAnswer, never mutates it.
+        let dropReissued = false;
+        if (
+          isDroppedNativeToolCall({
+            finishReason,
+            useTools,
+            stepLimitReached,
+            hallucinated: hallucinatedCall !== null,
+            responseMessages: rawResponseMessages,
+          })
+        ) {
+          const budget = recordReissueAttempt(options.chatId);
+          console.warn(
+            `[Agent] Layer 2 (PM #97) — native tool-call DROP detected ` +
+              `(finishReason=tool-calls, no tool call parsed, no answer; likely an ` +
+              `intermittent provider drop). Re-issue attempt ${budget.count}, allowed=${budget.allowed}.`
+          );
+          if (budget.allowed) {
+            const reissue = await attemptToolReissue({
+              model,
+              systemPrompt,
+              baseMessages: messages,
+              priorMessages: rawResponseMessages,
+              tools: effectiveTools,
+              providerOptions,
+              prepareStep: tokenGovernor,
+              settings,
+              abortSignal: options.abortSignal,
+              correction: DROP_REISSUE_CORRECTION,
+            });
+            if (reissue) {
+              reissueMessages = reissue.responseMessages;
+              reissueUsage = reissue.usage;
+              dropReissued = true;
+              resetReissueBudget(options.chatId); // delivered → reset for later turns
+            }
+          }
+        }
+
         // When a hallucination was detected, drop its raw markup message (the
         // user must not see XML) and append the re-issue's real messages, if any.
+        // On a Layer-2 drop the prior text is legit (a short preamble, no markup),
+        // so KEEP it and append the re-issue's real messages.
         const responseMessages = hallucinatedCall
           ? [
               ...stripHallucinatedTrailingText(rawResponseMessages),
               ...reissueMessages,
             ]
-          : rawResponseMessages;
+          : dropReissued
+            ? [...rawResponseMessages, ...reissueMessages]
+            : rawResponseMessages;
 
         // PM #36 (truncation continuation) + PM #69 (forced final answer) +
         // step-cap pause are all decided by resolveTurnContinuation —

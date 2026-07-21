@@ -610,6 +610,49 @@ export function turnHasDeliverableAnswer(messages: ModelMessage[]): boolean {
   return true;
 }
 
+/** Does any message carry a native `tool-call` content part? */
+function messagesContainToolCall(messages: ModelMessage[]): boolean {
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const part of m.content) {
+      if (part && typeof part === "object" && (part as { type?: string }).type === "tool-call") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * PM #97 (Layer 2) — did the provider DROP a native tool call (problem C)? The
+ * model's final step reported finishReason `"tool-calls"` (it INTENDED to call a
+ * tool) yet NO native tool call — of ANY kind, including the `response` answer
+ * tool — materialized in the turn (OpenRouter's deepseek→OpenAI mapping
+ * intermittently drops a large native call), and it did NOT print markup (so
+ * PM #81's hallucination path did not fire).
+ *
+ * The signal is "finishReason=tool-calls AND zero tool-call parts", NOT
+ * `!turnHasDeliverableAnswer` — a dropped-call turn usually carries a short PROSE
+ * PREAMBLE ("Начинаю… 🚀") which `turnHasDeliverableAnswer` counts as delivered,
+ * so that predicate would miss exactly this case. Keying on the ABSENCE of a
+ * tool-call part is preamble-proof and still excludes a real answer (a `response`
+ * answer IS a tool-call part) and any turn that actually executed a tool. Narrow
+ * BY CONSTRUCTION: never fires on a real answer (`stop`), a step-cap pause,
+ * plain-chat (no tools), a printed-markup hallucination, or a turn that ran any
+ * tool. Pure; caller re-issues ONCE within the shared reissue budget.
+ */
+export function isDroppedNativeToolCall(args: {
+  finishReason?: string;
+  useTools: boolean;
+  stepLimitReached: boolean;
+  hallucinated: boolean;
+  responseMessages: ModelMessage[];
+}): boolean {
+  if (!args.useTools || args.hallucinated || args.stepLimitReached) return false;
+  if (args.finishReason !== "tool-calls") return false;
+  return !messagesContainToolCall(args.responseMessages);
+}
+
 /**
  * PM #81 Sprint 2 — was this turn's only "answer" a hallucinated ACTION tool
  * call printed as text (not the `response` tool, and no real answer delivered)?

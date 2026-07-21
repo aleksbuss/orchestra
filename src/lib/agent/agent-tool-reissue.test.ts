@@ -17,6 +17,8 @@ import {
   recordChatDegradation,
   isChatDegraded,
   resetChatDegradation,
+  REISSUE_CORRECTION,
+  DROP_REISSUE_CORRECTION,
 } from "./agent-tool-reissue";
 
 describe("PM #81 — re-issue circuit breaker (recordReissueAttempt)", () => {
@@ -146,6 +148,46 @@ describe("PM #81 — attemptToolReissue (real generateText + mock model)", () =>
   it("returns null (never throws) when the model errors", async () => {
     const res = await attemptToolReissue({ ...baseArgs, model: modelThrowing() as never });
     expect(res).toBeNull();
+  });
+});
+
+describe("PM #97 (Layer 2) — correction param selects the injected correction", () => {
+  beforeEach(() => resetReissueBudget());
+
+  function captureCorrectionModel(captured: { text?: string }) {
+    return new MockLanguageModelV3({
+      doGenerate: async ({ prompt }) => {
+        // The injected correction is the LAST user message before generation.
+        const msgs = prompt as Array<{ role: string; content: unknown }>;
+        const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+        const c = lastUser?.content;
+        captured.text = typeof c === "string"
+          ? c
+          : Array.isArray(c)
+            ? c.map((p) => (p && typeof p === "object" && "text" in p ? (p as { text: string }).text : "")).join("")
+            : "";
+        return genResult("re-issued fine.");
+      },
+    });
+  }
+
+  it("defaults to the printed-markup REISSUE_CORRECTION when omitted", async () => {
+    const captured: { text?: string } = {};
+    await attemptToolReissue({ ...baseArgs, model: captureCorrectionModel(captured) as never });
+    expect(captured.text).toBe(REISSUE_CORRECTION);
+    expect(captured.text).toContain("PRINTED a tool call");
+  });
+
+  it("injects DROP_REISSUE_CORRECTION for the Layer-2 dropped-call case", async () => {
+    const captured: { text?: string } = {};
+    await attemptToolReissue({
+      ...baseArgs,
+      correction: DROP_REISSUE_CORRECTION,
+      model: captureCorrectionModel(captured) as never,
+    });
+    expect(captured.text).toBe(DROP_REISSUE_CORRECTION);
+    expect(captured.text).toContain("lost in transit");
+    expect(captured.text).not.toContain("PRINTED a tool call"); // NOT the wrong correction
   });
 });
 

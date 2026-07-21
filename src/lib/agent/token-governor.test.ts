@@ -176,6 +176,31 @@ describe("governMessages — Stage 2: recency window safety", () => {
       .reduce((a, b) => a + b, 0);
     expect(totalChars).toBeLessThan(40000); // the 40k paste was evicted, not pinned back in
   });
+
+  it("pins the 25% anchor BOUNDARY: a first turn above the cap is NOT anchored (PM #76)", () => {
+    // The test above only proves an EXTREME paste (huge vs any sane cap) is
+    // evicted — it survives ANCHOR_BUDGET_RATIO drifting all the way to 0.95.
+    // This pins the actual boundary: a first user turn sized BETWEEN the 0.25
+    // cap and the budget must fall on the "too big to anchor" side. Sized to
+    // ~50% of the budget so it exceeds floor(budget*0.25) but not the budget.
+    const BUDGET = 4000;
+    const marker = "ANCHOR_MARKER_76";
+    // Realistic words tokenize ~1 token/word (≈ budget*0.5 tokens here), unlike
+    // a repeated-char run which BPE compresses unpredictably.
+    const firstTurn = `${marker} ` + "metric dashboard build task pointer ".repeat(400);
+    const messages: ModelMessage[] = [
+      { role: "user", content: firstTurn }, // ~50% of budget → above the 25% anchor cap
+      { role: "assistant", content: big(80000) }, // huge middle forces the tail over budget
+      { role: "user", content: "latest" },
+    ];
+    const out = governMessages(messages, BUDGET);
+    const joined = out.map((m) => (typeof m.content === "string" ? m.content : "")).join(" ");
+    // Above the cap ⇒ not anchored ⇒ the recency slide drops the first turn.
+    // If ANCHOR_BUDGET_RATIO drifts up (e.g. 0.95), the turn is wrongly pinned
+    // and the marker survives — this assertion then fails, catching the drift.
+    expect(joined).not.toContain(marker);
+    expect(out[out.length - 1]).toEqual({ role: "user", content: "latest" });
+  });
 });
 
 describe("capToolResultSize", () => {

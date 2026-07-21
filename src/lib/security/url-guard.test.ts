@@ -97,6 +97,16 @@ describe("assertSafeOutboundUrl — SSRF blocklist", () => {
   it("rejects IPv6 link-local fe80::/10", () => {
     expect(() => assertSafeOutboundUrl("http://[fe80::1]/x")).toThrow(UnsafeOutboundUrlError);
   });
+
+  it("rejects the WHOLE fe80::/10 range, not just fe80 (fe9x/feax/febx)", () => {
+    // fe80::/10 spans fe80–febf. The guard blocks it via startsWith on
+    // "fe8"/"fe9"/"fea"/"feb"; a test that only exercised `fe80::1` left the
+    // upper three sub-ranges unverified — a mutation dropping any of those
+    // branches survived silently (mutation-testing gap, 2026-07). Pin all four.
+    expect(() => assertSafeOutboundUrl("http://[fe90::1]/x")).toThrow(UnsafeOutboundUrlError);
+    expect(() => assertSafeOutboundUrl("http://[fea0::1]/x")).toThrow(UnsafeOutboundUrlError);
+    expect(() => assertSafeOutboundUrl("http://[febf::1]/x")).toThrow(UnsafeOutboundUrlError);
+  });
 });
 
 describe("assertSafeOutboundUrl — IPv4-in-IPv6 bypass (PM #8 follow-up)", () => {

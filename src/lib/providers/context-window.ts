@@ -39,14 +39,67 @@ export const COMPACTION_THRESHOLD_RATIO = 0.75;
  * the common case across providers. This is the cloud analogue of the Ollama
  * "advertised 32768 vs runtime 4096" note above. Tunable; key constant.
  *
- * `effectiveContextWindow` is a pure `Math.min` so it is a NO-OP for any window
- * already at/under the ceiling (32k families, local Ollama 4096) and bites ONLY
- * over-advertised large windows — provider-agnostic by construction.
+ * The clamp is a NO-OP for any window already at/under the ceiling (32k families,
+ * local Ollama 4096) and bites ONLY over-advertised large windows.
+ *
+ * PM #95 cross-model refinement — the 120K clamp is the SAFE DEFAULT, not a
+ * universal law. Model families that are empirically RELIABLE at their full
+ * advertised window (Anthropic Claude 200K, Google Gemini 1M, OpenAI frontier)
+ * do NOT degrade into printed tool-calls, so clamping THEM to 120K needlessly
+ * compacts a big window early and under-uses a model the operator is paying for.
+ * `effectiveContextWindow` takes an optional model hint and LIFTS the clamp for
+ * those known-reliable families (matched by native provider OR model-id
+ * substring, so it also catches OpenRouter-routed `anthropic/claude-…`). Unknown
+ * / degrading families stay clamped. This is an ALLOW-list (only lift for
+ * known-good) — the inverse-SAFE direction of PM #17's `NO_TOOL_PATTERNS`
+ * deny-list — and the `recordChatDegradation` backstop still halves the
+ * threshold if a lifted model unexpectedly prints a tool call.
  */
 export const MAX_RELIABLE_CONTEXT_WINDOW = 120000;
 
-/** Clamp an advertised window to the model's reliable working length (PM #82). */
-export function effectiveContextWindow(window: number): number {
+/** Light hint used to decide whether a model's advertised window is trustworthy. */
+export interface ModelReliabilityHint {
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * Model-id families robust at their FULL advertised window (no ~100K native-tool-call
+ * degradation — PM #82). Matched as substrings against the lowercased model id, so
+ * they lift the clamp whether the model runs natively or via an aggregator. KEEP
+ * TIGHT: a family that DEGRADES (qwen3-coder, most free/community tiers) must NOT
+ * appear here — omission keeps it clamped (safe). Mirrors the reliable rows of
+ * `STATIC_CONTEXT_WINDOWS`.
+ */
+const RELIABLE_FULL_WINDOW_PATTERNS: readonly RegExp[] = [
+  /claude|sonnet|opus|haiku/, // Anthropic — 200K, robust
+  /gemini-1\.5|gemini-2|gemini-3|gemini-exp/, // Google — 1M+, robust (older gemini-pro 32K is under the clamp anyway)
+  /gpt-4o|gpt-4\.1|gpt-5/, // OpenAI frontier — 128K+, robust
+  /\bo1\b|\bo3\b|\bo4\b|o1-|o3-|o4-/, // OpenAI o-series — 200K, robust
+];
+
+/** Native providers whose entire lineup is reliable at advertised windows. */
+const RELIABLE_FULL_WINDOW_PROVIDERS = new Set(["anthropic", "google"]);
+
+/** Is this model trustworthy at its full advertised window (skip the 120K clamp)? */
+export function hasReliableFullWindow(hint?: ModelReliabilityHint): boolean {
+  if (!hint) return false;
+  if (hint.provider && RELIABLE_FULL_WINDOW_PROVIDERS.has(hint.provider)) return true;
+  const id = (hint.model ?? "").toLowerCase();
+  return RELIABLE_FULL_WINDOW_PATTERNS.some((re) => re.test(id));
+}
+
+/**
+ * Clamp an advertised window to the model's reliable working length (PM #82),
+ * UNLESS the model belongs to a known-reliable large-window family (PM #95), in
+ * which case the advertised window is trusted. Provider-agnostic default (clamp),
+ * allow-list lift for known-good families.
+ */
+export function effectiveContextWindow(
+  window: number,
+  hint?: ModelReliabilityHint
+): number {
+  if (hasReliableFullWindow(hint)) return window;
   return Math.min(window, MAX_RELIABLE_CONTEXT_WINDOW);
 }
 
@@ -111,8 +164,11 @@ export function lookupStaticContextWindow(modelId: string): number | null {
  * model's RELIABLE working length first (PM #82) — a 1M advertised window would
  * otherwise put the threshold at 786k, far past where the model degrades.
  */
-export function compactionThresholdFor(window: number): number {
-  return Math.floor(effectiveContextWindow(window) * COMPACTION_THRESHOLD_RATIO);
+export function compactionThresholdFor(
+  window: number,
+  hint?: ModelReliabilityHint
+): number {
+  return Math.floor(effectiveContextWindow(window, hint) * COMPACTION_THRESHOLD_RATIO);
 }
 
 /**

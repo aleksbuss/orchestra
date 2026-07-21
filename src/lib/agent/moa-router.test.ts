@@ -48,6 +48,7 @@ import { generateObject } from "ai";
 import {
   generateDynamicSwarm,
   classifyRouterError,
+  describeRouterError,
   applySkepticControlArm,
   isSkepticControlArmActive,
 } from "./moa-router";
@@ -436,9 +437,55 @@ describe("classifyRouterError — fallback reason classification (PM #89)", () =
     expect(classifyRouterError(new Error("No object generated: could not parse"))).toBe("schema");
     expect(classifyRouterError(new Error("ZodError: invalid"))).toBe("schema");
   });
+  it("schema: EMPTY-message AI SDK error keyed on NAME (the live error='' case)", () => {
+    // AI SDK's NoObjectGeneratedError / TypeValidationError frequently carry an
+    // empty .message — before the fix these bucketed to "other". Keying on the
+    // error NAME recovers the real classification.
+    const noObj = Object.assign(new Error(""), { name: "AI_NoObjectGeneratedError" });
+    expect(classifyRouterError(noObj)).toBe("schema");
+    const typeVal = Object.assign(new Error(""), { name: "AI_TypeValidationError" });
+    expect(classifyRouterError(typeVal)).toBe("schema");
+  });
+  it("auth: an APICallError whose detail lives in statusCode/body, not message", () => {
+    const apiErr = Object.assign(new Error(""), {
+      name: "AI_APICallError",
+      statusCode: 402,
+      responseBody: "Insufficient credits",
+    });
+    expect(classifyRouterError(apiErr)).toBe("auth");
+  });
   it("other: anything unrecognized", () => {
     expect(classifyRouterError(new Error("kaboom"))).toBe("other");
     expect(classifyRouterError("plain string")).toBe("other");
+  });
+});
+
+describe("describeRouterError — rich detail from empty-message SDK errors (PM #90 follow-up)", () => {
+  it("surfaces name + finishReason + raw model text when message is empty", () => {
+    const err = Object.assign(new Error(""), {
+      name: "AI_NoObjectGeneratedError",
+      finishReason: "length",
+      text: "here is the truncated model output that failed to parse",
+    });
+    const d = describeRouterError(err);
+    expect(d).toContain("AI_NoObjectGeneratedError");
+    expect(d).toContain("finishReason=length");
+    expect(d).toContain("truncated model output");
+    expect(d).not.toBe(""); // never the useless error="" of before
+  });
+  it("surfaces statusCode + body for an API error, and cause when present", () => {
+    const err = Object.assign(new Error("upstream failed"), {
+      statusCode: 429,
+      cause: new Error("rate limited"),
+    });
+    const d = describeRouterError(err);
+    expect(d).toContain("status=429");
+    expect(d).toContain("cause=rate limited");
+  });
+  it("degrades gracefully for a non-Error throw", () => {
+    expect(describeRouterError("boom")).toBe("boom");
+    expect(describeRouterError(null)).toBe("null");
+    expect(describeRouterError("")).toContain("non-error"); // empty throw → fallback
   });
 });
 

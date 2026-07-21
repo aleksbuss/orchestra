@@ -6,6 +6,7 @@ import {
   type ModelMessage,
   type PrepareStepFunction,
 } from "ai";
+import { buildBoundedRecallBlock, resolveRecallBudgetChars } from "@/lib/agent/deep-recall";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
@@ -34,7 +35,7 @@ import {
   AUTO_ARCHIVE_AREA,
   filterDeepRecall,
 } from "@/lib/agent/compressor";
-import { resolveContextWindow, compactionThresholdFor } from "@/lib/providers/context-window";
+import { resolveContextWindow, compactionThresholdFor, effectiveContextWindow } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import {
@@ -56,6 +57,7 @@ import {
   turnHasDeliverableAnswer,
   resolveTurnContinuation,
   detectActionHallucination,
+  isDroppedNativeToolCall,
   detectPrematureCompletion,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
@@ -68,6 +70,7 @@ import {
   resetReissueBudget,
   recordChatDegradation,
   isChatDegraded,
+  DROP_REISSUE_CORRECTION,
 } from "@/lib/agent/agent-tool-reissue";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
@@ -144,6 +147,33 @@ function publishOrchestratorFinished(
   });
 }
 
+/**
+ * Concise, human-readable hint for a tool call's arguments, for the Swarm
+ * Activity terminal (e.g. `[Agent] write_text_file — src/index.css`). Pulls the
+ * most identifying field (path / command / query / url) when present, else a
+ * short serialized slice. Returns "" (no hint) for empty/unusable args, and is
+ * prefixed with " — " so callers can append unconditionally.
+ */
+function summarizeToolArgs(args: unknown): string {
+  if (!args || typeof args !== "object") return "";
+  const a = args as Record<string, unknown>;
+  const pick =
+    a.path ?? a.filePath ?? a.file_path ?? a.target_file ?? a.command ?? a.query ?? a.url ?? a.name;
+  let hint: string;
+  if (typeof pick === "string") {
+    hint = pick;
+  } else {
+    try {
+      hint = JSON.stringify(a);
+    } catch {
+      return "";
+    }
+  }
+  hint = hint.replace(/\s+/g, " ").trim();
+  if (!hint) return "";
+  return ` — ${hint.length > 80 ? hint.slice(0, 80) + "…" : hint}`;
+}
+
 function resolveModelProviderOptions(provider: string) {
   if (provider === "codex-cli") {
     return {
@@ -166,11 +196,26 @@ async function buildTokenGovernor(
   windowConfig: { provider: string; model?: string; baseUrl?: string },
   reservedOutputTokens: number,
   abortSignal?: AbortSignal,
-  preResolvedWindow?: number
+  preResolvedWindow?: number,
+  // Layer 0 — the SYSTEM prompt string for this call. Its estimated size is
+  // subtracted from the message budget so `system + messages` stays under the
+  // reliable window (see createTokenGovernor's systemPromptTokens doc). Omitted
+  // → 0 → prior behaviour.
+  systemPrompt?: string
 ): Promise<PrepareStepFunction> {
   const contextWindow =
     preResolvedWindow ?? (await resolveContextWindow(windowConfig, { abortSignal }));
-  return createTokenGovernor({ contextWindow, reservedOutputTokens });
+  const systemPromptTokens = systemPrompt
+    ? estimateTokenCount([{ role: "system", content: systemPrompt }])
+    : 0;
+  // PM #95 — pass the model hint so the reliable-window clamp is LIFTED for
+  // known-reliable large-window families (Claude/Gemini/GPT-4o) instead of 120K.
+  return createTokenGovernor({
+    contextWindow,
+    reservedOutputTokens,
+    systemPromptTokens,
+    modelHint: { provider: windowConfig.provider, model: windowConfig.model },
+  });
 }
 
 
@@ -237,7 +282,9 @@ async function runSubAgent(
     const tokenGovernor = await buildTokenGovernor(
       settings.chatModel,
       resolveMaxOutputTokens(settings.chatModel),
-      abortSignal
+      abortSignal,
+      undefined,
+      systemPrompt // Layer 0 — subtract the system-prompt size from the msg budget
     );
     const result = await generateText({
       model,
@@ -446,7 +493,7 @@ export async function runAgent(options: RunAgentOptions) {
     // symptom compacts at HALF that — a behavior-triggered backstop (PM #82) that
     // escapes the long-context loop even when the model degrades BELOW the static
     // reliable-window cap.
-    const contextLimit = compactionThresholdFor(contextWindow);
+    const contextLimit = compactionThresholdFor(contextWindow, resolvedModelConfig);
     const effectiveLimit = isChatDegraded(options.chatId)
       ? Math.floor(contextLimit * DEGRADED_COMPACTION_RATIO)
       : contextLimit;
@@ -626,9 +673,27 @@ export async function runAgent(options: RunAgentOptions) {
       const ragResults = filterDeepRecall(ragCandidates, options.chatId, deepRecallLimit);
 
       if (ragResults && ragResults.length > 0) {
-        const ragFormatted = ragResults.map((r) => `[Relevance Score: ${r.score.toFixed(2)}] (Area: ${r.metadata.area})\n${r.text}`).join("\n\n");
+        // PM #94-follow-up — BOUND the passive recall injection. deepRecallLimit
+        // caps the chunk COUNT (3) but each chunk's text is unbounded, and
+        // auto-archived VERBATIM history chunks (PM #85) run tens of thousands of
+        // tokens; as a chat ages this injected 82K+ tokens into EVERY turn's system
+        // prompt (measured live), blowing the model's window and
+        // mode-collapsing it. buildBoundedRecallBlock caps per-chunk (head+tail) +
+        // total so recall stays a continuity aid, not a context bomb; full verbatim
+        // is still reachable via an explicit memory search. PM #95 — the budget is
+        // WINDOW-RELATIVE (a fraction of the model's reliable window) so a
+        // big-window model (Claude 200K / Gemini 1M) carries richer recall inline
+        // instead of being pinned to the small-window char cap.
+        const recallBudget = resolveRecallBudgetChars(
+          effectiveContextWindow(contextWindow, resolvedModelConfig)
+        );
+        const ragFormatted = buildBoundedRecallBlock(
+          ragResults,
+          recallBudget.perChunkChars,
+          recallBudget.totalChars
+        );
         systemPrompt += `\n\n<deep_memory_recall>\nYou have subconscious access to past archived conversations and vectors matching the user's current query. Use this to maintain perfect context continuity:\n\n${ragFormatted}\n</deep_memory_recall>`;
-        console.log(`[RAG] Deep Memory Recall injected (${ragResults.length} chunks).`);
+        console.log(`[RAG] Deep Memory Recall injected (${ragResults.length} chunks, ${ragFormatted.length} chars after cap).`);
       }
     } catch (err) {
       console.warn(`[RAG] Failed to extract deep memory:`, err);
@@ -851,7 +916,8 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       resolvedModelConfig,
       resolveMaxOutputTokens(settings.chatModel),
       options.abortSignal,
-      contextWindow
+      contextWindow,
+      systemPrompt // Layer 0 — subtract the system-prompt size from the msg budget
     );
     // Run the agent with streaming
     const result = streamText({
@@ -873,9 +939,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
     maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
     abortSignal: options.abortSignal,
     onStepFinish: async (event) => {
-      // PM #81 — incremental billing. If a multi-step loop crashes on step 3 
-      // (e.g. Rate Limit or Context Exceeded), `onFinish` might not fire or 
-      // might drop usage. We accumulate per-step to ensure actual spend is 
+      // PM #81 — incremental billing. If a multi-step loop crashes on step 3
+      // (e.g. Rate Limit or Context Exceeded), `onFinish` might not fire or
+      // might drop usage. We accumulate per-step to ensure actual spend is
       // always captured.
       const stepUsage = event.usage;
       if (stepUsage) {
@@ -891,6 +957,36 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           });
         } catch (err) {
           console.error("[Agent] Failed to persist step usage:", err);
+        }
+      }
+
+      // ── Swarm Activity: surface the MAIN stream's per-step tool calls ──────
+      // Under the inline-synthesis collapse (default), the ensemble hands off and
+      // the REAL work — the whole multi-step tool loop (write_text_file,
+      // code_execution, update_task_status, …), often 30-40 steps over many
+      // minutes — happens in THIS stream. It previously emitted NOTHING to the
+      // UI, so the Swarm Activity panel showed only the (already-green) router /
+      // proposer / aggregator nodes and looked "done" while the brain worked
+      // invisibly. Emit one activity line per executed tool call so the operator
+      // sees the live course of actions in the Deep Audit terminal. Gated to the
+      // swarm path (the panel only renders when `swarmEnabled`); fully try/caught
+      // so a telemetry emit can never break the run.
+      if (options.swarmEnabled !== false) {
+        try {
+          const stepToolCalls = (event as unknown as {
+            toolCalls?: Array<{ toolName?: string; input?: unknown; args?: unknown }>;
+          }).toolCalls;
+          for (const call of stepToolCalls ?? []) {
+            const toolName = call.toolName ?? "tool";
+            publishUiSyncEvent({
+              topic: "chat",
+              chatId: options.chatId,
+              projectId: options.projectId ?? null,
+              reason: `[Agent] ${toolName}${summarizeToolArgs(call.input ?? call.args)}`,
+            });
+          }
+        } catch (activityErr) {
+          console.warn("[Agent] step-activity emit error (non-fatal):", activityErr);
         }
       }
     },
@@ -977,14 +1073,67 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           }
         }
 
+        // ── Layer 2 (PM #97) — intermittent NATIVE tool-call DROP recovery ──
+        // Problem C: the model emitted a VALID native tool call that the provider
+        // (OpenRouter's deepseek→OpenAI mapping) intermittently DROPPED in transit
+        // — the SDK sees finishReason="tool-calls" but ZERO tool calls parsed, no
+        // printed markup (so PM #81 didn't fire), and no delivered answer. The
+        // action silently never ran. Since the drop is intermittent, ONE bounded
+        // re-issue usually lands. NARROW gate — distinct from every other
+        // no-delivery case: NOT a hallucination (handled above), NOT a step-cap
+        // pause, tools ON, finishReason EXACTLY "tool-calls" (a real answer is
+        // "stop"), and nothing deliverable came through. Shares the PM #81 reissue
+        // budget (circuit breaker). Reads turnHasDeliverableAnswer, never mutates it.
+        let dropReissued = false;
+        if (
+          isDroppedNativeToolCall({
+            finishReason,
+            useTools,
+            stepLimitReached,
+            hallucinated: hallucinatedCall !== null,
+            responseMessages: rawResponseMessages,
+          })
+        ) {
+          const budget = recordReissueAttempt(options.chatId);
+          console.warn(
+            `[Agent] Layer 2 (PM #97) — native tool-call DROP detected ` +
+              `(finishReason=tool-calls, no tool call parsed, no answer; likely an ` +
+              `intermittent provider drop). Re-issue attempt ${budget.count}, allowed=${budget.allowed}.`
+          );
+          if (budget.allowed) {
+            const reissue = await attemptToolReissue({
+              model,
+              systemPrompt,
+              baseMessages: messages,
+              priorMessages: rawResponseMessages,
+              tools: effectiveTools,
+              providerOptions,
+              prepareStep: tokenGovernor,
+              settings,
+              abortSignal: options.abortSignal,
+              correction: DROP_REISSUE_CORRECTION,
+            });
+            if (reissue) {
+              reissueMessages = reissue.responseMessages;
+              reissueUsage = reissue.usage;
+              dropReissued = true;
+              resetReissueBudget(options.chatId); // delivered → reset for later turns
+            }
+          }
+        }
+
         // When a hallucination was detected, drop its raw markup message (the
         // user must not see XML) and append the re-issue's real messages, if any.
+        // On a Layer-2 drop the prior text is legit (a short preamble, no markup),
+        // so KEEP it and append the re-issue's real messages.
         const responseMessages = hallucinatedCall
           ? [
               ...stripHallucinatedTrailingText(rawResponseMessages),
               ...reissueMessages,
             ]
-          : rawResponseMessages;
+          : dropReissued
+            ? [...rawResponseMessages, ...reissueMessages]
+            : rawResponseMessages;
 
         // PM #36 (truncation continuation) + PM #69 (forced final answer) +
         // step-cap pause are all decided by resolveTurnContinuation —
@@ -1324,7 +1473,9 @@ export async function runAgentText(options: {
     const tokenGovernor = await buildTokenGovernor(
       settings.chatModel,
       resolveMaxOutputTokens(settings.chatModel),
-      options.abortSignal
+      options.abortSignal,
+      undefined,
+      systemPrompt // Layer 0 — subtract the system-prompt size from the msg budget
     );
     const generated = await generateText({
       model,
@@ -1532,7 +1683,9 @@ export async function runSubordinateAgent(options: {
     const tokenGovernor = await buildTokenGovernor(
       settings.chatModel,
       resolveMaxOutputTokens(settings.chatModel),
-      options.abortSignal
+      options.abortSignal,
+      undefined,
+      systemPrompt // Layer 0 — subtract the system-prompt size from the msg budget
     );
     const result = await generateText({
       model,

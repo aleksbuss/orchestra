@@ -15,7 +15,7 @@ import { MockLanguageModelV3 } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import type { AppSettings } from "@/lib/types";
 import { turnHasDeliverableAnswer, resolveTurnContinuation } from "./agent";
-import { detectPrematureCompletion } from "./agent-response";
+import { detectPrematureCompletion, isDroppedNativeToolCall } from "./agent-response";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -394,5 +394,53 @@ describe("PM #84 — detectPrematureCompletion", () => {
         responseToolCall("Tests pass — done."),
       ])
     ).toBeNull();
+  });
+});
+
+describe("PM #97 (Layer 2) — isDroppedNativeToolCall (intermittent provider drop)", () => {
+  const base = {
+    finishReason: "tool-calls" as string | undefined,
+    useTools: true,
+    stepLimitReached: false,
+    hallucinated: false,
+  };
+
+  it("FIRES on the drop signature EVEN WITH a prose preamble (the reported bug)", () => {
+    // finishReason=tool-calls, a short preamble, NO tool-call part → dropped call.
+    // turnHasDeliverableAnswer would call the preamble "delivered" — this predicate
+    // keys on the ABSENT tool-call part instead, so it still fires.
+    expect(
+      isDroppedNativeToolCall({ ...base, responseMessages: [assistantText("Начинаю… 🚀")] })
+    ).toBe(true);
+    // Also fires with no text at all.
+    expect(isDroppedNativeToolCall({ ...base, responseMessages: [] })).toBe(true);
+  });
+
+  it("does NOT fire when a `response` answer was delivered (that IS a tool call)", () => {
+    expect(
+      isDroppedNativeToolCall({ ...base, responseMessages: [responseToolCall("Here is the answer.")] })
+    ).toBe(false);
+  });
+
+  it("does NOT fire when a real tool executed this turn", () => {
+    expect(
+      isDroppedNativeToolCall({
+        ...base,
+        responseMessages: [searchToolCall(), searchToolResult()],
+      })
+    ).toBe(false);
+  });
+
+  it("does NOT fire on a real answer (finishReason=stop)", () => {
+    expect(
+      isDroppedNativeToolCall({ ...base, finishReason: "stop", responseMessages: [assistantText("A 2168-char summary.")] })
+    ).toBe(false);
+  });
+
+  it("does NOT fire at a step-cap pause, in plain-chat, or on a hallucination", () => {
+    const msgs = [assistantText("preamble")];
+    expect(isDroppedNativeToolCall({ ...base, stepLimitReached: true, responseMessages: msgs })).toBe(false);
+    expect(isDroppedNativeToolCall({ ...base, useTools: false, responseMessages: msgs })).toBe(false);
+    expect(isDroppedNativeToolCall({ ...base, hallucinated: true, responseMessages: msgs })).toBe(false);
   });
 });

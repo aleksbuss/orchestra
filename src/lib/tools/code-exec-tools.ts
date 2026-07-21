@@ -35,10 +35,18 @@ function userExplicitlyRequestedProcessKill(context: AgentContext): boolean {
   const text = getCurrentUserMessageText(context);
   if (!text) return false;
 
+  // Unicode-aware boundaries (`(?<![\p{L}\p{N}])…(?![\p{L}\p{N}])` + `u` flag),
+  // NOT ASCII `\b`: JS `\b` keys on [A-Za-z0-9_], so `\bостанови\b` NEVER matches
+  // a Cyrillic word — the entire RU verb list was dead code and a Russian
+  // operator's "останови процесс" / "убей сессию" was silently unrecognized, so
+  // the agent refused every RU stop request. The lookarounds still guard EN
+  // false-matches ("weekend"/"endpoint" ↛ "end"). The negation stems (прерв/
+  // останов/…) intentionally keep no trailing boundary so they prefix-match
+  // inflected forms; "не"/"don't" keep a trailing boundary so "нет" ↛ "не".
   const killIntent =
-    /\b(stop|terminate|kill|cancel|abort|end|прервать|прерви|остановить|останови|убить|убей|завершить|заверши|отменить|отмени)\b/i;
+    /(?<![\p{L}\p{N}])(stop|terminate|kill|cancel|abort|end|прервать|прерви|остановить|останови|убить|убей|завершить|заверши|отменить|отмени)(?![\p{L}\p{N}])/iu;
   const negatedIntent =
-    /\b(do not|don't|dont|не)\b.{0,20}\b(stop|terminate|kill|cancel|abort|прерв|останов|убива|заверш|отмен)\b/i;
+    /(?<![\p{L}\p{N}])(do not|don't|dont|не)(?![\p{L}\p{N}]).{0,20}(?<![\p{L}\p{N}])(stop|terminate|kill|cancel|abort|прерв|останов|убива|заверш|отмен)/iu;
 
   if (negatedIntent.test(text)) {
     return false;

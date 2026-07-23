@@ -1,0 +1,20 @@
+{
+  "testRunner": "vitest",
+  "coverageAnalysis": "perTest",
+  "ignoreStatic": true,
+  "mutate": [
+    "src/lib/**/*.ts",
+    "!src/lib/**/*.test.ts",
+    "!src/lib/**/*.spec.ts",
+    "!src/lib/**/*.d.ts",
+    "!src/lib/vendor/**",
+    "!src/lib/**/*.testing.ts"
+  ],
+  "reporters": ["clear-text", "progress", "json", "html"],
+  "jsonReporter": { "fileName": "reports/stryker/stryker.json" },
+  "htmlReporter": { "fileName": "reports/stryker/stryker.html" },
+  "concurrency": 8,
+  "timeoutMS": 30000,
+  "disableTypeChecks": true,
+  "vitest": { "configFile": "vitest.config.ts" }
+}

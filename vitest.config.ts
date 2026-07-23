@@ -37,7 +37,18 @@ export default defineConfig({
     // `data-backups/**` (a SIBLING of data/, not covered by 'data/**') holds full
     // snapshots of data/, incl. agent-written project test files — exclude it for
     // the same reason: they fail on unresolved imports and pollute the suite.
-    exclude: [...configDefaults.exclude, 'tests/e2e/**', 'data/**', 'data-backups/**'],
+    // `.claude/**` holds harness worktrees (.claude/worktrees/<task>/ is a full repo
+    // checkout — its tests/e2e copies escape the root-anchored 'tests/e2e/**' exclude
+    // and crash under vitest); `.stryker-tmp/**` holds Stryker mutation sandboxes
+    // (full instrumented copies of src/). Both duplicate the whole suite when present.
+    exclude: [
+      ...configDefaults.exclude,
+      'tests/e2e/**',
+      'data/**',
+      'data-backups/**',
+      '.claude/**',
+      '.stryker-tmp/**',
+    ],
     // Default env is `node` (fast, no DOM). Component tests opt into
     // `happy-dom` via the per-file directive `// @vitest-environment happy-dom`.
     // We picked happy-dom over jsdom for boot speed: ~3x faster cold-start

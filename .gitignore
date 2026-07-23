@@ -68,3 +68,9 @@ logs/
 
 # generated benchmark output
 scripts/benchmark-report.md
+
+# Stryker mutation testing — heavy generated reports + sandboxes (keep the config + the STRENGTHEN-TESTS guide)
+.stryker-tmp/
+stryker.log
+reports/stryker/*.json
+reports/stryker/*.html

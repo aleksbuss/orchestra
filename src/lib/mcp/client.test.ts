@@ -50,7 +50,10 @@ import {
   isMcpToolReadOnly,
   buildMcpToolDocsBlock,
   getProjectMcpToolsForContext,
+  callMcpTool,
+  listMcpTools,
 } from "./client";
+import type { Client } from "@modelcontextprotocol/sdk/client";
 import type { AgentContext } from "@/lib/agent/types";
 import type { AppSettings } from "@/lib/types";
 
@@ -135,6 +138,118 @@ describe("S2 — isMcpToolReadOnly (read-only role gate is semantic, not a name 
   it("DENIES an unrecognised name shape (fail-closed for restricted roles)", () => {
     expect(isMcpToolReadOnly("frobnicate")).toBe(false);
     expect(isMcpToolReadOnly("do_stuff")).toBe(false);
+  });
+});
+
+describe("buildMcpToolDocsBlock — context-window cap boundary (L380)", () => {
+  // A description between the small cap (200) and large cap (2000) is the only
+  // input that distinguishes >= 32768 from > 32768.
+  const meta = (desc: string) => [{ serverId: "s", name: "get_thing", description: desc }];
+  const midLen = 500;
+  const longDesc = "d".repeat(midLen);
+
+  it("keeps the full description at EXACTLY the 32768 threshold (>= not >)", () => {
+    const out = buildMcpToolDocsBlock(meta(longDesc), false, 32768);
+    expect(out).toContain(longDesc); // full 500 chars survive → large cap applied
+  });
+
+  it("truncates the same description one below the threshold (32767 → small cap)", () => {
+    const out = buildMcpToolDocsBlock(meta(longDesc), false, 32767);
+    expect(out).not.toContain(longDesc);
+    expect(out).toContain("...");
+  });
+});
+
+// callMcpTool / listMcpTools take a Client instance directly, so a duck-typed
+// fake exercises the result-formatting + error paths with no live server. The
+// loose method typing keeps the inline result shapes (content: null, unknown
+// item types) from being checked against the strict SDK CallToolResult type —
+// the point is to feed callMcpTool the raw shapes it must tolerate at runtime.
+const fakeClient = (impl: {
+  callTool?: (...args: unknown[]) => Promise<unknown>;
+  listTools?: () => Promise<unknown>;
+}) => impl as unknown as Client;
+
+describe("callMcpTool — result formatting + error handling", () => {
+  it("joins text content items with newlines", async () => {
+    const client = fakeClient({
+      callTool: async () => ({ content: [{ type: "text", text: "line1" }, { type: "text", text: "line2" }] }),
+    });
+    expect(await callMcpTool(client, "t", {})).toBe("line1\nline2");
+  });
+
+  it("formats a resource_link as [Resource: name] uri", async () => {
+    const client = fakeClient({
+      callTool: async () => ({ content: [{ type: "resource_link", name: "doc", uri: "file:///x" }] }),
+    });
+    expect(await callMcpTool(client, "t", {})).toBe("[Resource: doc] file:///x");
+  });
+
+  it("JSON-stringifies an unknown content item type", async () => {
+    const client = fakeClient({
+      callTool: async () => ({ content: [{ type: "image", data: "abc" }] }),
+    });
+    expect(await callMcpTool(client, "t", {})).toBe(JSON.stringify({ type: "image", data: "abc" }));
+  });
+
+  it("normalizes a single (non-array) content object", async () => {
+    const client = fakeClient({
+      callTool: async () => ({ content: { type: "text", text: "solo" } }),
+    });
+    expect(await callMcpTool(client, "t", {})).toBe("solo");
+  });
+
+  it("returns '(no output)' when content is null/empty", async () => {
+    expect(await callMcpTool(fakeClient({ callTool: async () => ({ content: null }) }), "t", {})).toBe("(no output)");
+    expect(await callMcpTool(fakeClient({ callTool: async () => ({ content: [] }) }), "t", {})).toBe("(no output)");
+  });
+
+  it("truncates output past 40000 chars with the truncation note", async () => {
+    const big = "Z".repeat(50000);
+    const client = fakeClient({ callTool: async () => ({ content: [{ type: "text", text: big }] }) });
+    const out = await callMcpTool(client, "t", {});
+    expect(out.length).toBeLessThan(big.length);
+    expect(out).toContain("Truncated: Output exceeded 40000 characters");
+  });
+
+  it("wraps a thrown error as '[MCP tool error] <msg>' instead of throwing", async () => {
+    const client = fakeClient({ callTool: async () => { throw new Error("upstream down"); } });
+    expect(await callMcpTool(client, "t", {})).toBe("[MCP tool error] upstream down");
+  });
+
+  it("forwards timeout + abortSignal to the SDK call (AbortSignal contract)", async () => {
+    const spy = vi.fn(async () => ({ content: [{ type: "text", text: "ok" }] }));
+    const ac = new AbortController();
+    await callMcpTool(fakeClient({ callTool: spy as never }), "mytool", { a: 1 }, ac.signal);
+    expect(spy).toHaveBeenCalledWith(
+      { name: "mytool", arguments: { a: 1 } },
+      undefined,
+      expect.objectContaining({ timeout: 120000, signal: ac.signal })
+    );
+  });
+});
+
+describe("listMcpTools — mapping + failure fallback", () => {
+  it("maps name/description/inputSchema/annotations from the SDK result", async () => {
+    const client = fakeClient({
+      listTools: async () => ({
+        tools: [{ name: "get_x", description: "d", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }],
+      }),
+    });
+    const out = await listMcpTools(client);
+    expect(out).toEqual([
+      { name: "get_x", description: "d", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+    ]);
+  });
+
+  it("returns [] when listTools throws", async () => {
+    const client = fakeClient({ listTools: async () => { throw new Error("nope"); } });
+    expect(await listMcpTools(client)).toEqual([]);
+  });
+
+  it("returns [] when the SDK omits the tools array", async () => {
+    const client = fakeClient({ listTools: async () => ({}) as never });
+    expect(await listMcpTools(client)).toEqual([]);
   });
 });
 

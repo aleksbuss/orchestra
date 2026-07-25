@@ -209,6 +209,10 @@ describe("PM #41 — runSuite filtering", () => {
     expect(suite.passed).toBe(3);
     expect(suite.failed).toBe(0);
     expect(suite.errored).toBe(0);
+    // Mock-mode cases never invoke the real agent, so none can be a delivery
+    // (no-answer) failure — the field is present and zero.
+    expect(suite.noAnswer).toBe(0);
+    expect(suite.cases.every((c) => !c.noAnswer)).toBe(true);
   });
 
   it("tag filter restricts to matching cases", async () => {

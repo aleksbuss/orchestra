@@ -120,12 +120,35 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
   const chatId = `eval-${testCase.id}-${crypto.randomUUID().slice(0, 8)}`;
   await createChat(chatId, `[eval] ${testCase.id}`);
 
+  // Arm-level swarm override for the parallelism-vs-single A/B.
+  // `ORCHESTRA_EVAL_SWARM_MODE` (dev-only, honored when NODE_ENV !== "production",
+  // same posture as ORCHESTRA_EVAL_SKEPTIC_CONTROL) forces EVERY case into one arm
+  // regardless of its declared swarmEnabled/forceSwarm — so the SAME hard cases
+  // run both the swarm arm and the single-agent control without editing each file.
+  //   "swarm"  → swarmEnabled + forceSwarm ON  (full MoA ensemble)
+  //   "single" → swarmEnabled + forceSwarm OFF (single agent, no proposers)
+  //   unset    → per-case fields (default; unchanged behavior)
+  // An unknown value is validated + rejected loudly by the CLI (run-evals.ts).
+  const armMode =
+    process.env.NODE_ENV !== "production"
+      ? process.env.ORCHESTRA_EVAL_SWARM_MODE
+      : undefined;
+  let swarmEnabled = testCase.input.swarmEnabled ?? false;
+  let forceSwarm = testCase.input.forceSwarm ?? false;
+  if (armMode === "swarm") {
+    swarmEnabled = true;
+    forceSwarm = true;
+  } else if (armMode === "single") {
+    swarmEnabled = false;
+    forceSwarm = false;
+  }
+
   try {
     const result = await runAgent({
       chatId,
       userMessage: testCase.input.message,
-      swarmEnabled: testCase.input.swarmEnabled ?? false,
-      forceSwarm: testCase.input.forceSwarm ?? false,
+      swarmEnabled,
+      forceSwarm,
     });
 
     // Drain the stream by consuming the response. We only need the
@@ -184,8 +207,34 @@ export async function runCase(
         ? testCase.mock_response
         : ""; // no mock, real not enabled — return empty (operator chose this)
 
-    const assertions = runAllAssertions(response, testCase.assertions as Assertion[]);
-    const passed = assertions.every((a) => a.passed);
+    const specs = testCase.assertions as Assertion[];
+    const assertions = runAllAssertions(response, specs);
+
+    // Judge assertions are async (LLM call) — score them here under --real,
+    // overwriting the SKIPPED slots the sync pass left. In mock mode they stay
+    // skipped (no token cost in CI).
+    if (options.useRealAgent && specs.some((a) => a.type === "judge")) {
+      const { judgeResponse } = await import("./judge");
+      const { scoreJudgeAssertion } = await import("./assertions");
+      for (let i = 0; i < specs.length; i++) {
+        const spec = specs[i];
+        if (spec.type === "judge") {
+          assertions[i] = await scoreJudgeAssertion(response, spec, i, judgeResponse);
+        }
+      }
+    }
+
+    // A skipped assertion (judge in mock mode) does not count against the case.
+    const passed = assertions.every((a) => a.skipped || a.passed);
+    // F3 — a case whose assertions ALL skipped (judge-only, mock mode) "passes"
+    // without verifying anything. Flag it so the CLI can surface the vacuous pass
+    // instead of it hiding as green.
+    const vacuous = assertions.length > 0 && assertions.every((a) => a.skipped);
+    // An empty real-agent response is a DELIVERY failure (no answer), NOT a
+    // reasoning failure — flag it so A/B analysis separates the two. Scoring an
+    // empty as a plain FAIL once produced a false swarm-vs-single capability Δ
+    // that was really a delivery-reliability difference.
+    const noAnswer = !!options.useRealAgent && response.trim() === "";
 
     return {
       id: testCase.id,
@@ -195,6 +244,8 @@ export async function runCase(
       durationMs: Date.now() - start,
       response,
       assertions,
+      ...(vacuous ? { vacuous: true } : {}),
+      ...(noAnswer ? { noAnswer: true } : {}),
     };
   } catch (err) {
     return {
@@ -246,6 +297,8 @@ export async function runSuite(
     passed: results.filter((r) => r.passed).length,
     failed: results.filter((r) => !r.passed && !r.error).length,
     errored: results.filter((r) => !!r.error).length,
+    vacuous: results.filter((r) => r.vacuous).length,
+    noAnswer: results.filter((r) => r.noAnswer).length,
     cases: results,
   };
 }

@@ -12,7 +12,7 @@
  *     in the runner itself.
  */
 
-export type AssertionKind = "contains" | "not_contains" | "matches";
+export type AssertionKind = "contains" | "not_contains" | "matches" | "judge";
 
 export interface ContainsAssertion {
   type: "contains";
@@ -37,10 +37,23 @@ export interface MatchesAssertion {
   flags?: string;
 }
 
+export interface JudgeAssertion {
+  type: "judge";
+  /**
+   * A yes/no rubric an LLM judge answers about the response. PASS = the
+   * response satisfies the rubric. Semantic + format-insensitive: unlike
+   * `contains`/`matches`, a correct answer wrapped in markdown or phrased
+   * differently still passes. Requires `--real` (the judge calls a model);
+   * in mock-only mode the assertion is SKIPPED, not scored.
+   */
+  rubric: string;
+}
+
 export type Assertion =
   | ContainsAssertion
   | NotContainsAssertion
-  | MatchesAssertion;
+  | MatchesAssertion
+  | JudgeAssertion;
 
 export interface EvalCase {
   /** Stable id used in result files and CLI filters. Match the filename. */
@@ -73,6 +86,12 @@ export interface AssertionResult {
   index: number;
   type: AssertionKind;
   passed: boolean;
+  /**
+   * True when the assertion was not actually scored (e.g. a `judge` assertion
+   * in mock-only mode, where no judge model is available). A skipped assertion
+   * does NOT count against the case's pass/fail.
+   */
+  skipped?: boolean;
   /** Human-readable reason when failed (e.g., "expected to contain 'Canberra'"). */
   reason?: string;
 }
@@ -89,6 +108,23 @@ export interface CaseResult {
   assertions: AssertionResult[];
   /** Set when the case errored before assertions could run (case parse failed, agent threw, etc.). */
   error?: string;
+  /**
+   * F3 — true when EVERY assertion was skipped (e.g. a judge-only case run in
+   * mock mode, where the judge cannot execute). Such a case reports `passed:true`
+   * vacuously — nothing was actually verified. The flag lets the CLI surface it
+   * so a broken judge-only case can't hide as a green pass in CI.
+   */
+  vacuous?: boolean;
+  /**
+   * True when the real agent returned an EMPTY response (no answer delivered) —
+   * a DELIVERY failure (timeout / degraded swarm / silent orchestrator spin),
+   * NOT a reasoning failure. Distinguishing the two is load-bearing: an A/B that
+   * scores an empty response as a plain assertion FAIL conflates "the system
+   * didn't answer" with "the system answered wrong", which produced a false
+   * capability signal (a swarm-vs-single Δ that was really a delivery-reliability
+   * difference). Analysis MUST separate no-answer from delivered-but-wrong.
+   */
+  noAnswer?: boolean;
 }
 
 export interface EvalSuiteResult {
@@ -98,5 +134,9 @@ export interface EvalSuiteResult {
   passed: number;
   failed: number;
   errored: number;
+  /** F3 — count of cases that passed vacuously (all assertions skipped). Subset of `passed`. */
+  vacuous: number;
+  /** Count of real-agent cases that returned an empty response (delivery failure, not reasoning). */
+  noAnswer: number;
   cases: CaseResult[];
 }

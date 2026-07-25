@@ -67,6 +67,23 @@ const c = {
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
 
+  // A/B arm override (parallelism-vs-single). Validate LOUDLY: an unknown value
+  // would silently fall through to per-case config and quietly corrupt one arm of
+  // the experiment, so refuse to run rather than produce a mislabeled result.
+  const armMode = process.env.ORCHESTRA_EVAL_SWARM_MODE;
+  if (armMode !== undefined && armMode !== "swarm" && armMode !== "single") {
+    console.error(
+      `${c.red}ORCHESTRA_EVAL_SWARM_MODE="${armMode}" is invalid — expected "swarm" or "single" (or unset).${c.reset}`
+    );
+    process.exit(2);
+  }
+  if (armMode && process.env.NODE_ENV === "production") {
+    console.error(
+      `${c.red}ORCHESTRA_EVAL_SWARM_MODE is dev-only and ignored under NODE_ENV=production — refusing to run a mislabeled arm.${c.reset}`
+    );
+    process.exit(2);
+  }
+
   const { cases, errors } = await loadAllCases();
 
   if (opts.jsonOnly === false) {
@@ -74,6 +91,13 @@ async function main(): Promise<void> {
     console.log(`${c.dim}Loaded ${cases.length} cases${
       opts.useRealAgent ? ` (real agent: ON)` : " (mock-only)"
     }${c.reset}`);
+    if (armMode) {
+      console.log(
+        `${c.bold}${c.yellow}Swarm arm: ${armMode.toUpperCase()}${c.reset}${c.dim} (ORCHESTRA_EVAL_SWARM_MODE forces every case ${
+          armMode === "swarm" ? "into the full MoA ensemble" : "to a single agent"
+        })${c.reset}`
+      );
+    }
     if (errors.length > 0) {
       console.log(`${c.red}${errors.length} case file(s) failed to load:${c.reset}`);
       for (const e of errors) {
@@ -121,6 +145,18 @@ async function main(): Promise<void> {
     console.log(
       `${summaryColor}${c.bold}Summary: ${suite.passed}/${suite.totalCases} passed, ${suite.failed} failed, ${suite.errored} errored${c.reset}`
     );
+    if (suite.vacuous > 0) {
+      console.log(
+        `${c.yellow}⚠ ${suite.vacuous} case(s) passed VACUOUSLY (all assertions skipped — judge-only case in mock mode; nothing verified). Run with --real to actually score them.${c.reset}`
+      );
+    }
+    if (suite.noAnswer > 0) {
+      const delivered = suite.totalCases - suite.noAnswer - suite.errored;
+      const deliveredPass = suite.cases.filter((r) => r.passed && !r.noAnswer).length;
+      console.log(
+        `${c.yellow}⚠ ${suite.noAnswer}/${suite.totalCases} case(s) returned NO ANSWER (empty response — a DELIVERY failure, not a wrong answer). Delivered-only score: ${deliveredPass}/${delivered}. Do NOT read a delivery gap as a capability gap.${c.reset}`
+      );
+    }
     console.log(`${c.dim}Full results: ${path.relative(process.cwd(), resultsFile)}${c.reset}`);
   }
 

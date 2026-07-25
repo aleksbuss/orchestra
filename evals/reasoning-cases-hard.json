@@ -1,0 +1,82 @@
+[
+  {
+    "id": "h01",
+    "q": "How many integers from 1 to 10000 inclusive are divisible by NONE of 2, 3, 5, or 7? Give a single number.",
+    "answer": "2285"
+  },
+  {
+    "id": "h02",
+    "q": "What is 3^200 mod 1000? Give a single number.",
+    "answer": "1"
+  },
+  {
+    "id": "h03",
+    "q": "How many distinct ways can you make exactly $2.00 (200 cents) using any number of coins worth 1, 5, 10, 25, and 50 cents? Give a single number.",
+    "answer": "2435"
+  },
+  {
+    "id": "h04",
+    "q": "What is the 500th prime number? Give a single number.",
+    "answer": "3571"
+  },
+  {
+    "id": "h05",
+    "q": "How many integers from 1 to 1000000 inclusive are perfect squares, perfect cubes, or both? Give a single number.",
+    "answer": "1090"
+  },
+  {
+    "id": "h06",
+    "q": "In how many ways can 10 identical balls be placed into 4 distinct boxes so that no box is empty? Give a single number.",
+    "answer": "84"
+  },
+  {
+    "id": "h07",
+    "q": "What is the sum of all positive divisors of 10000 (including 1 and 10000)? Give a single number.",
+    "answer": "24211"
+  },
+  {
+    "id": "h08",
+    "q": "How many trailing zeros does 1000! (1000 factorial) have? Give a single number.",
+    "answer": "249"
+  },
+  {
+    "id": "h09",
+    "q": "What is the last digit (units digit) of 7^(7^7), i.e. 7 raised to the power (7 raised to the 7)? Give a single number.",
+    "answer": "3"
+  },
+  {
+    "id": "h10",
+    "q": "How many of the 2598960 possible 5-card poker hands from a standard 52-card deck are flushes (all five cards the same suit, INCLUDING straight flushes)? Give a single number.",
+    "answer": "5148"
+  },
+  {
+    "id": "h11",
+    "q": "What is the greatest common divisor of 123456 and 789012? Give a single number.",
+    "answer": "12"
+  },
+  {
+    "id": "h12",
+    "q": "How many integers n with 1 <= n <= 1000 are coprime to 1000 (share no common factor > 1 with 1000)? Give a single number.",
+    "answer": "400"
+  },
+  {
+    "id": "h13",
+    "q": "How many 3-digit numbers (from 100 to 999 inclusive) have digits that sum to exactly 13? Give a single number.",
+    "answer": "69"
+  },
+  {
+    "id": "h14",
+    "q": "What is the coefficient of x^5 in the expansion of (1+x)^12? Give a single number.",
+    "answer": "792"
+  },
+  {
+    "id": "h15",
+    "q": "How many distinct necklaces can be formed with 6 beads in a circle using 2 colors, where rotations are considered identical (but reflections are distinct)? Give a single number.",
+    "answer": "14"
+  },
+  {
+    "id": "h16",
+    "q": "What is the sum of the first 20 prime numbers? Give a single number.",
+    "answer": "639"
+  }
+]

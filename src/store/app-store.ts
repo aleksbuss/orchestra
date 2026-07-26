@@ -5,6 +5,7 @@ import { persist } from "zustand/middleware";
 import type { ChatListItem, Project } from "@/lib/types";
 import type { PresetTier } from "@/lib/agent/presets";
 import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
+import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
 
 interface AppState {
   // Chats
@@ -57,6 +58,15 @@ interface AppState {
    */
   deepAudit: boolean;
   setDeepAudit: (enabled: boolean) => void;
+  /**
+   * Free-tier failover Sprint 4 — what Orchestra may do when the configured
+   * model will not answer. `speed` substitutes a healthy configured model and
+   * says so; `quality` never substitutes; `ask` never substitutes and offers the
+   * choice in the turn's closing notice. Global sticky panel state, sent per
+   * request. Background runs always behave as `speed`.
+   */
+  degradationPolicy: DegradationPolicy;
+  setDegradationPolicy: (policy: DegradationPolicy) => void;
 
   // Model Presets
   activePreset: PresetTier;
@@ -98,11 +108,13 @@ export const useAppStore = create<AppState>()(
       forceSwarm: false,
       skepticModelOverride: null,
       deepAudit: false,
+      degradationPolicy: "speed" as DegradationPolicy,
       setSwarmEnabled: (enabled) => set({ swarmEnabled: enabled }),
       setDaemonMode: (enabled) => set({ daemonMode: enabled }),
       setForceSwarm: (enabled) => set({ forceSwarm: enabled }),
       setSkepticModelOverride: (override) => set({ skepticModelOverride: override }),
       setDeepAudit: (enabled) => set({ deepAudit: enabled }),
+      setDegradationPolicy: (policy) => set({ degradationPolicy: policy }),
 
       // Model Presets — default to "custom" so we never accidentally override
       // the user's manually-configured model with a preset that requires
@@ -121,6 +133,7 @@ export const useAppStore = create<AppState>()(
         forceSwarm: state.forceSwarm,
         skepticModelOverride: state.skepticModelOverride,
         deepAudit: state.deepAudit,
+        degradationPolicy: state.degradationPolicy,
         activePreset: state.activePreset,
       }),
     }

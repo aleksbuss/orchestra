@@ -43,6 +43,11 @@ import {
   recordModelSuccess,
 } from "@/lib/agent/model-health";
 import { abortableSleep } from "@/lib/agent/proposer-pacing";
+import {
+  allowsModelSubstitution,
+  undeliverableNotice,
+  type DegradationPolicy,
+} from "@/lib/agent/degradation-policy";
 
 /** Backoff before the single brain retry (jittered — see `emptyBackoffMs` in moa.ts). */
 function retryBackoffMs(): number {
@@ -66,6 +71,13 @@ export interface FinalAnswerAttemptArgs {
   brainConfig?: ModelConfig;
   projectId?: string;
   currentPath?: string;
+  /**
+   * Sprint 4 — what this run may do when the brain will not answer. `speed`
+   * (default) substitutes a healthy configured model; `quality`/`ask` keep the
+   * user's model and report honestly. Resolved by the caller (background runs
+   * are forced to `speed`).
+   */
+  degradationPolicy?: DegradationPolicy;
 }
 
 export interface FinalAnswerResult {
@@ -187,7 +199,13 @@ export async function generateFinalAnswerWithFailover(
   }
 
   // ── Attempt 3 — a healthy substitute from the operator's own settings ──────
-  if (!brainConfig) return { text: "", usage, notice: UNDELIVERABLE_NOTICE };
+  const policy: DegradationPolicy = args.degradationPolicy ?? "speed";
+  const endpointLabel = brainConfig
+    ? `${brainConfig.provider}/${brainConfig.model}`
+    : "the configured model";
+  if (!brainConfig) {
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
+  }
 
   // Pick the first pool model that is not itself tripped and is not the brain.
   //
@@ -203,7 +221,18 @@ export async function generateFinalAnswerWithFailover(
   );
   if (!substitute) {
     // Nothing healthier to try (empty pool, or everything tripped).
-    return { text: "", usage, notice: UNDELIVERABLE_NOTICE };
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
+  }
+
+  // Sprint 4 — the user may have chosen NOT to be silently switched. A
+  // substituted model is a DIFFERENT model, so its answer is different work;
+  // under `quality`/`ask` we stop here and say so rather than deciding for them.
+  if (!allowsModelSubstitution(policy)) {
+    console.warn(
+      `[Agent] Final answer — ${endpointLabel} delivered nothing and degradation policy is ` +
+        `"${policy}"; NOT substituting ${substitute.provider}/${substitute.model}.`
+    );
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, true) };
   }
   console.warn(
     `[Agent] Final answer — ${brainConfig.provider}/${brainConfig.model} delivered nothing; ` +
@@ -221,7 +250,7 @@ export async function generateFinalAnswerWithFailover(
       `[Agent] Could not build the substitute model ${substitute.provider}/${substitute.model}: ` +
         (error instanceof Error ? error.message : String(error))
     );
-    return { text: "", usage, notice: UNDELIVERABLE_NOTICE };
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
   }
 
   const third = await attemptOnce(substituteModel, args, substitute);
@@ -236,17 +265,15 @@ export async function generateFinalAnswerWithFailover(
     };
   }
 
-  return { text: "", usage, notice: UNDELIVERABLE_NOTICE };
+  return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
 }
 
 /**
  * Deterministic, system-authored notice for a turn no model could answer.
  *
- * Says WHAT happened and WHAT to do. The alternative — the pre-Sprint-3
- * behaviour — was returning an empty string, which renders as a blank turn and
- * is indistinguishable from a bug in Orchestra.
+ * Re-exported from `degradation-policy.ts`, which owns the wording per policy —
+ * this is the "nothing left to try" case, identical for every policy. Says WHAT
+ * happened and WHAT to do; the alternative (pre-Sprint-3) was an empty string,
+ * which renders as a blank turn indistinguishable from an Orchestra bug.
  */
-export const UNDELIVERABLE_NOTICE =
-  "[Agent] Every model returned an empty response for this turn. Free/shared endpoints " +
-  "are commonly rate-limited under load — press Continue to retry, or switch to a more " +
-  "reliable model in Settings → Models.";
+export const UNDELIVERABLE_NOTICE = undeliverableNotice("speed", "", false);

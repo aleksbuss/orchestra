@@ -39,6 +39,18 @@ export interface AgentJobPayload {
   skepticModelOverride?: SkepticModelOverride | null;
   /** DDD — per-request Deep Audit (reflection) toggle. Same PM #22 threading. */
   deepAudit?: boolean;
+  /**
+   * Sprint 4 (free-tier failover) — per-request degradation policy. Carried on
+   * the payload for the same PM #22 reasons as the fields above (dispatch,
+   * self-continuation, queue persistence + boot-resume), so a server restart
+   * mid-Auto-Pilot resumes with the user's choice intact.
+   *
+   * NOTE: `runBackgroundJob` passes `isBackground: true`, which makes
+   * `resolveDegradationPolicy` force `speed` regardless — an unattended run has
+   * nobody to read a "try again later" notice. The field is still carried so the
+   * value survives a resume and is visible in the persisted queue entry.
+   */
+  degradationPolicy?: "speed" | "quality" | "ask";
   preset?: PresetTier;
 }
 

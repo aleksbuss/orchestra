@@ -374,6 +374,19 @@ describe("POST /api/chat — DDD Skeptic override forwarding + boundary validati
     expect(vi.mocked(runAgent).mock.calls[0][0].deepAudit).toBeUndefined();
   });
 
+  it("forwards a valid degradationPolicy; ignores an invalid one (wire boundary)", async () => {
+    vi.mocked(runAgent).mockResolvedValue(fakeRunAgentResult() as never);
+    await POST(buildRequest({ chatId: "c1", message: "hi", degradationPolicy: "quality" }));
+    expect(vi.mocked(runAgent).mock.calls[0][0].degradationPolicy).toBe("quality");
+
+    // A malformed client must never be able to change what Orchestra is
+    // allowed to substitute — an unknown value falls back to the settings
+    // default rather than reaching the agent.
+    vi.mocked(runAgent).mockClear();
+    await POST(buildRequest({ chatId: "c1", message: "hi", degradationPolicy: "FASTEST" }));
+    expect(vi.mocked(runAgent).mock.calls[0][0].degradationPolicy).toBeUndefined();
+  });
+
   it("background dispatch carries the override + deepAudit (PM #22 — every path)", async () => {
     vi.mocked(getChat).mockResolvedValue({
       id: "c1",
@@ -391,6 +404,21 @@ describe("POST /api/chat — DDD Skeptic override forwarding + boundary validati
     const job = vi.mocked(dispatchAgentJob).mock.calls[0][0];
     expect(job.skepticModelOverride).toEqual({ provider: "ollama", model: "qwen3:8b" });
     expect(job.deepAudit).toBe(true);
+  });
+
+  it("background dispatch carries degradationPolicy too (PM #22 — every path)", async () => {
+    vi.mocked(getChat).mockResolvedValue({ id: "c1", messages: [] } as never);
+    await POST(
+      buildRequest({
+        chatId: "c1",
+        message: "hi",
+        background: true,
+        degradationPolicy: "ask",
+      })
+    );
+    // Carried so it survives queue persistence + a boot-resume. The daemon
+    // still forces `speed` at run time (nobody is there to answer an "ask").
+    expect(vi.mocked(dispatchAgentJob).mock.calls[0][0].degradationPolicy).toBe("ask");
   });
 });
 

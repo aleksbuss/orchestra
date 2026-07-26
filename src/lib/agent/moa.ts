@@ -80,6 +80,11 @@ import {
   computeStaggerMs,
   withFreeTierPacing,
 } from "@/lib/agent/proposer-pacing";
+import {
+  allowsModelSubstitution,
+  resolveDegradationPolicy,
+  type DegradationPolicy,
+} from "@/lib/agent/degradation-policy";
 export { createWindowResolver } from "@/lib/agent/moa-window";
 
 
@@ -175,6 +180,17 @@ export interface MoAOptions {
   skepticModelOverride?: SkepticModelOverride | null;
   /** DDD — per-request Deep Audit (reflection) toggle; overrides settings. */
   deepAudit?: boolean;
+  /**
+   * Sprint 4 — per-request degradation policy; overrides `settings`. Governs
+   * whether a dead proposer endpoint may be SUBSTITUTED with another configured
+   * model (`speed`) or must be left alone (`quality`/`ask`).
+   */
+  degradationPolicy?: DegradationPolicy;
+  /**
+   * True for unattended runs (Auto-Pilot, cron, external triggers). Forces the
+   * policy to `speed`: nobody is there to read "try again later".
+   */
+  background?: boolean;
 }
 
 export interface MoAResult {
@@ -420,6 +436,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // resolved server-side (`resolveWorkerKey`) so a substitute is dispatchable.
   // Order = quality-descending-ish (frontier → balanced → fast → skeptic →
   // worker); `selectHealthyConfig` de-dups and skips open circuits.
+  const degradationPolicy = resolveDegradationPolicy(
+    settings,
+    options.degradationPolicy,
+    { background: options.background }
+  );
+  const substitutionAllowed = allowsModelSubstitution(degradationPolicy);
+  if (!substitutionAllowed) {
+    console.log(
+      `[MoA] Degradation policy "${degradationPolicy}" — proposer model substitution is OFF for this run.`
+    );
+  }
+
   const failoverPool: ModelConfig[] = [
     settings.proposerTiers?.frontier,
     settings.proposerTiers?.balanced,
@@ -499,7 +527,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     // The substitution is LOUD — both stdout and the DAG node — because a
     // silent model swap is indistinguishable from a healthy run (the
     // `degradedToSingleAgent` lesson).
-    const healthy = selectHealthyConfig(preferredConfig, failoverPool, index);
+    // Sprint 4 — a substituted model is a DIFFERENT model, so under
+    // `quality`/`ask` the user has told us not to swap silently: keep their
+    // configured endpoint and let this proposer fail if it must (the ensemble
+    // survives on the other drafts). `speed` (the default) substitutes.
+    const healthy = substitutionAllowed
+      ? selectHealthyConfig(preferredConfig, failoverPool, index)
+      : { config: preferredConfig, substituted: false as const };
     const proposerConfig = healthy.config;
     if (healthy.substituted) {
       console.warn(

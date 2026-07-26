@@ -1152,6 +1152,12 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           settings,
           stepLimitReached,
           abortSignal: options.abortSignal,
+          // Free-tier track Sprint 3 — the endpoint identity the forced
+          // final-answer path needs to track health against and to substitute
+          // away from when it delivers nothing.
+          brainConfig: resolvedModelConfig,
+          projectId: options.projectId,
+          currentPath: options.currentPath,
         });
         const continuationText = turnExtra.text;
         const continuationUsage = turnExtra.usage;

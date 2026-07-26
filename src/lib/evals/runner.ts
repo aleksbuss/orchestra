@@ -170,11 +170,7 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
     if (!chat) {
       throw new Error(`Chat ${chatId} disappeared after runAgent`);
     }
-    // Last assistant message wins. Concatenate text content.
-    const lastAssistant = [...chat.messages].reverse().find(
-      (m) => m.role === "assistant"
-    );
-    return typeof lastAssistant?.content === "string" ? lastAssistant.content : "";
+    return extractDeliveredAnswer(chat.messages);
   } finally {
     // Best-effort cleanup; ignore failures.
     try {
@@ -183,6 +179,43 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
       /* ignore */
     }
   }
+}
+
+/**
+ * Pull the answer the agent actually DELIVERED out of a persisted chat.
+ *
+ * MEASUREMENT BUG THIS FIXES (2026-07-26): the old extraction was "last
+ * assistant message wins", which silently scored a delivered answer as EMPTY
+ * whenever the model answered through the `response` tool (PM #61's delivery
+ * path). In that shape the last assistant message is the tool-CALL carrier with
+ * `content: ""`, and the answer text lives in the following `role: "tool"`
+ * message. Two cases in a live free-tier run were recorded as delivery failures
+ * while their chats on disk held 101- and 780-character answers — so the eval
+ * was measuring its own extraction, not the agent's delivery, and any
+ * "delivery rate" derived from it was partly an artifact.
+ *
+ * Order: the last `response`-tool result (the explicit final-answer channel),
+ * else the last assistant message with non-empty text. Anything else is a
+ * genuine non-delivery.
+ */
+export function extractDeliveredAnswer(
+  messages: Array<{ role: string; content?: unknown; toolName?: string }>
+): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "tool" && m.toolName === "response") {
+      const text = typeof m.content === "string" ? m.content.trim() : "";
+      if (text) return text;
+    }
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "assistant") {
+      const text = typeof m.content === "string" ? m.content.trim() : "";
+      if (text) return text;
+    }
+  }
+  return "";
 }
 
 /**

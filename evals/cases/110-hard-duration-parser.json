@@ -1,0 +1,64 @@
+{
+  "id": "110-hard-duration-parser",
+  "description": "Parser with 11 constraints including a banned import, an exact error string and a structured docstring.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python function `parse_duration` that converts a duration string like \"1h30m\", \"45s\", \"2h\", \"10m5s\" into an integer number of SECONDS.\nRequirements — ALL must hold:\n1. Name it exactly `parse_duration`.\n2. Full type hints: it takes a `str` and returns an `int`.\n3. Do NOT import or use the `re` module (no regular expressions anywhere).\n4. Support the units h, m and s, in any combination and any order.\n5. Return an `int`, never a float.\n6. On malformed input raise `ValueError` whose message is exactly `invalid duration: <the input>` (use an f-string).\n7. An empty string is malformed and must raise that same ValueError.\n8. Reject a negative number anywhere in the input.\n9. The docstring must contain `Args:`, `Returns:` and `Raises:` sections.\n10. Do not use `eval` or `exec`.\n11. Standard library only.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+parse_duration\\s*\\(\\s*\\w+\\s*:\\s*str"
+    },
+    {
+      "type": "matches",
+      "pattern": "->\\s*int"
+    },
+    {
+      "type": "not_contains",
+      "value": "import re"
+    },
+    {
+      "type": "not_contains",
+      "value": "re.match"
+    },
+    {
+      "type": "matches",
+      "pattern": "[\"']h[\"']"
+    },
+    {
+      "type": "matches",
+      "pattern": "[\"']m[\"']"
+    },
+    {
+      "type": "matches",
+      "pattern": "[\"']s[\"']"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "invalid duration:\\s*\\{"
+    },
+    {
+      "type": "matches",
+      "pattern": "Args:"
+    },
+    {
+      "type": "matches",
+      "pattern": "Returns:"
+    },
+    {
+      "type": "matches",
+      "pattern": "Raises:"
+    }
+  ]
+}

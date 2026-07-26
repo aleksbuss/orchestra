@@ -3,7 +3,6 @@
   "description": "JS utility with 6 independent constraints (naming, JSDoc, immutability, empty input, no var, order preservation).",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

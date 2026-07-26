@@ -35,7 +35,7 @@ arms into every results file so an arm cannot be mislabeled afterwards.
 
 | Parameter | Value | Why it is declared |
 |---|---|---|
-| Model — brain, proposers, Router, tournament judges | `openrouter/deepseek/deepseek-chat` | ONE model everywhere. Model heterogeneity is a separate variable and is not what is being tested. Chosen for reliable delivery (free tiers 429 under parallel load, and delivery noise would swamp the signal) while still being weak enough to leave headroom. |
+| Model — brain, proposers, Router, tournament judges | `openrouter/inclusionai/ling-3.0-flash:free` **(amended 2026-07-26, see Addendum 1)** | ONE model everywhere. Model heterogeneity is a separate variable and is not what is being tested. A FREE model is the operator's actual production regime — the whole free-tier failover stack exists for it — so testing on a paid model would have measured a configuration nobody runs. |
 | Proposer temperature | **0.7** | At T=0 the self-MoA arms produce N identical drafts and the whole comparison collapses. |
 | Brain temperature | 0.7 | Orchestra's default. |
 | Router temperature | 0.3 | The Router is not under test; low temperature keeps persona *headcount* stable across arms. |
@@ -115,6 +115,53 @@ five arms. If the pilot shows the total exceeding that, repeats drop to 2 for EV
 (never for some arms only), and this line is amended before any scored arm runs.
 
 ---
+
+## Addendum 1 — calibration, 2026-07-26 (before any scored arm)
+
+Three things changed between pre-registration and the scored run. All are recorded
+here rather than edited silently into the text above; the one scored arm that ran
+before these changes (a control round on the easy case set) was DISCARDED, not kept.
+
+**1. The model is now free, not paid.** The first pilots ran on
+`deepseek/deepseek-chat` (paid), chosen for delivery reliability. That was the wrong
+call: Orchestra's free-tier failover stack — retry-on-empty, circuit breaker,
+endpoint-aware pacing, the brain's delivery ladder — exists *because* the operator
+runs free models, so an experiment on a paid model measures a configuration that is
+never used. Switched to `inclusionai/ling-3.0-flash:free` for every role (brain,
+proposers, Router, judges), which also restores the "one model everywhere" rule with
+no exception. Total paid spend before the switch: ≈ $0.12.
+
+**2. Enumerated-constraint tasks are SATURATED — they cannot answer the question.**
+Two case sets were built and both ceilinged on the control (single-agent) arm:
+
+| Case set | Constraints/case | Control mean score |
+|---|---|---|
+| 11 cases, 5–6 explicit constraints (`90`–`100`) | 6 | **1.0000** (66/66) |
+| 11 cases, 10–14 explicit constraints incl. banned imports, exact error strings, structured docstrings (`110`–`120`) | 12 | **0.9917** |
+
+The second set ceilinged on the FREE model too, at ~7 s/case. Spot-checking the
+responses confirmed this is real capability, not a weak checker: the 2.8-second
+answer to "thread-safe O(1) LRU cache, 12 constraints, no `functools.lru_cache`" was
+a fully correct `OrderedDict` + `Lock` implementation. **When requirements are
+enumerated explicitly, a current model — free tier included — simply satisfies them,
+and there is no headroom for any aggregation strategy to demonstrate anything.**
+This is itself a finding worth keeping: it rules out the entire "multi-constraint
+authoring" task class as an instrument for measuring swarm value, and it is the most
+likely reason earlier constraint-style A/Bs found nothing.
+
+**3. Cases are therefore selected by measured difficulty**, from the corpora built to
+catch failure (fact-traps, sycophancy pressure, agentic/tool cases) rather than
+authored to be long. A calibration pass runs the control arm ONCE over the whole
+corpus; cases where the control does not already score 1.0 form the experiment set.
+
+*Why this does not rig the result:* selecting cases where control failed would bias
+the ABSOLUTE level of every arm upward on re-run (regression to the mean), but every
+arm — **including a freshly re-run control** — is measured on the same selected cases
+with new runs. The calibration data is never reused as an arm's score. Regression to
+the mean therefore moves all arms together and cancels in the paired contrasts,
+which are the only quantities the decision rules read. What it does cost is external
+validity: the arm means describe *hard* cases, not the average case, so the headline
+must always be reported as a contrast, never as "the swarm scores X%".
 
 ## Results
 

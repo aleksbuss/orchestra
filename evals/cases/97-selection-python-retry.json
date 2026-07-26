@@ -3,7 +3,6 @@
   "description": "Retry helper with 6 constraints (backoff, jitter, cap, exception filter, hints, docstring).",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

@@ -3,7 +3,6 @@
   "description": "API endpoint spec with 6 prose-level constraints (format-insensitive but checkable).",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

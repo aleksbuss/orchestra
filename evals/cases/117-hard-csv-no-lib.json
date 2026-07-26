@@ -1,0 +1,60 @@
+{
+  "id": "117-hard-csv-no-lib",
+  "description": "Manual CSV line parser with 11 constraints and a banned stdlib module.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python function `split_csv_line` that splits ONE line of CSV into a list of fields.\nRequirements — ALL must hold:\n1. Name it exactly `split_csv_line`; type hints `(line: str) -> list[str]`.\n2. Do NOT import the `csv` module and do NOT use `re` — parse it character by character.\n3. Handle quoted fields: `\"a,b\",c` is two fields.\n4. Handle an escaped double quote inside a quoted field (`\"\"` means one literal `\"`).\n5. A comma inside quotes is NOT a separator.\n6. Preserve leading/trailing spaces in unquoted fields exactly as they appear.\n7. An empty line returns `[\"\"]` (a single empty field), not `[]`.\n8. A trailing comma produces a final empty field.\n9. Raise `ValueError` on an unterminated quoted field.\n10. Include a docstring with at least one usage example.\n11. Standard library only, no third-party imports.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+split_csv_line\\s*\\(\\s*line\\s*:\\s*str"
+    },
+    {
+      "type": "matches",
+      "pattern": "->\\s*(list|List)\\s*\\[\\s*str\\s*\\]"
+    },
+    {
+      "type": "not_contains",
+      "value": "import csv"
+    },
+    {
+      "type": "not_contains",
+      "value": "import re"
+    },
+    {
+      "type": "matches",
+      "pattern": "for\\s+\\w+\\s+in\\s+line|while\\s+\\w+\\s*<\\s*len\\s*\\(\\s*line"
+    },
+    {
+      "type": "matches",
+      "pattern": "in_quotes|in_quote|quoted|inside_quotes"
+    },
+    {
+      "type": "matches",
+      "pattern": "'\"'|\\\\\"\\\\\"|\"\\\\\"\""
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "append"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    },
+    {
+      "type": "matches",
+      "pattern": ">>>|Example|example"
+    }
+  ]
+}

@@ -3,7 +3,6 @@
   "description": "Shell script with 6 hardening constraints a single pass typically half-satisfies.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

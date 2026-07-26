@@ -1,0 +1,64 @@
+{
+  "id": "111-hard-lru-cache",
+  "description": "LRU cache class with 12 constraints including a banned stdlib shortcut and thread safety.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python class `LRUCache` implementing a least-recently-used cache.\nRequirements — ALL must hold:\n1. Class named exactly `LRUCache`.\n2. Constructor takes `capacity: int`; raise `ValueError` if capacity < 1.\n3. Do NOT use `functools.lru_cache` — implement the eviction yourself.\n4. `get(key)` returns the value or `None` if absent, and marks the key most-recently-used.\n5. `put(key, value)` inserts or updates; updating an existing key must also mark it most-recently-used.\n6. When capacity is exceeded, evict the LEAST recently used entry.\n7. Both `get` and `put` must be O(1) — use `collections.OrderedDict` (or a dict + doubly linked list).\n8. Implement `__len__`.\n9. Guard all mutations with a `threading.Lock` so the cache is thread-safe.\n10. Full type hints on every method signature.\n11. A class docstring, and a comment stating the O(1) complexity.\n12. Standard library only.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "class\\s+LRUCache"
+    },
+    {
+      "type": "not_contains",
+      "value": "lru_cache"
+    },
+    {
+      "type": "matches",
+      "pattern": "OrderedDict|_DoublyLinked|prev.*next|Node"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "capacity\\s*<\\s*1|capacity\\s*<=\\s*0|not\\s+.*capacity\\s*>=\\s*1"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+get\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+put\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "move_to_end|popitem|_move|remove"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__len__"
+    },
+    {
+      "type": "matches",
+      "pattern": "threading\\.Lock|Lock\\(\\)"
+    },
+    {
+      "type": "matches",
+      "pattern": "with\\s+self\\._?lock"
+    },
+    {
+      "type": "matches",
+      "pattern": "O\\(\\s*1\\s*\\)"
+    }
+  ]
+}

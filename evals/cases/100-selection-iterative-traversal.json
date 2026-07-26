@@ -3,7 +3,6 @@
   "description": "Recursion→iteration conversion with 6 constraints including an explicit complexity note.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

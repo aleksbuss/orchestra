@@ -716,6 +716,42 @@ describe("free-tier failover Sprint 1 — model circuit breaker in the proposer 
     expect(isModelCircuitOpen("openrouter", DEAD)).toBe(false);
   }, 30_000);
 
+  it("Sprint 4 — degradationPolicy=quality does NOT substitute a dead proposer model", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", DEAD, "empty");
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(true);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+      degradationPolicy: "quality",
+    });
+
+    // The user asked us NOT to swap models. The dead tier model is still what
+    // the proposers dial — the ensemble survives on whatever drafts come back.
+    expect(createdModels()).toContain(DEAD);
+  }, 30_000);
+
+  it("Sprint 4 — a BACKGROUND run substitutes even under quality (nobody to ask)", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", DEAD, "empty");
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+      degradationPolicy: "quality",
+      background: true,
+    });
+
+    expect(createdModels()).not.toContain(DEAD);
+  }, 30_000);
+
   it("a provider error DOES open the circuit (classified, not swallowed)", async () => {
     process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1";
     threePersonas();

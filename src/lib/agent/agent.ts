@@ -7,6 +7,10 @@ import {
   type PrepareStepFunction,
 } from "ai";
 import { buildBoundedRecallBlock, resolveRecallBudgetChars } from "@/lib/agent/deep-recall";
+import {
+  resolveDegradationPolicy,
+  type DegradationPolicy,
+} from "@/lib/agent/degradation-policy";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
@@ -373,6 +377,14 @@ export interface RunAgentOptions {
    * `settings.reflection.enabled` for this run only. PM #22: same threading.
    */
   deepAudit?: boolean;
+  /**
+   * Sprint 4 (free-tier failover) — per-request degradation policy. Governs
+   * whether Orchestra may substitute another configured model when the chosen
+   * one will not answer. PM #22: same threading as `forceSwarm`/`deepAudit`
+   * (interactive stream + background dispatch + queue persistence + daemon
+   * continuation). Unattended runs are forced to `speed` via `isBackground`.
+   */
+  degradationPolicy?: DegradationPolicy;
   isBackground?: boolean;
   abortSignal?: AbortSignal;
   preset?: PresetTier;
@@ -748,6 +760,8 @@ export async function runAgent(options: RunAgentOptions) {
         forceSwarm: options.forceSwarm,
         skepticModelOverride: options.skepticModelOverride,
         deepAudit: options.deepAudit,
+        degradationPolicy: options.degradationPolicy,
+        background: options.isBackground,
       });
       turnExtraUsage = moaResult.cumulativeUsage;
 
@@ -1158,6 +1172,11 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           brainConfig: resolvedModelConfig,
           projectId: options.projectId,
           currentPath: options.currentPath,
+          degradationPolicy: resolveDegradationPolicy(
+            settings,
+            options.degradationPolicy,
+            { background: options.isBackground }
+          ),
         });
         const continuationText = turnExtra.text;
         const continuationUsage = turnExtra.usage;

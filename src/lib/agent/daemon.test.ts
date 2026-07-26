@@ -260,6 +260,41 @@ describe("PM #7 — production setTimeout path (integration; Defect #6 from 2026
     abortJob(chatId);
   });
 
+  it("PM #22 — degradationPolicy reaches runAgent AND the persisted queue entry", async () => {
+    // Same threading rule as forceSwarm / deepAudit / skepticModelOverride. The
+    // daemon additionally passes `isBackground: true`, which forces the policy
+    // to `speed` at resolve time — but the user's value must still SURVIVE the
+    // round-trip so a restart mid-Auto-Pilot resumes with it intact.
+    const chatId = "sprint4-degradation-policy-background";
+
+    vi.mocked(runAgent).mockResolvedValue({
+      text: Promise.resolve("done"),
+    } as unknown as Awaited<ReturnType<typeof runAgent>>);
+    vi.mocked(getActiveGoal).mockResolvedValue(null);
+
+    await dispatchAgentJob({
+      chatId,
+      userMessage: "hello",
+      swarmEnabled: true,
+      degradationPolicy: "quality",
+    });
+
+    await vi.waitFor(
+      () => {
+        expect(runAgent).toHaveBeenCalledWith(
+          expect.objectContaining({ degradationPolicy: "quality", isBackground: true })
+        );
+      },
+      { timeout: 1000, interval: 10 }
+    );
+
+    expect(enqueueJob).toHaveBeenCalledWith(
+      expect.objectContaining({ degradationPolicy: "quality" })
+    );
+
+    abortJob(chatId);
+  });
+
   it("an auto-pilot continuation dispatch INCREMENTS the counter (does not reset to 1)", async () => {
     // review bug_001: abortJob unconditionally wiped autoPilotIterations, and
     // dispatchAgentJob calls abortJob first — so the continuation path cycled

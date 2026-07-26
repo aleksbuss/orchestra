@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { isDegradationPolicy } from "@/lib/agent/degradation-policy";
 import { runAgent } from "@/lib/agent/agent";
 import { isValidSkepticOverride, type SkepticModelOverride } from "@/lib/agent/moa";
 import { createChat, getChat, saveChat } from "@/lib/storage/chat-store";
@@ -54,6 +55,13 @@ export async function POST(req: NextRequest) {
       }
       const deepAudit: boolean | undefined =
         typeof body.deepAudit === "boolean" ? body.deepAudit : undefined;
+      // Sprint 4 (free-tier failover) — per-request degradation policy. Validated
+      // at the wire boundary: an unknown string falls back to the settings
+      // default rather than reaching the agent, so a malformed client can never
+      // change what Orchestra is allowed to substitute.
+      const degradationPolicy = isDegradationPolicy(body.degradationPolicy)
+        ? body.degradationPolicy
+        : undefined;
 
       // Support AI SDK's DefaultChatTransport format which sends a `messages` array
       if (!message && Array.isArray(body.messages)) {
@@ -168,6 +176,7 @@ export async function POST(req: NextRequest) {
           forceSwarm: forceSwarm === true,
           skepticModelOverride,
           deepAudit,
+          degradationPolicy,
           preset,
         });
 
@@ -192,6 +201,7 @@ export async function POST(req: NextRequest) {
         forceSwarm: forceSwarm === true,
         skepticModelOverride,
         deepAudit,
+        degradationPolicy,
         preset,
         abortSignal: req.signal,
       });

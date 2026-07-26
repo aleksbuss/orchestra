@@ -11,6 +11,7 @@ import { generateText, type ModelMessage } from "ai";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
+import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -796,6 +797,8 @@ export async function resolveTurnContinuation(args: {
   brainConfig?: ModelConfig;
   projectId?: string;
   currentPath?: string;
+  /** Sprint 4 — may this turn substitute another configured model? */
+  degradationPolicy?: DegradationPolicy;
 }): Promise<TurnContinuationResult> {
   const {
     responseMessages,
@@ -810,6 +813,7 @@ export async function resolveTurnContinuation(args: {
     brainConfig,
     projectId,
     currentPath,
+    degradationPolicy,
   } = args;
   const lastAssistantText = getLastAssistantText(responseMessages);
   const readUsage = (r: unknown) =>
@@ -897,6 +901,7 @@ export async function resolveTurnContinuation(args: {
       brainConfig,
       projectId,
       currentPath,
+      degradationPolicy,
     });
     const text = unwrapSerializedResponseCall(attempt.text);
     if (text) {

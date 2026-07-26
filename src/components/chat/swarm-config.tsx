@@ -2,7 +2,7 @@
 
 import { useAppStore } from "@/store/app-store";
 import { useShallow } from "zustand/react/shallow";
-import { Users, Plane, Zap, ShieldAlert } from "lucide-react";
+import { Users, Plane, Zap, ShieldAlert, Gauge } from "lucide-react";
 import { PresetSelector } from "./preset-selector";
 import { SkepticSelector } from "./skeptic-selector";
 
@@ -21,8 +21,8 @@ const PILL_IDLE =
   "hover:bg-foreground/[0.06] hover:text-foreground";
 
 export function SwarmConfig() {
-  const { swarmEnabled, daemonMode, forceSwarm, deepAudit, setSwarmEnabled, setDaemonMode, setForceSwarm, setDeepAudit } = useAppStore(
-    useShallow((s) => ({ swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, deepAudit: s.deepAudit, setSwarmEnabled: s.setSwarmEnabled, setDaemonMode: s.setDaemonMode, setForceSwarm: s.setForceSwarm, setDeepAudit: s.setDeepAudit }))
+  const { swarmEnabled, daemonMode, forceSwarm, deepAudit, degradationPolicy, setSwarmEnabled, setDaemonMode, setForceSwarm, setDeepAudit, setDegradationPolicy } = useAppStore(
+    useShallow((s) => ({ swarmEnabled: s.swarmEnabled, daemonMode: s.daemonMode, forceSwarm: s.forceSwarm, deepAudit: s.deepAudit, degradationPolicy: s.degradationPolicy, setSwarmEnabled: s.setSwarmEnabled, setDaemonMode: s.setDaemonMode, setForceSwarm: s.setForceSwarm, setDeepAudit: s.setDeepAudit, setDegradationPolicy: s.setDegradationPolicy }))
   );
 
   return (
@@ -106,6 +106,42 @@ export function SwarmConfig() {
       )}
 
       {swarmEnabled && <SkepticSelector />}
+
+      {/*
+        Free-tier failover Sprint 4 — what Orchestra may do when a configured
+        model will not answer. Cycles speed → quality → ask. A substituted model
+        is a DIFFERENT model, so this is the user's call, not ours; the pill also
+        makes the active policy visible rather than buried in Settings.
+      */}
+      <button
+        type="button"
+        onClick={() =>
+          setDegradationPolicy(
+            degradationPolicy === "speed"
+              ? "quality"
+              : degradationPolicy === "quality"
+                ? "ask"
+                : "speed"
+          )
+        }
+        aria-label={`Degradation policy: ${degradationPolicy}`}
+        title={
+          degradationPolicy === "speed"
+            ? "Speed: when a model will not answer, Orchestra automatically uses another configured model and tells you which one answered. Fastest; quality may vary."
+            : degradationPolicy === "quality"
+              ? "Quality: never substitute another model. Orchestra retries your model and reports honestly if it still will not answer."
+              : "Ask: never substitute silently. Orchestra reports the failure and offers you the choice for the next turn. (Orchestra cannot pause a running turn to ask, so it asks at the end.)"
+        }
+        className={`${PILL_BASE} focus-visible:ring-sky-500/40
+          ${degradationPolicy === "speed"
+            ? PILL_IDLE
+            : "bg-sky-500/10 border-sky-500/40 text-sky-600 dark:text-sky-400"
+          }
+        `}
+      >
+        <Gauge className="w-3.5 h-3.5" />
+        <span className="capitalize">{degradationPolicy}</span>
+      </button>
 
       <button
         type="button"

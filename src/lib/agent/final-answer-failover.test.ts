@@ -250,3 +250,51 @@ describe("buildFinalAnswerPool", () => {
     expect(buildFinalAnswerPool(s)).toHaveLength(0);
   });
 });
+
+describe("degradation policy (Sprint 4)", () => {
+  it("quality mode does NOT substitute — it reports honestly instead", async () => {
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ degradationPolicy: "quality" }));
+
+    expect(out.text).toBe("");
+    // Brain twice, and then a STOP — the healthy substitute is never dialled.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(2);
+    expect(createModel).not.toHaveBeenCalled();
+    expect(out.notice).toMatch(/quality mode/i);
+    expect(out.notice).toContain(BRAIN.model);
+  });
+
+  it("ask mode does NOT substitute either — it offers the choice for the next turn", async () => {
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ degradationPolicy: "ask" }));
+
+    expect(mockedGenerateText).toHaveBeenCalledTimes(2);
+    expect(createModel).not.toHaveBeenCalled();
+    expect(out.notice).toMatch(/speed/);
+  });
+
+  it("speed mode (the default) substitutes", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "substitute answer" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ degradationPolicy: "speed" }));
+
+    expect(out.text).toBe("substitute answer");
+    expect(createModel).toHaveBeenCalled();
+  });
+
+  it("quality mode still RETRIES the user's own model — it only forbids swapping", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "recovered on retry" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ degradationPolicy: "quality" }));
+
+    expect(out.text).toBe("recovered on retry");
+    expect(out.notice).toBeUndefined();
+  });
+});

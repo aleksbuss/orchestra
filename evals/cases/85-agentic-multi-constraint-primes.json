@@ -1,0 +1,29 @@
+{
+  "id": "85-agentic-multi-constraint-primes",
+  "description": "Multi-step + several independent constraints that must ALL hold \u2014 the regime where role specialization should pay off if it pays off anywhere.",
+  "tags": [
+    "agentic",
+    "tools",
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Using the code_execution tool, compute and report: (1) the number of primes below 10000, (2) the sum of those primes, and (3) the largest prime below 10000. Actually run the code \u2014 do not estimate. Report all three numbers explicitly.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[,\\s]?229"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[,\\s]?736[,\\s]?396"
+    },
+    {
+      "type": "matches",
+      "pattern": "9[,\\s]?973"
+    }
+  ]
+}

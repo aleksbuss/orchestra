@@ -1,0 +1,4 @@
+import { generateText } from "ai";
+import { createModel } from "@/lib/providers/llm-provider";
+const M=["poolside/laguna-s-2.1:free","poolside/laguna-xs-2.1:free","cohere/north-mini-code:free","openai/gpt-oss-20b:free","inclusionai/ling-3.0-flash:free","nvidia/nemotron-3-super-120b-a12b:free","nvidia/nemotron-3-nano-30b-a3b:free"];
+(async()=>{for(const m of M){const t=Date.now();try{const{text}=await generateText({model:createModel({provider:"openrouter",model:m}),temperature:0,prompt:"What is 17*23? Last line: 'FINAL ANSWER: X'",maxOutputTokens:600,abortSignal:AbortSignal.timeout(90_000)});const s=(text??"").trim();console.log(`${/391/.test(s)?"✓":"?"} ${m}  ${Date.now()-t}ms ${s.length}ch${s.length?"":" EMPTY"}`);}catch(e){console.log(`✗ ${m}  ${e instanceof Error?e.message.slice(0,60):e}`);}await new Promise(r=>setTimeout(r,1200));}})();

@@ -1,0 +1,29 @@
+{
+  "id": "83-agentic-verify-fib-complexity",
+  "description": "Multi-step agentic + multi-constraint: write code, ACTUALLY RUN it via code_execution, report the verified output, and state complexity. Role headroom: coder / tester / reviewer.",
+  "tags": [
+    "agentic",
+    "tools",
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a Python function fib_sum(n) that returns the sum of the first n Fibonacci numbers (starting 1, 1, 2, 3, 5...). Then ACTUALLY RUN it with the code_execution tool for n=30 and report the exact number it printed. Also state the time complexity in Big-O notation. Your answer must include: the code, the executed result number, and the Big-O.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "2[,\\s]?178[,\\s]?308"
+    },
+    {
+      "type": "matches",
+      "pattern": "O\\(\\s*n\\s*\\)"
+    },
+    {
+      "type": "contains",
+      "value": "def fib_sum"
+    }
+  ]
+}

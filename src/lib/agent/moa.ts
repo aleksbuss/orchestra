@@ -515,14 +515,23 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           guardedProposerTools
         );
 
-        const PROPOSER_TIMEOUT_MS = 120_000; // 2 minutes — generous for free/slow models
+        // Free-tier resilience: a throttled/overloaded free endpoint answers
+        // SLOWLY or returns an EMPTY body with a 200. Both look like "the
+        // proposer produced nothing" and shrink the ensemble below the >=2
+        // successful drafts the synthesis path needs. The timeout is therefore
+        // operator-tunable (ORCHESTRA_PROPOSER_TIMEOUT_MS) and the generation is
+        // retried on an EMPTY result (see PROPOSER_EMPTY_RETRIES below).
+        const PROPOSER_TIMEOUT_MS = Number(
+          process.env.ORCHESTRA_PROPOSER_TIMEOUT_MS ?? 120_000
+        ); // default 2 minutes — generous for free/slow models
         // AbortSignal.any() requires Node 20.3+. Fall back gracefully on older runtimes.
-        let proposerSignal: AbortSignal;
-        if (typeof AbortSignal.any === "function" && abortSignal) {
-          proposerSignal = AbortSignal.any([abortSignal, AbortSignal.timeout(PROPOSER_TIMEOUT_MS)]);
-        } else {
-          proposerSignal = AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
-        }
+        // Rebuilt per attempt so a retry gets a FRESH timeout budget (a reused
+        // expired signal would abort the retry instantly).
+        const buildProposerSignal = (): AbortSignal =>
+          typeof AbortSignal.any === "function" && abortSignal
+            ? AbortSignal.any([abortSignal, AbortSignal.timeout(PROPOSER_TIMEOUT_MS)])
+            : AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
+        let proposerSignal: AbortSignal = buildProposerSignal();
 
         // PM #66 ceiling, lifted out so it feeds BOTH the output cap and the
         // in-flight governor's reserve (Follow-up A3b).
@@ -539,7 +548,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // because tiers (PM #48) can land proposers on different models/windows.
         const proposerContextWindow = await resolveWindow(proposerConfig);
 
+        // Free-tier throttle recovery: attempt the generation, and if the
+        // provider returns an EMPTY body (200 + no text — the signature of a
+        // rate-limited free endpoint), back off and retry. Bounded so a truly
+        // silent model can't stall the fan-out. Errors keep their existing
+        // handling (tool-unsupported retry / Skeptic failover) untouched.
+        const PROPOSER_EMPTY_RETRIES = Number(
+          process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES ?? 2
+        );
         let result;
+        for (let attempt = 0; ; attempt++) {
         try {
           result = await generateText({
             model: workerModel,
@@ -606,6 +624,18 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           } else {
             throw textErr;
           }
+        }
+
+          // Delivered non-empty, or retry budget exhausted -> keep this result.
+          if ((result.text ?? "").trim().length > 0 || attempt >= PROPOSER_EMPTY_RETRIES) break;
+          const backoffMs = 2000 * (attempt + 1);
+          console.warn(
+            `[MoA] Proposer "${proposer.id}" (${resolvedProvider}/${resolvedModel}) returned an EMPTY body ` +
+              `(attempt ${attempt + 1}/${PROPOSER_EMPTY_RETRIES + 1}) — likely free-tier throttle. ` +
+              `Backing off ${backoffMs}ms and retrying.`
+          );
+          await new Promise((r) => setTimeout(r, backoffMs));
+          proposerSignal = buildProposerSignal(); // fresh timeout budget for the retry
         }
 
         const text = result.text?.trim() || "(empty draft)";

@@ -5,6 +5,7 @@ import { CACHE_TTL_MS } from "@/lib/cost/openrouter-pricing";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { isModelKeyConfigured } from "@/lib/providers/llm-provider";
 import { getBrokenChatFiles, getOrphanIndexEntries } from "@/lib/storage/chat-store";
+import { getModelHealthSnapshot } from "@/lib/agent/model-health";
 import { getDataDir, dataPath } from "@/lib/storage/data-dir";
 import {
   assertSafeOutboundUrl,
@@ -380,6 +381,40 @@ export async function GET() {
       name: "utility_model",
       status: "warn",
       detail: `Could not read settings to check the utility model: ${err instanceof Error ? err.message : String(err)}.`,
+    });
+  }
+
+  // 5d. Model-endpoint circuit breakers (free-tier failover, Sprint 1).
+  // A model whose circuit is OPEN is being SKIPPED and substituted on every
+  // proposer dispatch — the run still answers, so the degradation is otherwise
+  // invisible. Surface it: "my swarm feels dumber today" usually means a tier
+  // model is dead and every proposer silently landed on the worker fallback.
+  // In-memory + per-process: an empty list after a restart is normal, not proof
+  // of health.
+  const health = getModelHealthSnapshot();
+  const openCircuits = health.filter((e) => e.openedAt !== null);
+  if (openCircuits.length > 0) {
+    checks.push({
+      name: "model_endpoints",
+      status: "warn",
+      detail:
+        `${openCircuits.length} model endpoint(s) currently SKIPPED by the circuit breaker (proposers substitute a healthy model): ` +
+        openCircuits
+          .map(
+            (e) =>
+              `${e.provider}/${e.model} (${e.consecutiveFailures} consecutive failures, last: ${e.lastFailureKind})`
+          )
+          .join("; ") +
+        ". Free/shared endpoints throttle under parallel fan-out — switch proposerTiers to reliable models, or wait out the cooldown.",
+    });
+  } else {
+    checks.push({
+      name: "model_endpoints",
+      status: "ok",
+      detail:
+        health.length === 0
+          ? "No model dispatches recorded since boot (breaker state is per-process)."
+          : `${health.length} endpoint(s) tracked, none circuit-open.`,
     });
   }
 

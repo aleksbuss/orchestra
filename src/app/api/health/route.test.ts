@@ -169,7 +169,7 @@ describe("GET /api/health — happy path", () => {
     expect(body.product).toBe("Orchestra");
   });
 
-  it("reports all 17 subsystems by name in a stable order", async () => {
+  it("reports all 18 subsystems by name in a stable order", async () => {
     const body = await callHealth();
     const names = body.subsystems.map((s) => s.name);
     expect(names).toEqual([
@@ -193,6 +193,10 @@ describe("GET /api/health — happy path", () => {
       // OpenRouter meta-router pseudo-id (the 2026-07-04 degenerate-swarm
       // incident), and on a keyless specific model.
       "utility_model",
+      // Free-tier failover Sprint 1 — model-endpoint circuit breakers. An OPEN
+      // circuit means proposers are silently substituting a healthy model for a
+      // dead one; without this the only symptom is "the swarm feels dumber".
+      "model_endpoints",
       // PM #30 — chat-file parse integrity surfaced through /api/health so the
       // operator sees "N chats failed to parse on rebuild" instead of silent
       // disappearance from the sidebar.

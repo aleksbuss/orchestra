@@ -1,0 +1,40 @@
+{
+  "id": "94-selection-sql-report",
+  "description": "One SQL statement carrying 6 simultaneous clause-level constraints.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write ONE SQL query against tables `orders(id, customer_id, total, created_at)` and `customers(id, name, country)`.\nRequirements, ALL must hold:\n1. Join orders to customers.\n2. Return the customer name and the SUM of their order totals aliased as `revenue`.\n3. Only include orders created in 2024.\n4. Group by customer.\n5. Exclude customers whose summed revenue is below 1000 (use HAVING, not WHERE, for this).\n6. Order by revenue descending and return only the top 10 rows.\nOutput one SQL code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "\\bjoin\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "sum\\s*\\(\\s*[\\w.]*total\\s*\\)\\s*(as\\s+)?revenue|as\\s+revenue"
+    },
+    {
+      "type": "matches",
+      "pattern": "2024"
+    },
+    {
+      "type": "matches",
+      "pattern": "group\\s+by"
+    },
+    {
+      "type": "matches",
+      "pattern": "having\\b[\\s\\S]{0,60}1000"
+    },
+    {
+      "type": "matches",
+      "pattern": "order\\s+by[\\s\\S]{0,40}desc[\\s\\S]{0,80}limit\\s+10|limit\\s+10"
+    }
+  ]
+}

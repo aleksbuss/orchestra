@@ -1,0 +1,40 @@
+{
+  "id": "96-selection-python-dataclass",
+  "description": "Dataclass with 6 constraints including the mutable-default trap.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a Python dataclass named `Order`.\nRequirements, ALL must hold:\n1. Use the `@dataclass` decorator and make it FROZEN (immutable).\n2. Fields: `id: str`, `items: list[str]`, `total: float`. Full type hints required.\n3. The `items` field must default to an EMPTY list correctly (no mutable default argument bug).\n4. Validate in `__post_init__` that `total` is not negative, raising ValueError if it is.\n5. Include a class docstring.\n6. Do not use any third-party library.\nOutput one Python code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "@dataclass\\s*\\(\\s*frozen\\s*=\\s*True"
+    },
+    {
+      "type": "matches",
+      "pattern": "items\\s*:\\s*(list|List)\\s*\\[\\s*str\\s*\\]"
+    },
+    {
+      "type": "matches",
+      "pattern": "default_factory\\s*=\\s*list"
+    },
+    {
+      "type": "matches",
+      "pattern": "__post_init__"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    }
+  ]
+}

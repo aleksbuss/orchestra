@@ -338,3 +338,140 @@ describe("extractDeliveredAnswer — the delivery metric must measure the AGENT,
     expect(extractDeliveredAnswer(msgs)).toBe("text");
   });
 });
+
+describe("continuous scoring — the primary metric for the selection A/B", () => {
+  const multiConstraint = (mock: string): EvalCase => ({
+    id: "90-multi",
+    description: "4 independent constraints",
+    input: { message: "write it" },
+    mock_response: mock,
+    assertions: [
+      { type: "contains", value: "alpha" },
+      { type: "contains", value: "beta" },
+      { type: "contains", value: "gamma" },
+      { type: "contains", value: "delta" },
+    ],
+  });
+
+  it("scores the FRACTION of constraints satisfied, not just pass/fail", async () => {
+    const r = await runCase(multiConstraint("alpha beta gamma"));
+    expect(r.passed).toBe(false);
+    // Binary would throw this away; 0.75 is the signal the A/B needs.
+    expect(r.score).toBe(0.75);
+    expect(r.constraintsPassed).toBe(3);
+    expect(r.constraintsTotal).toBe(4);
+  });
+
+  it("scores 1 when every constraint holds", async () => {
+    const r = await runCase(multiConstraint("alpha beta gamma delta"));
+    expect(r.passed).toBe(true);
+    expect(r.score).toBe(1);
+  });
+
+  it("scores 0 for a case that errored before assertions ran", async () => {
+    const broken = {
+      ...multiConstraint("x"),
+      assertions: null as unknown as EvalCase["assertions"],
+    };
+    const r = await runCase(broken);
+    expect(r.error).toBeTruthy();
+    expect(r.score).toBe(0);
+    expect(r.constraintsTotal).toBe(0);
+  });
+
+  it("EXCLUDES skipped assertions from the denominator — a vacuous case scores 0, not 1", async () => {
+    const judgeOnly: EvalCase = {
+      id: "judge-only",
+      description: "judge assertion in mock mode",
+      input: { message: "q" },
+      mock_response: "anything",
+      assertions: [{ type: "judge", rubric: "is it right?" }],
+    };
+    const r = await runCase(judgeOnly);
+    expect(r.vacuous).toBe(true);
+    expect(r.passed).toBe(true); // legacy binary shape, deliberately unchanged
+    expect(r.score).toBe(0); // but the continuous metric refuses to credit it
+  });
+});
+
+describe("runSuite — repeats and per-case aggregates", () => {
+  const cases: EvalCase[] = [
+    {
+      id: "a",
+      description: "half the constraints",
+      input: { message: "m" },
+      mock_response: "alpha",
+      assertions: [
+        { type: "contains", value: "alpha" },
+        { type: "contains", value: "omega" },
+      ],
+    },
+    {
+      id: "b",
+      description: "all constraints",
+      input: { message: "m" },
+      mock_response: "alpha",
+      assertions: [{ type: "contains", value: "alpha" }],
+    },
+  ];
+
+  it("runs each case `repeat` times and reports one aggregate row per case", async () => {
+    const suite = await runSuite(cases, { repeat: 3 });
+    expect(suite.totalCases).toBe(6);
+    expect(suite.repeats).toBe(3);
+    expect(suite.aggregates).toHaveLength(2);
+    const a = suite.aggregates.find((x) => x.id === "a")!;
+    expect(a.runs).toBe(3);
+    expect(a.scores).toEqual([0.5, 0.5, 0.5]);
+    expect(a.meanScore).toBe(0.5);
+    expect(a.passRate).toBe(0);
+  });
+
+  it("keeps every repeat's raw score so a paired test can run offline", async () => {
+    const suite = await runSuite(cases, { repeat: 2 });
+    for (const agg of suite.aggregates) {
+      expect(agg.scores).toHaveLength(agg.runs);
+    }
+  });
+
+  it("stamps repeatIndex only when repeating", async () => {
+    const once = await runSuite(cases, {});
+    expect(once.cases.every((r) => r.repeatIndex === undefined)).toBe(true);
+    const thrice = await runSuite(cases, { repeat: 3 });
+    expect(new Set(thrice.cases.map((r) => r.repeatIndex))).toEqual(new Set([1, 2, 3]));
+  });
+
+  it("interleaves repeats (all cases once, then again) so a mid-run condition change hits every case", async () => {
+    const suite = await runSuite(cases, { repeat: 2 });
+    expect(suite.cases.map((r) => `${r.id}${r.repeatIndex}`)).toEqual([
+      "a1",
+      "b1",
+      "a2",
+      "b2",
+    ]);
+  });
+
+  it("reports the suite mean score across every run", async () => {
+    const suite = await runSuite(cases, { repeat: 2 });
+    // (0.5 + 1 + 0.5 + 1) / 4
+    expect(suite.meanScore).toBe(0.75);
+  });
+
+  it("treats repeat < 1 as 1 rather than running nothing", async () => {
+    const suite = await runSuite(cases, { repeat: 0 });
+    expect(suite.totalCases).toBe(2);
+    expect(suite.repeats).toBe(1);
+  });
+
+  it("stamps the active arms into the result so it cannot be mislabeled later", async () => {
+    const suite = await runSuite(cases, {});
+    expect(suite.arms).toBeNull(); // no flags set in the unit-test environment
+    expect(Object.prototype.hasOwnProperty.call(suite, "arms")).toBe(true);
+  });
+
+  it("emits a progress callback per run", async () => {
+    const seen: string[] = [];
+    await runSuite(cases, { repeat: 2, onResult: (r) => seen.push(r.id) });
+    expect(seen).toEqual(["a", "b", "a", "b"]);
+  });
+});

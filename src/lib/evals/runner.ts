@@ -17,11 +17,24 @@ import fs from "fs/promises";
 import path from "path";
 import type {
   Assertion,
+  CaseAggregate,
   CaseResult,
   EvalCase,
   EvalSuiteResult,
 } from "./types";
 import { runAllAssertions } from "./assertions";
+import { describeActiveEvalArms } from "@/lib/agent/eval-arms";
+
+/** Telemetry a real-agent invocation reports alongside the answer text. */
+interface AgentInvocation {
+  answer: string;
+  /** ms from invocation to the first TEXT delta on the wire (not the first byte). */
+  ttftMs?: number;
+  costUsd?: number;
+  costFullyPriced?: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+}
 
 const CASES_DIR_DEFAULT = path.join(process.cwd(), "evals", "cases");
 
@@ -105,7 +118,7 @@ export async function loadAllCases(
  * the StreamTextResult to drain it. The assertion runs against the
  * concatenated assistant text.
  */
-async function invokeRealAgent(testCase: EvalCase): Promise<string> {
+async function invokeRealAgent(testCase: EvalCase): Promise<AgentInvocation> {
   // Late imports to keep the runner module light for unit tests.
   const [
     { runAgent },
@@ -143,6 +156,7 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
     forceSwarm = false;
   }
 
+  const startedAt = Date.now();
   try {
     const result = await runAgent({
       chatId,
@@ -154,12 +168,26 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
     // Drain the stream by consuming the response. We only need the
     // final assistant text — which lands on disk via the agent's
     // onFinish hook before the stream closes.
+    //
+    // TTFT is measured to the first TEXT delta, not the first byte: the stream
+    // opens with protocol/start frames that carry no answer, so first-byte
+    // would flatter every arm equally but measure nothing the user perceives.
+    // Note this clock starts BEFORE runAgent, so on a swarm turn it correctly
+    // includes the whole MoA fan-out that precedes the brain's first token.
+    let ttftMs: number | undefined;
     const response = result.toUIMessageStreamResponse({});
     if (response.body) {
       const reader = response.body.getReader();
+      const decoder = new TextDecoder();
       while (true) {
-        const { done } = await reader.read();
+        const { done, value } = await reader.read();
         if (done) break;
+        if (ttftMs === undefined && value) {
+          const chunk = decoder.decode(value, { stream: true });
+          if (chunk.includes("text-delta") || chunk.includes('"type":"text"')) {
+            ttftMs = Date.now() - startedAt;
+          }
+        }
       }
     }
 
@@ -170,7 +198,17 @@ async function invokeRealAgent(testCase: EvalCase): Promise<string> {
     if (!chat) {
       throw new Error(`Chat ${chatId} disappeared after runAgent`);
     }
-    return extractDeliveredAnswer(chat.messages);
+    // The chat is created fresh per case, so its cumulative usage IS this
+    // turn's usage — including the MoA proposers, the Router and the judges.
+    const usage = chat.cumulativeUsage;
+    return {
+      answer: extractDeliveredAnswer(chat.messages),
+      ttftMs,
+      costUsd: usage?.costUsd,
+      costFullyPriced: usage?.fullyPriced,
+      promptTokens: usage?.promptTokens,
+      completionTokens: usage?.completionTokens,
+    };
   } finally {
     // Best-effort cleanup; ignore failures.
     try {
@@ -225,7 +263,7 @@ export function extractDeliveredAnswer(
  */
 export async function runCase(
   testCase: EvalCase,
-  options: { useRealAgent?: boolean } = {}
+  options: { useRealAgent?: boolean; repeatIndex?: number } = {}
 ): Promise<CaseResult> {
   const start = Date.now();
   try {
@@ -234,11 +272,15 @@ export async function runCase(
     // ship a mock for CI. Before, `mock_response !== undefined` short-circuited
     // first, so --real silently re-scored the hand-written mock and never hit a
     // real model. Mock is the fallback when real is not enabled.
-    const response = options.useRealAgent
+    const invocation: AgentInvocation = options.useRealAgent
       ? await invokeRealAgent(testCase)
-      : testCase.mock_response !== undefined
-        ? testCase.mock_response
-        : ""; // no mock, real not enabled — return empty (operator chose this)
+      : {
+          answer:
+            testCase.mock_response !== undefined
+              ? testCase.mock_response
+              : "", // no mock, real not enabled — return empty (operator chose this)
+        };
+    const response = invocation.answer;
 
     const specs = testCase.assertions as Assertion[];
     const assertions = runAllAssertions(response, specs);
@@ -269,6 +311,13 @@ export async function runCase(
     // that was really a delivery-reliability difference.
     const noAnswer = !!options.useRealAgent && response.trim() === "";
 
+    // Continuous score: fraction of SCORABLE assertions satisfied. Skipped
+    // assertions (judge in mock mode) leave the denominator, so a vacuous case
+    // scores 0 rather than a misleading 1.
+    const scorable = assertions.filter((a) => !a.skipped);
+    const constraintsPassed = scorable.filter((a) => a.passed).length;
+    const constraintsTotal = scorable.length;
+
     return {
       id: testCase.id,
       description: testCase.description,
@@ -277,8 +326,21 @@ export async function runCase(
       durationMs: Date.now() - start,
       response,
       assertions,
+      score: constraintsTotal === 0 ? 0 : constraintsPassed / constraintsTotal,
+      constraintsPassed,
+      constraintsTotal,
+      ...(options.repeatIndex ? { repeatIndex: options.repeatIndex } : {}),
       ...(vacuous ? { vacuous: true } : {}),
       ...(noAnswer ? { noAnswer: true } : {}),
+      ...(invocation.ttftMs !== undefined ? { ttftMs: invocation.ttftMs } : {}),
+      ...(invocation.costUsd !== undefined
+        ? {
+            costUsd: invocation.costUsd,
+            costFullyPriced: invocation.costFullyPriced,
+            promptTokens: invocation.promptTokens,
+            completionTokens: invocation.completionTokens,
+          }
+        : {}),
     };
   } catch (err) {
     return {
@@ -289,6 +351,10 @@ export async function runCase(
       durationMs: Date.now() - start,
       response: "",
       assertions: [],
+      score: 0,
+      constraintsPassed: 0,
+      constraintsTotal: 0,
+      ...(options.repeatIndex ? { repeatIndex: options.repeatIndex } : {}),
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -305,9 +371,19 @@ export async function runSuite(
   options: {
     useRealAgent?: boolean;
     filter?: { tag?: string; idPrefix?: string };
+    /**
+     * Run each case N times (default 1). Repeats are the only defence against
+     * the run-to-run variance that dominated every earlier A/B — two runs of
+     * the SAME build scored 5/6 and 3/6. Without repeats a single number is
+     * indistinguishable from noise.
+     */
+    repeat?: number;
+    /** Called after each run so a long real-agent suite reports progress live. */
+    onResult?: (result: CaseResult, index: number, total: number) => void;
   } = {}
 ): Promise<EvalSuiteResult> {
   const startedAt = new Date().toISOString();
+  const repeats = Math.max(1, Math.floor(options.repeat ?? 1));
   const filtered = cases.filter((c) => {
     if (options.filter?.tag && !(c.tags ?? []).includes(options.filter.tag)) {
       return false;
@@ -319,9 +395,24 @@ export async function runSuite(
   });
 
   const results: CaseResult[] = [];
-  for (const c of filtered) {
-    results.push(await runCase(c, { useRealAgent: options.useRealAgent }));
+  const total = filtered.length * repeats;
+  // Repeat-major order (all cases once, then again): an interleaved schedule
+  // spreads each case's repeats across the run, so a mid-run change in upstream
+  // conditions (rate limiting, a throttled endpoint warming up) hits every case
+  // rather than concentrating in whichever case happened to run then.
+  for (let r = 1; r <= repeats; r++) {
+    for (const c of filtered) {
+      const result = await runCase(c, {
+        useRealAgent: options.useRealAgent,
+        ...(repeats > 1 ? { repeatIndex: r } : {}),
+      });
+      results.push(result);
+      options.onResult?.(result, results.length, total);
+    }
   }
+
+  const withTtft = results.filter((r) => typeof r.ttftMs === "number");
+  const priced = results.filter((r) => typeof r.costUsd === "number");
 
   return {
     startedAt,
@@ -332,6 +423,41 @@ export async function runSuite(
     errored: results.filter((r) => !!r.error).length,
     vacuous: results.filter((r) => r.vacuous).length,
     noAnswer: results.filter((r) => r.noAnswer).length,
+    meanScore: mean(results.map((r) => r.score)),
+    repeats,
+    arms: describeActiveEvalArms(),
+    totalCostUsd: priced.reduce((sum, r) => sum + (r.costUsd ?? 0), 0),
+    costFullyPriced: priced.every((r) => r.costFullyPriced !== false),
+    meanDurationMs: mean(results.map((r) => r.durationMs)),
+    meanTtftMs: withTtft.length === 0 ? null : mean(withTtft.map((r) => r.ttftMs!)),
     cases: results,
+    aggregates: aggregateByCase(results),
   };
+}
+
+function mean(values: number[]): number {
+  return values.length === 0 ? 0 : values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+/**
+ * Collapse every repeat of a case into one row. `scores` is kept verbatim so a
+ * paired bootstrap across arms can be run offline from the results JSON —
+ * the aggregate means alone would not support a paired test.
+ */
+export function aggregateByCase(results: CaseResult[]): CaseAggregate[] {
+  const byId = new Map<string, CaseResult[]>();
+  for (const r of results) {
+    const bucket = byId.get(r.id);
+    if (bucket) bucket.push(r);
+    else byId.set(r.id, [r]);
+  }
+  return [...byId.entries()].map(([id, runs]) => ({
+    id,
+    runs: runs.length,
+    meanScore: mean(runs.map((r) => r.score)),
+    scores: runs.map((r) => r.score),
+    passRate: runs.filter((r) => r.passed).length / runs.length,
+    meanDurationMs: mean(runs.map((r) => r.durationMs)),
+    noAnswerCount: runs.filter((r) => r.noAnswer).length,
+  }));
 }

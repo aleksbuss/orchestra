@@ -39,6 +39,7 @@ import {
   type TraceSignals,
 } from "@/lib/agent/trace-memory";
 import { runTournamentAggregation } from "@/lib/agent/tournament-aggregator";
+import { resolveEvalAggregatorMode } from "@/lib/agent/eval-arms";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 //
@@ -1170,7 +1171,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // drafts and Borda count picks the winner. The winning draft IS the
   // final answer (no synthesis). Falls back to synthesis if every
   // judge fails — better degraded output than no output.
-  const aggregatorMode = settings.aggregator?.mode ?? "synthesis";
+  // `resolveEvalAggregatorMode` is a STRICT no-op unless the dev-only
+  // `ORCHESTRA_EVAL_AGGREGATOR_MODE` flag is set (eval-arms.ts) — it exists so
+  // the selection-vs-averaging A/B can flip synthesis↔tournament between arms
+  // without editing settings mid-experiment.
+  const aggregatorMode = resolveEvalAggregatorMode(
+    settings.aggregator?.mode ?? "synthesis"
+  );
 
   // ── Sprint 2: inline-synthesis collapse ────────────────────────────
   // docs/moa-aggregator-collapse.md. By DEFAULT (2c flip — `DEFAULT_SETTINGS`

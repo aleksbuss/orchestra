@@ -3,7 +3,6 @@
   "description": "One SQL statement carrying 6 simultaneous clause-level constraints.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

@@ -3,7 +3,6 @@
   "description": "Refactor to proper error handling — 6 constraints that trade off against each other.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

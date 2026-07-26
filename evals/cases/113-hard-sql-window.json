@@ -1,0 +1,64 @@
+{
+  "id": "113-hard-sql-window",
+  "description": "One SQL statement with 11 clause-level constraints including a CTE and a window function.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Write ONE SQL statement over `events(id, user_id, type, payload, created_at)` and `users(id, email, plan, deleted_at)`.\nGoal: for each ACTIVE user, return their MOST RECENT event of type 'purchase' in 2025.\nRequirements — ALL must hold:\n1. Use a CTE (`WITH ... AS`).\n2. Use `ROW_NUMBER() OVER (...)` — not a correlated subquery — to pick the most recent event per user.\n3. `PARTITION BY` the user and `ORDER BY created_at DESC` inside the window.\n4. Filter the outer query to the first row per user.\n5. Use a LEFT JOIN from users to the events CTE.\n6. Active means `deleted_at IS NULL`.\n7. Restrict to events created in 2025.\n8. Restrict to `type = 'purchase'`.\n9. Return the user's email, the event id, and the event timestamp aliased as `last_purchase_at`.\n10. Use `COALESCE` so a user with no purchase still returns a non-null placeholder for the event id.\n11. Order the final result by `last_purchase_at` descending, nulls last.\nOutput one SQL code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "with\\s+\\w+\\s+as\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "row_number\\s*\\(\\s*\\)\\s*over"
+    },
+    {
+      "type": "matches",
+      "pattern": "partition\\s+by"
+    },
+    {
+      "type": "matches",
+      "pattern": "order\\s+by\\s+[\\w.]*created_at\\s+desc"
+    },
+    {
+      "type": "matches",
+      "pattern": "=\\s*1|<=\\s*1"
+    },
+    {
+      "type": "matches",
+      "pattern": "left\\s+join"
+    },
+    {
+      "type": "matches",
+      "pattern": "deleted_at\\s+is\\s+null"
+    },
+    {
+      "type": "matches",
+      "pattern": "2025"
+    },
+    {
+      "type": "matches",
+      "pattern": "type\\s*=\\s*'purchase'"
+    },
+    {
+      "type": "matches",
+      "pattern": "as\\s+last_purchase_at"
+    },
+    {
+      "type": "matches",
+      "pattern": "coalesce"
+    },
+    {
+      "type": "matches",
+      "pattern": "nulls\\s+last|desc"
+    }
+  ]
+}

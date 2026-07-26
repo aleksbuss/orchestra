@@ -1,0 +1,68 @@
+{
+  "id": "118-hard-api-contract",
+  "description": "API contract prose with 12 explicit content constraints.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Specify the contract for a public REST endpoint that creates a bank transfer.\nALL of the following must appear in your answer:\n1. The HTTP method and path.\n2. 201 as the success status.\n3. 400 for a validation failure.\n4. 401 for a missing/invalid credential AND 403 for an authenticated caller lacking permission — both, and distinguished.\n5. 409 for a conflict (e.g. a duplicate transfer).\n6. 422 or an explicit statement of why you use 400 instead for semantic errors.\n7. An `Idempotency-Key` header, with the behaviour on a repeated key.\n8. Rate limiting: 429 plus a `Retry-After` header.\n9. Pagination is out of scope here — instead state the error body shape, including a machine-readable `code` field and a human `message` field.\n10. Explicit request body fields with types (amount, currency, source, destination).\n11. A statement about money representation (minor units / integer cents, not float).\n12. Versioning strategy (URL path version or a version header).\nBe concise; plain markdown; no preamble.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "POST\\s+/"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b201\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b400\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b401\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b403\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b409\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b422\\b|semantic"
+    },
+    {
+      "type": "matches",
+      "pattern": "Idempotency-Key"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b429\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "Retry-After"
+    },
+    {
+      "type": "matches",
+      "pattern": "[\"`]?code[\"`]?\\s*[:|]"
+    },
+    {
+      "type": "matches",
+      "pattern": "minor unit|cents|integer"
+    },
+    {
+      "type": "matches",
+      "pattern": "/v1|version"
+    }
+  ]
+}

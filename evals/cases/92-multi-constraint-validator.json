@@ -4,8 +4,7 @@
   "tags": [
     "agentic",
     "multi-constraint",
-    "honest-test",
-    "selection-ab"
+    "honest-test"
   ],
   "input": {
     "message": "Write a Python function `is_valid_username(name)` returning True/False. ALL rules must be implemented:\n1. Length must be between 3 and 16 characters inclusive.\n2. Only lowercase letters, digits and underscore allowed.\n3. Must NOT start with a digit.\n4. Must NOT contain two consecutive underscores.\n5. Must return False (not raise) for a non-string input.\n6. Include a docstring.\nOutput one Python code block.",

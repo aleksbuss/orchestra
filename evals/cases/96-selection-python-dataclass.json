@@ -3,7 +3,6 @@
   "description": "Dataclass with 6 constraints including the mutable-default trap.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "honest-test"
   ],
   "input": {

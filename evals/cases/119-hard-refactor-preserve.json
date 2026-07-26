@@ -1,0 +1,64 @@
+{
+  "id": "119-hard-refactor-preserve",
+  "description": "Refactor holding 12 constraints at once, several in tension with each other.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Refactor this Python function:\n\ndef proc(items, flag=[]):\n    out = []\n    for i in range(len(items)):\n        if items[i] != None:\n            if items[i] > 0:\n                out.append(str(items[i]) + \"!\")\n            else:\n                flag.append(i)\n    print(\"done\", len(out))\n    return out\n\nRequirements — ALL must hold:\n1. Rename it to `format_positive`.\n2. Fix the mutable default argument bug.\n3. Full type hints on parameters and return.\n4. Iterate with `enumerate` instead of `range(len(...))`.\n5. Use `is not None` instead of `!= None`.\n6. Use an f-string instead of string concatenation.\n7. Replace `print` with the `logging` module.\n8. Keep the EXACT existing behaviour: only strictly positive values are formatted, and the indices of non-positive values are recorded.\n9. Add a docstring documenting both the return value and the side effect on the second parameter.\n10. Do not change the parameter order or add required parameters.\n11. Do not use any third-party library.\n12. Keep it a single function — no helper classes.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+format_positive"
+    },
+    {
+      "type": "matches",
+      "pattern": "=\\s*None"
+    },
+    {
+      "type": "not_contains",
+      "value": "flag=[]"
+    },
+    {
+      "type": "matches",
+      "pattern": "enumerate\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "is\\s+not\\s+None"
+    },
+    {
+      "type": "matches",
+      "pattern": "f[\"'].*\\{"
+    },
+    {
+      "type": "matches",
+      "pattern": "logging\\.|logger\\."
+    },
+    {
+      "type": "matches",
+      "pattern": ">\\s*0"
+    },
+    {
+      "type": "matches",
+      "pattern": "append"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    },
+    {
+      "type": "matches",
+      "pattern": "->\\s*(list|List)"
+    },
+    {
+      "type": "not_contains",
+      "value": "class "
+    }
+  ]
+}

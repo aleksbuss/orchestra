@@ -4,8 +4,7 @@
   "tags": [
     "agentic",
     "multi-constraint",
-    "honest-test",
-    "selection-ab"
+    "honest-test"
   ],
   "input": {
     "message": "Write a Python function named `normalize_scores` that takes a list of numbers and returns a new list scaled to the 0..1 range. Requirements, ALL of which must hold:\n1. Function name must be exactly `normalize_scores`.\n2. It must handle an EMPTY list by returning an empty list (no exception).\n3. It must handle the case where all values are IDENTICAL by returning a list of 0.0 values (no division by zero).\n4. It must include a docstring.\n5. It must NOT use numpy or any import.\n6. It must include a comment line stating the time complexity as O(n).\nOutput the final code in one Python code block.",

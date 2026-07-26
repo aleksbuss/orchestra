@@ -1,0 +1,72 @@
+{
+  "id": "115-hard-async-fetch-pool",
+  "description": "asyncio worker pool with 12 constraints (semaphore, timeout, cancellation, aggregation).",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python async function `fetch_all` that fetches a list of URLs concurrently.\nRequirements — ALL must hold:\n1. Name it exactly `fetch_all`; it must be `async def`.\n2. Signature: `fetch_all(urls: list[str], fetch: Callable, concurrency: int = 5, timeout: float = 10.0)` with full type hints.\n3. Bound concurrency with an `asyncio.Semaphore` — do NOT fire every request at once.\n4. Apply the per-request timeout with `asyncio.timeout` or `asyncio.wait_for`.\n5. Use `asyncio.gather` with `return_exceptions=True` so one failure does not cancel the rest.\n6. Return results in the SAME ORDER as the input urls.\n7. A failed url must yield its exception in the result list, not raise out of `fetch_all`.\n8. Re-raise `asyncio.CancelledError` instead of swallowing it — cancellation must propagate.\n9. Never call a blocking function such as `time.sleep` or `requests.get`.\n10. Return an empty list for an empty input without creating any task.\n11. Include a docstring.\n12. Standard library only.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "async\\s+def\\s+fetch_all"
+    },
+    {
+      "type": "matches",
+      "pattern": "concurrency\\s*:\\s*int"
+    },
+    {
+      "type": "matches",
+      "pattern": "timeout\\s*:\\s*float"
+    },
+    {
+      "type": "matches",
+      "pattern": "asyncio\\.Semaphore|Semaphore\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "async\\s+with\\s+\\w*sem|async\\s+with\\s+semaphore"
+    },
+    {
+      "type": "matches",
+      "pattern": "wait_for|asyncio\\.timeout"
+    },
+    {
+      "type": "matches",
+      "pattern": "gather\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "return_exceptions\\s*=\\s*True"
+    },
+    {
+      "type": "matches",
+      "pattern": "CancelledError"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise"
+    },
+    {
+      "type": "matches",
+      "pattern": "if\\s+not\\s+urls|len\\(\\s*urls\\s*\\)\\s*==\\s*0"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    },
+    {
+      "type": "not_contains",
+      "value": "time.sleep"
+    },
+    {
+      "type": "not_contains",
+      "value": "requests.get"
+    }
+  ]
+}

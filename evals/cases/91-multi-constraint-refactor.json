@@ -4,7 +4,8 @@
   "tags": [
     "agentic",
     "multi-constraint",
-    "honest-test"
+    "honest-test",
+    "selection-ab"
   ],
   "input": {
     "message": "Refactor this function:\n\ndef p(d):\n    r=[]\n    for k in d:\n        if d[k]>0:\n            r.append(k.upper())\n    return r\n\nRequirements, ALL must hold:\n1. Rename it to `positive_keys_upper`.\n2. Add full type hints (parameter and return).\n3. Use a list comprehension instead of the loop.\n4. Add a docstring explaining the behaviour.\n5. Preserve EXACT behaviour including that it only includes keys whose value is strictly greater than zero.\nOutput one Python code block.",

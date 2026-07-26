@@ -125,6 +125,49 @@ export interface CaseResult {
    * difference). Analysis MUST separate no-answer from delivered-but-wrong.
    */
   noAnswer?: boolean;
+  /**
+   * CONTINUOUS score in [0,1]: the fraction of SCORABLE assertions that passed
+   * (`constraintsPassed / constraintsTotal`). Binary pass/fail throws away most
+   * of the signal on a multi-constraint case — "5 of 6 constraints satisfied"
+   * and "0 of 6" are both `passed: false` — which is why earlier A/Bs needed an
+   * unreachable N to detect anything. Skipped assertions are excluded from the
+   * denominator; a case with nothing scorable (all skipped, or an error before
+   * assertions ran) scores 0 and is flagged `vacuous` / `error` respectively.
+   */
+  score: number;
+  /** Assertions that passed (excludes skipped). */
+  constraintsPassed: number;
+  /** Assertions actually scored (excludes skipped). Denominator of `score`. */
+  constraintsTotal: number;
+  /** 1-based repeat index when `--repeat N` re-runs the same case. */
+  repeatIndex?: number;
+  /**
+   * Time-to-first-token in ms (real-agent runs only). Selection aggregators
+   * cannot stream a winner that has not been picked yet, so TTFT is the metric
+   * that exposes what a tournament arm costs the user perceptually — a fact a
+   * pass-rate table hides entirely.
+   */
+  ttftMs?: number;
+  /** Chat cumulative cost in USD after the turn (real-agent runs only). */
+  costUsd?: number;
+  /** False when at least one LLM call in the turn had no pricing entry. */
+  costFullyPriced?: boolean;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
+/** Per-case aggregate across `--repeat` runs. */
+export interface CaseAggregate {
+  id: string;
+  runs: number;
+  /** Mean continuous score across repeats — the primary per-case statistic. */
+  meanScore: number;
+  /** Every repeat's score, so a bootstrap / paired test can be run offline. */
+  scores: number[];
+  /** Fraction of repeats where every assertion passed (the old binary metric). */
+  passRate: number;
+  meanDurationMs: number;
+  noAnswerCount: number;
 }
 
 export interface EvalSuiteResult {
@@ -138,5 +181,27 @@ export interface EvalSuiteResult {
   vacuous: number;
   /** Count of real-agent cases that returned an empty response (delivery failure, not reasoning). */
   noAnswer: number;
+  /**
+   * Mean of every run's continuous `score` — the experiment's PRIMARY metric.
+   * Reported alongside the binary pass count, never instead of it.
+   */
+  meanScore: number;
+  /** How many times each case was run (`--repeat`, default 1). */
+  repeats: number;
+  /**
+   * Active eval-arm flags (`aggregator=tournament prompts=identical`) or null
+   * when none are set. Stamped into the results file so an arm can never be
+   * mislabeled after the fact — the single most expensive mistake in an A/B.
+   */
+  arms: string | null;
+  /** Summed chat cost across every real-agent run in the suite, USD. */
+  totalCostUsd: number;
+  /** False when any run had an unpriced LLM call (so the total is a LOWER bound). */
+  costFullyPriced: boolean;
+  meanDurationMs: number;
+  /** Mean TTFT across runs that reported one; null when no real-agent run did. */
+  meanTtftMs: number | null;
   cases: CaseResult[];
+  /** One entry per distinct case id, aggregating its repeats. */
+  aggregates: CaseAggregate[];
 }

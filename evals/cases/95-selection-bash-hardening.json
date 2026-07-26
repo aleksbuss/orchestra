@@ -1,0 +1,40 @@
+{
+  "id": "95-selection-bash-hardening",
+  "description": "Shell script with 6 hardening constraints a single pass typically half-satisfies.",
+  "tags": [
+    "multi-constraint",
+    "selection-ab",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a Bash script that takes one argument (a directory path) and prints the number of `.log` files inside it.\nRequirements, ALL must hold:\n1. Start with the shebang `#!/usr/bin/env bash`.\n2. Include `set -euo pipefail`.\n3. If the argument is missing, print a usage message to STDERR and exit with a non-zero status.\n4. If the directory does not exist, print an error and exit non-zero.\n5. Quote all variable expansions.\n6. Do NOT use `eval`.\nOutput one bash code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "contains",
+      "value": "#!/usr/bin/env bash"
+    },
+    {
+      "type": "matches",
+      "pattern": "set\\s+-euo\\s+pipefail"
+    },
+    {
+      "type": "matches",
+      "pattern": ">&2|1>&2"
+    },
+    {
+      "type": "matches",
+      "pattern": "-d\\s+\"?\\$"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\\$\\{?\\w+\\}?\""
+    },
+    {
+      "type": "not_contains",
+      "value": "eval "
+    }
+  ]
+}

@@ -263,7 +263,11 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
       model: modelThrowing() as never,
     });
     expect(res.text).toBe("");
-    expect(res.uiNotice).toMatch(/Could not produce a final answer/i);
+    // Free-tier track Sprint 3 — the contract is unchanged (empty text + a
+    // notice, never a throw); the message now names the likely cause and the
+    // operator's next move instead of just reporting the raw error.
+    expect(res.uiNotice).toMatch(/empty response/i);
+    expect(res.uiNotice).toMatch(/Continue|Settings/);
   });
 });
 

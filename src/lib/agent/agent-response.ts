@@ -8,9 +8,9 @@
  * (final-answer-guard.test.ts) and shrinks the agent.ts hot file.
  */
 import { generateText, type ModelMessage } from "ai";
-import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
-import type { AppSettings } from "@/lib/types";
+import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
+import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -786,6 +786,16 @@ export async function resolveTurnContinuation(args: {
    * deterministic pause notice instead of a forced (masquerading) completion.
    */
   stepLimitReached?: boolean;
+  /**
+   * The brain's ModelConfig. Free-tier track Sprint 3: lets the forced
+   * final-answer path track this endpoint's health and substitute a healthy
+   * model when it delivers nothing. Optional — without it the path degrades to
+   * a single attempt (pre-Sprint-3 behaviour), which keeps existing callers and
+   * tests working.
+   */
+  brainConfig?: ModelConfig;
+  projectId?: string;
+  currentPath?: string;
 }): Promise<TurnContinuationResult> {
   const {
     responseMessages,
@@ -797,6 +807,9 @@ export async function resolveTurnContinuation(args: {
     settings,
     abortSignal,
     stepLimitReached,
+    brainConfig,
+    projectId,
+    currentPath,
   } = args;
   const lastAssistantText = getLastAssistantText(responseMessages);
   const readUsage = (r: unknown) =>
@@ -853,42 +866,45 @@ export async function resolveTurnContinuation(args: {
 
   if (!turnHasDeliverableAnswer(responseMessages)) {
     // No answer was delivered at all (PM #69) and this was NOT a step-cap pause
-    // (that is handled above, hoisted out of this gate). Force ONE tool-less final
+    // (that is handled above, hoisted out of this gate). Force a tool-less final
     // answer so the user always gets a reply. Tool-less ⇒ text only ⇒ no loop.
-    try {
-      const forced = await generateText({
-        model,
-        system: systemPrompt,
-        messages: mergeConsecutiveSameRole([
-          ...baseMessages,
-          ...responseMessages,
-          {
-            role: "user",
-            content:
-              "You have everything you need from the steps above. Write your " +
-              "final answer to the user now, in plain prose. Do not call any tools.",
-          },
-        ]),
-        providerOptions,
-        temperature: settings.chatModel.temperature ?? 0.7,
-        maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
-        abortSignal,
-      });
-      const text = unwrapSerializedResponseCall((forced.text || "").trim());
-      if (text) {
-        console.log(
-          `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
-        );
-      }
-      return { text, usage: readUsage(forced) };
-    } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
-      console.warn("[Agent] PM #69 forced final answer failed:", error);
-      return {
-        text: "",
-        uiNotice: `[Agent] Could not produce a final answer for this turn: ${errMsg}`,
-      };
+    //
+    // Free-tier track Sprint 3: this used to be ONE attempt on the SAME endpoint
+    // that had just delivered nothing — so a throttled brain returned a second
+    // empty body and this function returned `{ text: "" }` SILENTLY, rendering a
+    // blank turn indistinguishable from an Orchestra bug. It now retries once
+    // and then substitutes a healthy model from the operator's own settings,
+    // and an undeliverable turn always carries an explanatory notice.
+    // `generateFinalAnswerWithFailover` never replays the TOOL-CAPABLE stream —
+    // every attempt is tool-less, so a retry can waste a generation but can
+    // never repeat a side effect.
+    const attempt = await generateFinalAnswerWithFailover({
+      model,
+      systemPrompt,
+      messages: mergeConsecutiveSameRole([
+        ...baseMessages,
+        ...responseMessages,
+        {
+          role: "user",
+          content:
+            "You have everything you need from the steps above. Write your " +
+            "final answer to the user now, in plain prose. Do not call any tools.",
+        },
+      ]),
+      providerOptions,
+      settings,
+      abortSignal,
+      brainConfig,
+      projectId,
+      currentPath,
+    });
+    const text = unwrapSerializedResponseCall(attempt.text);
+    if (text) {
+      console.log(
+        `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`
+      );
     }
+    return { text, usage: attempt.usage, uiNotice: attempt.notice };
   }
 
   return { text: "" };

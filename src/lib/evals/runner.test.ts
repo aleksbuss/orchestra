@@ -8,6 +8,7 @@ import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  extractDeliveredAnswer,
   loadAllCases,
   parseCaseFromJson,
   runCase,
@@ -273,5 +274,67 @@ describe("PM #41 — runCase precedence: --real overrides mock_response", () => 
     });
     expect(r.response).toBe("MOCK-USED");
     expect(r.passed).toBe(true);
+  });
+});
+
+describe("extractDeliveredAnswer — the delivery metric must measure the AGENT, not the harness", () => {
+  // 2026-07-26: the old extraction was "last assistant message wins", which
+  // scored a DELIVERED answer as empty whenever the model answered through the
+  // `response` tool — the last assistant message is then the tool-CALL carrier
+  // with content "". Every "free-tier delivery failure" in that day's eval runs
+  // turned out to have a real answer persisted on disk (101-1181 chars), so the
+  // metric was measuring its own bug.
+  it("reads the answer out of the response-tool result (PM #61 delivery path)", () => {
+    const msgs = [
+      { role: "user", content: "q" },
+      { role: "assistant", content: "" },
+      { role: "tool", toolName: "code_execution", content: "stdout" },
+      { role: "assistant", content: "" },
+      { role: "tool", toolName: "response", content: "the real answer" },
+    ];
+    expect(extractDeliveredAnswer(msgs)).toBe("the real answer");
+  });
+
+  it("falls back to the last non-empty assistant text when no response tool ran", () => {
+    const msgs = [
+      { role: "user", content: "q" },
+      { role: "assistant", content: "plain prose answer" },
+    ];
+    expect(extractDeliveredAnswer(msgs)).toBe("plain prose answer");
+  });
+
+  it("skips an empty trailing assistant message rather than reporting no delivery", () => {
+    const msgs = [
+      { role: "assistant", content: "earlier real answer" },
+      { role: "assistant", content: "   " },
+    ];
+    expect(extractDeliveredAnswer(msgs)).toBe("earlier real answer");
+  });
+
+  it("prefers the response tool over an earlier assistant narration", () => {
+    const msgs = [
+      { role: "assistant", content: "Let me check that for you." },
+      { role: "tool", toolName: "response", content: "final" },
+    ];
+    expect(extractDeliveredAnswer(msgs)).toBe("final");
+  });
+
+  it("returns empty ONLY when nothing was delivered (a genuine delivery failure)", () => {
+    expect(extractDeliveredAnswer([{ role: "user", content: "q" }])).toBe("");
+    expect(extractDeliveredAnswer([])).toBe("");
+    expect(
+      extractDeliveredAnswer([
+        { role: "assistant", content: "" },
+        { role: "tool", toolName: "code_execution", content: "output only" },
+      ])
+    ).toBe("");
+  });
+
+  it("ignores a non-string content payload instead of throwing", () => {
+    const msgs = [
+      { role: "assistant", content: { parts: [] } as unknown },
+      { role: "assistant", content: "text" },
+    ];
+    expect(extractDeliveredAnswer(msgs)).toBe("text");
   });
 });

@@ -75,6 +75,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
     mode: "synthesis",
     inlineSynthesis: true,
   },
+  // Free-tier failover Sprint 4 — what Orchestra may do when the configured
+  // model will not answer. `speed` substitutes another CONFIGURED model and
+  // says which one answered; `quality`/`ask` keep the user's model and report
+  // honestly. Default `speed` because an answer from a different configured
+  // model beats a blank turn for most users — and the substitution is always
+  // surfaced, never silent. See `agent/degradation-policy.ts`.
+  degradationPolicy: "speed",
 };
 
 export async function getSettings(): Promise<AppSettings> {

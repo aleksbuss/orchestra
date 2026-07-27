@@ -758,6 +758,72 @@ const STEP_LIMIT_PAUSE_MESSAGE =
 const STEP_LIMIT_PAUSE_NOTICE =
   "[Agent] Reached the per-turn step limit — press Continue to resume the unfinished work.";
 
+// ── Loop-abort (2026-07-28, DoubleTake-reviewed) ──────────────────────────────
+// The stable prefix `applyGlobalToolLoopGuard` (tool-guard.ts) emits when it
+// BLOCKS an identical (tool+args) repeat. Shared here — NOT in tool-guard.ts —
+// because tool-guard already imports this module (one-way agent-response ← never
+// → tool-guard), so putting the marker here lets the guard reuse it with no
+// import cycle. If you change the guard's message, keep this prefix identical.
+export const LOOP_GUARD_REPEAT_MARKER = "[Loop guard] CRITICAL:";
+
+/** True when a tool RESULT payload is a loop-guard repeat block (any output shape). */
+export function isLoopGuardRepeatBlock(output: unknown): boolean {
+  if (typeof output === "string") return output.includes(LOOP_GUARD_REPEAT_MARKER);
+  try {
+    return JSON.stringify(output ?? "").includes(LOOP_GUARD_REPEAT_MARKER);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Count how many of the MOST RECENT steps were pure loop-guard blocks — a step
+ * with ≥1 loop-block tool result and NO successful (non-block) tool result.
+ * Counting stops at the first step that made any forward progress (a non-block
+ * tool result, or a text-only / no-tool step), so ANY progress resets the run.
+ *
+ * Why this is the RIGHT signal (DoubleTake, 2026-07-28): a spiral is a FAILURE
+ * state, not a "done" state, so we do not try to deduce completion from it — we
+ * bound it. A STRONG model never issues the SAME blocked call 3× in a row (it
+ * changes arguments or tactics after the first block), so a threshold of 3 has
+ * zero regression surface for strong models; a WEAK model that compulsively
+ * re-runs one passing command aborts in 3 steps instead of bleeding to the
+ * 50-step cap. It deliberately does NOT auto-submit the model's prose as an
+ * answer (that would reopen the narration hole) — the caller emits an honest
+ * PAUSE.
+ */
+export function countTrailingLoopBlockSteps(
+  steps: ReadonlyArray<{ toolResults?: ReadonlyArray<{ output?: unknown }> }>
+): number {
+  let count = 0;
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const results = steps[i]?.toolResults;
+    if (!results || results.length === 0) break; // text-only step = not spiralling
+    const anyBlock = results.some((r) => isLoopGuardRepeatBlock(r.output));
+    const anyProgress = results.some((r) => !isLoopGuardRepeatBlock(r.output));
+    if (anyBlock && !anyProgress) count += 1;
+    else break;
+  }
+  return count;
+}
+
+/**
+ * Consecutive pure loop-block steps that trip the abort. 3 is safe: a strong
+ * model does not repeat one identical BLOCKED call 3 times in a row.
+ */
+export const LOOP_ABORT_CONSECUTIVE = 3;
+
+const LOOP_ABORT_PAUSE_MESSAGE =
+  "⏸ **Paused — the agent was stuck in a tool loop.** It repeated the same tool " +
+  "call with identical arguments several times without making progress, so the " +
+  "turn was stopped early to avoid wasting steps. The work above may already be " +
+  "complete (check it), or the agent may need a different instruction. Press " +
+  "**Continue** to resume, or redirect it.";
+
+/** Short transient-toast variant of the loop-abort pause. */
+const LOOP_ABORT_PAUSE_NOTICE =
+  "[Agent] Stopped early — caught in an identical-call tool loop. Review the work or redirect.";
+
 /**
  * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
  * finished turn, decide whether an EXTRA generation is needed and produce its
@@ -788,6 +854,15 @@ export async function resolveTurnContinuation(args: {
    */
   stepLimitReached?: boolean;
   /**
+   * True when this turn was stopped EARLY because the model got stuck repeating
+   * an identical (tool+args) call the loop guard kept blocking (≥
+   * LOOP_ABORT_CONSECUTIVE consecutive pure-block steps). Drives a distinct
+   * honest PAUSE — never an auto-submitted "done". Takes precedence over the
+   * step-cap check (it is the more specific stop reason, and it fires well
+   * before the 50-step cap).
+   */
+  loopAbortReached?: boolean;
+  /**
    * The brain's ModelConfig. Free-tier track Sprint 3: lets the forced
    * final-answer path track this endpoint's health and substitute a healthy
    * model when it delivers nothing. Optional — without it the path degrades to
@@ -810,6 +885,7 @@ export async function resolveTurnContinuation(args: {
     settings,
     abortSignal,
     stepLimitReached,
+    loopAbortReached,
     brainConfig,
     projectId,
     currentPath,
@@ -830,6 +906,20 @@ export async function resolveTurnContinuation(args: {
   // At the step cap, ONLY a real `response`-tool answer counts as a genuine finish;
   // narration before an action tool does not. Deterministic + system-authored on
   // purpose (a forced model "final answer" masquerades as completion). No LLM call.
+  // Loop-abort PAUSE (2026-07-28, DoubleTake-reviewed) — MORE SPECIFIC than the
+  // step-cap, checked first. The turn was stopped EARLY because the model got
+  // stuck repeating an identical blocked call; that is a FAILURE state, not a
+  // finish, so we emit an honest pause — NOT an auto-submitted answer (which
+  // would reopen the narration hole PM #82 guards). Same `!getLastResponseToolText`
+  // guard as the step-cap: a genuine `response`-tool answer still counts as a
+  // real finish even if the tail happened to be a block.
+  if (loopAbortReached && !getLastResponseToolText(responseMessages).trim()) {
+    console.log(
+      `[Agent] Turn stopped early — identical-call tool loop (finishReason=${finishReason}); emitting loop-abort Continue notice.`
+    );
+    return { text: LOOP_ABORT_PAUSE_MESSAGE, uiNotice: LOOP_ABORT_PAUSE_NOTICE };
+  }
+
   if (stepLimitReached && !getLastResponseToolText(responseMessages).trim()) {
     console.log(
       `[Agent] Turn paused at the per-turn step limit (finishReason=${finishReason}); emitting Continue notice.`

@@ -154,6 +154,39 @@ export interface CaseResult {
   costFullyPriced?: boolean;
   promptTokens?: number;
   completionTokens?: number;
+  /**
+   * MoA internals for the disagreement experiment (only when
+   * `ORCHESTRA_EVAL_CAPTURE_SWARM=true`). Each draft is scored with the SAME
+   * assertions as the final answer, so "were the proposers right?" and "did they
+   * disagree?" can be crossed against "was the final answer right?".
+   *
+   * `distinctModels` is the heterogeneity check: with N personas mapped onto
+   * three tiers, two personas can land on the same tier and hand you one model
+   * twice while the settings still look heterogeneous. Reading it from the
+   * RESOLVED per-draft model makes that visible instead of assumed.
+   */
+  swarm?: {
+    disagreementDetected: boolean;
+    disagreementMaxDistance: number;
+    disagreementAverageDistance: number;
+    disagreementPairCount: number;
+    disagreementThreshold: number;
+    disagreementRan: boolean;
+    distinctModels: number;
+    drafts: Array<{
+      proposerId: string;
+      role: string;
+      provider: string;
+      model: string;
+      tier?: string;
+      latencyMs: number;
+      /** Continuous score of THIS draft under the case's assertions. */
+      score: number;
+      /** True when the draft satisfied every scorable assertion. */
+      correct: boolean;
+      chars: number;
+    }>;
+  };
 }
 
 /** Per-case aggregate across `--repeat` runs. */

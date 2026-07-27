@@ -39,7 +39,10 @@ import {
   type TraceSignals,
 } from "@/lib/agent/trace-memory";
 import { runTournamentAggregation } from "@/lib/agent/tournament-aggregator";
-import { resolveEvalAggregatorMode } from "@/lib/agent/eval-arms";
+import {
+  recordEvalSwarmTelemetry,
+  resolveEvalAggregatorMode,
+} from "@/lib/agent/eval-arms";
 
 // ── MoA Proposer Perspectives ───────────────────────────────────────────
 //
@@ -1157,6 +1160,30 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       });
     }
   }
+  // Eval-only sink (strict no-op unless ORCHESTRA_EVAL_CAPTURE_SWARM=true in a
+  // dev process). Uses draftsWithUsage, not `drafts`, because only the former
+  // still carries the RESOLVED provider/model per proposer — the field that
+  // makes heterogeneity checkable after the fact instead of assumed.
+  recordEvalSwarmTelemetry(chatId, {
+    drafts: draftsWithUsage.map((d) => ({
+      proposerId: d.proposerId,
+      role: d.role,
+      text: d.text,
+      latencyMs: d.latencyMs,
+      provider: d.resolvedProvider,
+      model: d.resolvedModel,
+      tier: d.resolvedTier,
+    })),
+    disagreement: {
+      detected: disagreement.detected,
+      maxDistance: disagreement.maxDistance,
+      averageDistance: disagreement.averageDistance,
+      pairCount: disagreement.pairCount,
+      threshold: disagreement.threshold,
+      ranSuccessfully: disagreement.ranSuccessfully,
+    },
+  });
+
   const disagreementMarker = buildDisagreementMarker(disagreement);
   const aggregatorPrompt = disagreementMarker + buildAggregatorPrompt(userMessage, successfulDrafts);
 

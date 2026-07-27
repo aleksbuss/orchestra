@@ -1,0 +1,42 @@
+{
+  "id": "400-zebra-07",
+  "description": "Generated zebra puzzle (5 houses × 3 attributes, 11 clues, unique solution verified by brute force).",
+  "tags": [
+    "puzzle",
+    "zebra",
+    "disagreement-ab",
+    "generated"
+  ],
+  "input": {
+    "message": "5 houses stand in a row, numbered 1 to 5 from left to right.\nEach house has a different colour (red, green, blue, amber, violet), one resident (Ada, Bruno, Chen, Dara, Eli), and each resident drinks a different beverage (tea, coffee, milk, juice, water).\n\nClues:\n1. the tea drinker is in the amber house.\n2. the tea drinker is in house 5.\n3. Chen is somewhere to the left of the water drinker.\n4. Dara is in house 1.\n5. Bruno drinks the tea drinker.\n6. the red house is in house 1.\n7. the blue house belongs to NOT the milk drinker.\n8. Dara is directly next to the milk drinker.\n9. the coffee drinker is in house 1.\n10. the milk drinker is drunk by Ada.\n11. the green house belongs to the water drinker.\n\nThis puzzle has exactly one solution. Work out who lives in each house, its colour, and their drink.\n\nEnd your answer with one line per house in EXACTLY this format:\nHouse 1: <name> - <colour> - <drink>\nHouse 2: <name> - <colour> - <drink>\n(and so on)",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "House\\s*1\\s*[:\\-]?\\s*\\**\\s*Dara\\s*\\**\\s*[-–—:]\\s*\\**\\s*red\\s*\\**\\s*[-–—:]\\s*\\**\\s*coffee",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*2\\s*[:\\-]?\\s*\\**\\s*Ada\\s*\\**\\s*[-–—:]\\s*\\**\\s*violet\\s*\\**\\s*[-–—:]\\s*\\**\\s*milk",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*3\\s*[:\\-]?\\s*\\**\\s*Chen\\s*\\**\\s*[-–—:]\\s*\\**\\s*blue\\s*\\**\\s*[-–—:]\\s*\\**\\s*juice",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*4\\s*[:\\-]?\\s*\\**\\s*Eli\\s*\\**\\s*[-–—:]\\s*\\**\\s*green\\s*\\**\\s*[-–—:]\\s*\\**\\s*water",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*5\\s*[:\\-]?\\s*\\**\\s*Bruno\\s*\\**\\s*[-–—:]\\s*\\**\\s*amber\\s*\\**\\s*[-–—:]\\s*\\**\\s*tea",
+      "flags": "i"
+    }
+  ]
+}

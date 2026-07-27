@@ -279,6 +279,61 @@ the task, not of the degraded features.
   latency and token ratios reported, which do not depend on variance, and it is
   irrelevant for quality, which is pinned at 1.0 in every arm.
 
+### Follow-up (2026-07-27): does DISAGREEMENT predict error?
+
+If the ensemble cannot improve answers, it might still earn its place as a cheap
+*difficulty detector*: run N cheap heterogeneous samples, ship the cheap answer when
+they agree, escalate to an expensive model when they diverge. That requires
+agreement to carry information about correctness. Tested directly.
+
+**The homogeneous run was measuring nothing.** Distance was 0.000 on every run
+because one model sampled three times at T=0.7 reproduces itself — the signal was
+absent by construction, not absent in fact. Rebuilt with four model families
+(brain `nemotron-3-ultra-550b`, Router `nemotron-3-super-120b`, proposers
+`gpt-oss-20b` / `ling-3.0-flash` / `north-mini-code`, skeptic `laguna-m.1`), the
+signal came alive: 13 of 28 runs had non-zero distance, up to 0.546. **The
+heterogeneity correction was necessary and it worked.**
+
+What it found, over 28 runs × 14 zebra puzzles (98 drafts):
+
+| Quantity | Result |
+|---|---|
+| Delivered drafts correct | **91/93 (97.8 %)** |
+| Cheap path (majority of drafts) correct | **28/28 (100 %)** |
+| Final answer correct | **28/28 (100 %)** |
+| Distance vs "all drafts correct" | r = −0.215 (right direction, driven by **2** wrong drafts) |
+
+**The hypothesis is untestable in this regime, for the same reason as everything
+else: there are no errors to predict.** Both wrong drafts came from a single model
+(`gpt-oss-20b`), so even they are a model-reliability artefact rather than task
+difficulty. A signal cannot be validated against an outcome that never varies.
+
+One result is genuinely informative: **the cheap path was correct in all 28 runs**,
+so the expensive 550B brain contributed nothing on these tasks — "always ship the
+cheap answer" would have won outright, with no routing signal needed.
+
+**Heterogeneity is not what the config says it is — 0 of 28 runs used 4 distinct
+models** (mean 2.18). Two causes, both worth knowing:
+
+| Model | Drafts | Delivered | Correct | Median latency |
+|---|---|---|---|---|
+| `inclusionai/ling-3.0-flash:free` | 53 | 53 | 53 | **4 s** |
+| `nvidia/nemotron-3-super-120b-a12b:free` | 31 | 31 | 31 | 39 s |
+| `openai/gpt-oss-20b:free` | 7 | 6 | 4 | 73 s |
+| `cohere/north-mini-code:free` | 7 | **3** | 3 | 120 s (timeout) |
+| `poolside/laguna-m.1:free` (pinned skeptic) | **0** | 0 | 0 | — |
+
+1. Personas are mapped to models by the DPG-assigned `modelTier`, so several
+   personas share a tier and you silently get one model repeatedly — `ling-flash`
+   alone produced 54 % of all drafts.
+2. `proposerTiers.skeptic` was pinned to `laguna-m.1:free` and produced **zero
+   drafts in 28 runs** — every skeptic failed over to another model. Pinning a model
+   is not the same as running it.
+
+Cost of this configuration: **70 minutes for 28 runs (2.5 min/run)** against 4.6 s
+for a single agent on the same puzzles — a ~33× latency multiplier, for an answer
+that was already correct without it.
+
 ### Verdict against the pre-registered kill criterion
 
 The criterion reads: *if the best swarm arm does not beat control by ≥ +0.05 mean

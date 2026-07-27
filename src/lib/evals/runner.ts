@@ -28,6 +28,7 @@ import { describeActiveEvalArms } from "@/lib/agent/eval-arms";
 /** Telemetry a real-agent invocation reports alongside the answer text. */
 interface AgentInvocation {
   answer: string;
+  swarm?: import("@/lib/agent/eval-arms").EvalSwarmTelemetry;
   /** ms from invocation to the first TEXT delta on the wire (not the first byte). */
   ttftMs?: number;
   costUsd?: number;
@@ -201,8 +202,10 @@ async function invokeRealAgent(testCase: EvalCase): Promise<AgentInvocation> {
     // The chat is created fresh per case, so its cumulative usage IS this
     // turn's usage — including the MoA proposers, the Router and the judges.
     const usage = chat.cumulativeUsage;
+    const { takeEvalSwarmTelemetry } = await import("@/lib/agent/eval-arms");
     return {
       answer: extractDeliveredAnswer(chat.messages),
+      swarm: takeEvalSwarmTelemetry(chatId),
       ttftMs,
       costUsd: usage?.costUsd,
       costFullyPriced: usage?.fullyPriced,
@@ -332,6 +335,7 @@ export async function runCase(
       ...(options.repeatIndex ? { repeatIndex: options.repeatIndex } : {}),
       ...(vacuous ? { vacuous: true } : {}),
       ...(noAnswer ? { noAnswer: true } : {}),
+      ...(invocation.swarm ? { swarm: summarizeSwarm(invocation.swarm, specs) } : {}),
       ...(invocation.ttftMs !== undefined ? { ttftMs: invocation.ttftMs } : {}),
       ...(invocation.costUsd !== undefined
         ? {
@@ -358,6 +362,47 @@ export async function runCase(
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Score each proposer draft with the case's OWN assertions and summarize the
+ * ensemble.
+ *
+ * Scoring the drafts is the whole point of the disagreement experiment: the
+ * final answer alone cannot distinguish "the proposers were right and agreed"
+ * from "they were wrong and agreed", and those have opposite implications for
+ * whether disagreement is worth routing on.
+ */
+export function summarizeSwarm(
+  telemetry: import("@/lib/agent/eval-arms").EvalSwarmTelemetry,
+  specs: Assertion[]
+): NonNullable<CaseResult["swarm"]> {
+  const drafts = telemetry.drafts.map((d) => {
+    const results = runAllAssertions(d.text, specs);
+    const scorable = results.filter((r) => !r.skipped);
+    const passed = scorable.filter((r) => r.passed).length;
+    return {
+      proposerId: d.proposerId,
+      role: d.role,
+      provider: d.provider,
+      model: d.model,
+      tier: d.tier,
+      latencyMs: d.latencyMs,
+      score: scorable.length === 0 ? 0 : passed / scorable.length,
+      correct: scorable.length > 0 && passed === scorable.length,
+      chars: d.text.length,
+    };
+  });
+  return {
+    disagreementDetected: telemetry.disagreement.detected,
+    disagreementMaxDistance: telemetry.disagreement.maxDistance,
+    disagreementAverageDistance: telemetry.disagreement.averageDistance,
+    disagreementPairCount: telemetry.disagreement.pairCount,
+    disagreementThreshold: telemetry.disagreement.threshold,
+    disagreementRan: telemetry.disagreement.ranSuccessfully,
+    distinctModels: new Set(drafts.map((d) => `${d.provider}/${d.model}`)).size,
+    drafts,
+  };
 }
 
 /**

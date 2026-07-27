@@ -128,6 +128,88 @@ function warnOnArmConflict(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Swarm telemetry capture (eval-only).
+//
+// The question "does disagreement among proposer drafts predict an incorrect
+// answer?" cannot be answered from the eval's normal output: the drafts and the
+// disagreement distance exist only inside `runMoAEnsemble` and reach stdout as
+// log lines. Parsing stdout would work but couples the analysis to log wording,
+// and it cannot give per-draft correctness.
+//
+// So the ensemble drops its drafts into a process-global sink that the eval
+// runner drains by chatId. Gated on `ORCHESTRA_EVAL_CAPTURE_SWARM=true` and
+// dev-only, so production never allocates or retains anything.
+//
+// The sink also carries each draft's RESOLVED provider/model, which is what
+// makes heterogeneity verifiable from the results file rather than assumed from
+// settings: with `maxSwarmSize` personas mapped onto three tiers, two personas
+// can land on the same tier and silently give you one model twice.
+// ---------------------------------------------------------------------------
+
+const CAPTURE_ENV = "ORCHESTRA_EVAL_CAPTURE_SWARM";
+/** Bounded so a long run cannot grow the sink without limit. */
+const MAX_CAPTURED_CHATS = 500;
+
+export interface EvalSwarmDraft {
+  proposerId: string;
+  role: string;
+  text: string;
+  latencyMs: number;
+  provider: string;
+  model: string;
+  tier?: string;
+}
+
+export interface EvalSwarmTelemetry {
+  drafts: EvalSwarmDraft[];
+  disagreement: {
+    detected: boolean;
+    maxDistance: number;
+    averageDistance: number;
+    pairCount: number;
+    threshold: number;
+    ranSuccessfully: boolean;
+  };
+}
+
+const SWARM_SINK_KEY = Symbol.for("orchestra.evalSwarmTelemetry");
+
+function sink(): Map<string, EvalSwarmTelemetry> {
+  const g = globalThis as unknown as Record<symbol, Map<string, EvalSwarmTelemetry>>;
+  // PM #71 — a module-level `let` would be a different instance in each module
+  // graph, so the writer and the reader would never see the same map.
+  if (!g[SWARM_SINK_KEY]) g[SWARM_SINK_KEY] = new Map();
+  return g[SWARM_SINK_KEY];
+}
+
+/** True ONLY in a non-production process with the capture flag set. */
+export function isEvalSwarmCaptureActive(): boolean {
+  return process.env[CAPTURE_ENV] === "true" && evalArmsHonored();
+}
+
+/** Record one ensemble's drafts + disagreement. No-op unless capture is active. */
+export function recordEvalSwarmTelemetry(
+  chatId: string,
+  telemetry: EvalSwarmTelemetry
+): void {
+  if (!isEvalSwarmCaptureActive()) return;
+  const store = sink();
+  if (store.size >= MAX_CAPTURED_CHATS) {
+    const oldest = store.keys().next().value;
+    if (oldest !== undefined) store.delete(oldest);
+  }
+  store.set(chatId, telemetry);
+}
+
+/** Read and REMOVE one chat's telemetry (single consumer, no leak). */
+export function takeEvalSwarmTelemetry(chatId: string): EvalSwarmTelemetry | undefined {
+  const store = sink();
+  const value = store.get(chatId);
+  store.delete(chatId);
+  return value;
+}
+
 /**
  * One-line description of the active arms, for the eval report header and the
  * results JSON. Returns `null` when no arm flag is set (the production shape),

@@ -1,5 +1,5 @@
 import type { ToolSet, ToolExecutionOptions } from "ai";
-import { asRecord } from "@/lib/agent/agent-response";
+import { asRecord, LOOP_GUARD_REPEAT_MARKER } from "@/lib/agent/agent-response";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { capToolResultSize } from "@/lib/agent/token-governor";
 
@@ -324,8 +324,11 @@ export function applyGlobalToolLoopGuard(tools: ToolSet, dagContext?: { chatId: 
           if (recentCallKeys.length > REPEAT_WINDOW) recentCallKeys.shift();
           const repeatCount = recentCallKeys.filter((k) => k === callKey).length;
           if (repeatCount >= REPEAT_BLOCK_THRESHOLD) {
+            // Prefix is the shared LOOP_GUARD_REPEAT_MARKER so the turn-level
+            // loop-abort (agent-response.ts countTrailingLoopBlockSteps) can
+            // recognise this block from the step's tool result. Keep them in sync.
             return (
-              `[Loop guard] CRITICAL: you have issued this exact call ("${toolName}" with identical arguments) ${repeatCount} times within the last ${recentCallKeys.length} tool calls. ` +
+              `${LOOP_GUARD_REPEAT_MARKER} you have issued this exact call ("${toolName}" with identical arguments) ${repeatCount} times within the last ${recentCallKeys.length} tool calls. ` +
               `Repeating it will NOT change the result — this is a loop. This call was NOT executed.\n` +
               `Stop and do ONE of: (a) use the result you already obtained, (b) change the arguments, or (c) take a different approach to the task.`
             );

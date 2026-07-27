@@ -3,7 +3,6 @@
   "description": "Parser with 11 constraints including a banned import, an exact error string and a structured docstring.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

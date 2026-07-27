@@ -3,7 +3,6 @@
   "description": "Shell script with 12 hardening constraints including trap cleanup and NUL-safe iteration.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

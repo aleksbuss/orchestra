@@ -1,0 +1,39 @@
+{
+  "id": "204-audit-js-semantics",
+  "description": "Six-claim audit (js semantics) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `typeof null` returns `\"object\"`.\n2. `NaN === NaN` evaluates to true.\n3. `Array.prototype.sort` sorts numbers numerically by default.\n4. `String.prototype.length` counts UTF-16 code units, not user-perceived characters.\n5. `setTimeout(fn, 0)` runs `fn` synchronously before the current function returns.\n6. `async` functions in JavaScript run on separate OS threads.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,200}(false|not equal|Object\\.is|isNaN)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,220}(false|lexicograph|string|comparator|unicode)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,220}(false|asynchronous|task queue|after|event loop)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,220}(false|single|event loop|not.*thread|concurren)"
+    }
+  ]
+}

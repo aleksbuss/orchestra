@@ -1,0 +1,39 @@
+{
+  "id": "208-audit-complexity",
+  "description": "Six-claim audit (complexity) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. Binary search on a sorted array is O(log n).\n2. O(2n) is a strictly higher complexity class than O(n).\n3. Hash table lookup is O(1) average but O(n) worst case.\n4. Quicksort has O(n log n) worst-case time complexity.\n5. An algorithm with better asymptotic complexity is always faster in practice.\n6. Merge sort requires O(n) auxiliary space in the standard implementation.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,220}(false|same|constant factor|equivalent|o\\(n\\))"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,220}(false|o\\(n\\^?2\\)|n²|quadratic)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,240}(false|constant factor|small n|not always|cache)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

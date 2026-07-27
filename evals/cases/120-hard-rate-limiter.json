@@ -3,7 +3,6 @@
   "description": "Token-bucket limiter with 12 constraints including monotonic time and lazy refill.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

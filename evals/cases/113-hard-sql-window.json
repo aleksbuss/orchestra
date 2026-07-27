@@ -3,7 +3,6 @@
   "description": "One SQL statement with 11 clause-level constraints including a CTE and a window function.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

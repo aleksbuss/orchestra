@@ -3,7 +3,6 @@
   "description": "Value type with 12 constraints including a banned float and dunder completeness.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

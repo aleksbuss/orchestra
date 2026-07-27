@@ -3,7 +3,6 @@
   "description": "asyncio worker pool with 12 constraints (semaphore, timeout, cancellation, aggregation).",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

@@ -3,7 +3,6 @@
   "description": "API contract prose with 12 explicit content constraints.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

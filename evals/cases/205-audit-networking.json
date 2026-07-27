@@ -1,0 +1,39 @@
+{
+  "id": "205-audit-networking",
+  "description": "Six-claim audit (networking) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. DNS uses only UDP and never TCP.\n2. TCP guarantees delivery order of bytes within a connection.\n3. TCP preserves message boundaries, so one send equals one receive.\n4. TCP is always faster than UDP because it is more advanced.\n5. HTTPS hides the requested path from a network observer.\n6. HTTPS hides the destination hostname in all cases.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,220}(false|tcp|zone transfer|large response|both)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,220}(false|stream|no message boundaries|byte stream)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,220}(false|slower|overhead|handshake|udp is)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,240}(false|sni|dns|ip address|hostname is visible|not.*hidden)"
+    }
+  ]
+}

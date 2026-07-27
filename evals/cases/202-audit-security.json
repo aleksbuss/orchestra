@@ -1,0 +1,39 @@
+{
+  "id": "202-audit-security",
+  "description": "Six-claim audit (security) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. Hashing and encryption are the same operation with different names.\n2. A prepared statement prevents SQL injection.\n3. A prepared statement also prevents cross-site scripting.\n4. A JWT payload is encrypted, so it is safe to put a password in it.\n5. The `Secure` cookie flag means the cookie value is encrypted.\n6. MD5 is unsuitable for password storage.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,220}(false|one-way|not reversible|different)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,220}(false|does not|xss is|output encoding|unrelated)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,220}(false|base64|not encrypted|only signed|encoded)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,220}(false|only sent over https|not encrypt|transport)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

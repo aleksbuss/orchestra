@@ -3,7 +3,6 @@
   "description": "LRU cache class with 12 constraints including a banned stdlib shortcut and thread safety.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

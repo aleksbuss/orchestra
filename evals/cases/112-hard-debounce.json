@@ -3,7 +3,6 @@
   "description": "JS debounce with 12 constraints (leading/trailing, cancel/flush, this-binding, JSDoc).",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

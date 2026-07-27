@@ -3,7 +3,6 @@
   "description": "Refactor holding 12 constraints at once, several in tension with each other.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

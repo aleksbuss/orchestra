@@ -1,0 +1,39 @@
+{
+  "id": "206-audit-concurrency",
+  "description": "Six-claim audit (concurrency) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `volatile` in Java guarantees visibility but not atomicity of compound operations.\n2. A `HashMap` is safe for concurrent writes from multiple threads.\n3. A deadlock requires a circular wait among the involved parties.\n4. Making every method `synchronized` makes a class fully thread-safe under all usage.\n5. An immutable object is inherently thread-safe.\n6. A race condition can exist even when every individual operation is atomic.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,220}(false|not thread-safe|concurrenthashmap|corrupt)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,240}(false|check-then-act|compound|not sufficient|does not)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

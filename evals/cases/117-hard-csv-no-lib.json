@@ -3,7 +3,6 @@
   "description": "Manual CSV line parser with 11 constraints and a banned stdlib module.",
   "tags": [
     "multi-constraint",
-    "selection-ab",
     "hard"
   ],
   "input": {

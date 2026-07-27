@@ -163,6 +163,89 @@ which are the only quantities the decision rules read. What it does cost is exte
 validity: the arm means describe *hard* cases, not the average case, so the headline
 must always be reported as a contrast, never as "the swarm scores X%".
 
-## Results
+## Results (2026-07-27)
 
-*(filled in after the run — nothing above this line changes)*
+### The experiment could not be run as designed — and that is the finding
+
+The five-arm factorial never executed, because **no task class could be found where
+the control arm has room to improve.** With a single free agent scoring at or near
+the ceiling, every pre-registered contrast is mechanically bounded at ≤ 0: an arm
+cannot beat a control that is already perfect. This is not an underpowered result —
+it is a *saturated instrument*, and it invalidates the design rather than the
+hypothesis.
+
+Five independent task classes were built and measured on the control arm
+(`inclusionai/ling-3.0-flash:free`, single agent, no swarm):
+
+| # | Task class | Cases | Control mean score |
+|---|---|---|---|
+| 1 | Code authoring, 5–6 explicit constraints | 11 | **1.0000** (66/66) |
+| 2 | Code authoring, 10–14 constraints — banned imports, exact error strings, structured docstrings | 11 | **0.9917** |
+| 3 | The entire pre-existing corpus: fact-traps, sycophancy pressure, agentic/tool cases | 107 | **0.9635** (99/107 perfect) |
+| 4 | Six-claim audits — mixed true/false, scored per claim, compositional load | 12 × 2 | **1.0000** (144/144) |
+| 5 | **Generated logic-grid puzzles** — novel by construction, unique solution verified by brute force | 12 × 3 | **1.0000** (36/36) |
+
+Class 5 is the decisive one. Classes 1–4 could be dismissed as textbook material the
+model memorised; these puzzles were generated from a seeded RNG and each clue set
+was brute-forced to admit exactly one solution, so no model can have seen them. The
+hardest (5 houses, 9 clues) was solved correctly in **5.2 seconds**, matching the
+brute-force ground truth exactly, on all three repeats.
+
+Spot-checks confirm the scores are real capability, not lenient assertions: the
+2.8-second answer to "thread-safe O(1) LRU cache, 12 constraints, no
+`functools.lru_cache`" was a correct `OrderedDict` + `Lock` implementation.
+
+### What the swarm costs, at equal quality
+
+Since quality is pinned at the ceiling for every arm, the remaining measurable
+quantity is price. Same 12 puzzles, same model, same build:
+
+| Arm | Mean score | s/run | TTFT | Prompt tok/run | Completion tok/run | No-answer |
+|---|---|---|---|---|---|---|
+| control — single agent | 1.0000 | **3.7** | 3.5 | 12 903 | **585** | 0 |
+| C — DPG swarm + synthesis (today's default) | 1.0000 | **16.4** | 16.2 | 17 949 | 2 615 | 0 |
+| D — DPG swarm + tournament (selection) | 1.0000 | **27.2** | 26.9 | 18 147 | 2 907 | 0 |
+
+**On this workload the swarm buys nothing and costs 4.4× wall clock and 4.5×
+completion tokens; selection costs 7.4× and 5.0×.** TTFT tracks total latency almost
+exactly, so the entire penalty is paid before the user sees a single character —
+which is the cost the user actually feels.
+
+### One clearly positive result
+
+**The free-tier failover stack works.** Across 24 swarm runs — 3 free proposers
+fanned out in parallel against one shared free endpoint, the exact herd that
+produces upstream 429s — there were **zero delivery failures, zero degraded-to-
+single-agent collapses, and zero lost drafts.** That is the regime the retry /
+circuit-breaker / pacing / brain-ladder work was built for, and it held.
+
+### Honest scope
+
+- **Tested:** short-form verifiable tasks — code authoring under explicit
+  constraints, factual traps, sycophancy pressure, multi-claim auditing, novel
+  deductive puzzles. On all of these, one free agent is already at the ceiling.
+- **NOT tested:** long-horizon agentic work — multi-file edits, long tool loops,
+  work spanning many turns where errors compound. That is the operator's actual
+  usage and the only regime where a swarm still has a plausible case, because
+  variance there comes from accumulated state, not from single-shot difficulty. It
+  needs a different harness (programmatic verification of a repo end-state), which
+  this session did not build.
+- The arms C/D numbers are single-repeat (N=12 runs each). That is ample for the
+  latency and token ratios reported, which do not depend on variance, and it is
+  irrelevant for quality, which is pinned at 1.0 in every arm.
+
+### Verdict against the pre-registered kill criterion
+
+The criterion reads: *if the best swarm arm does not beat control by ≥ +0.05 mean
+score, the MoA feature does not earn its place.* Best swarm arm − control = **0.0000**
+on every task class measured. **The criterion is met on this workload**, with the
+scope caveat above: this is a verdict about short-form verifiable tasks, not about
+long-horizon agentic work, which remains genuinely untested.
+
+The defensible reading is not "multi-agent is worthless" but something narrower and
+more useful: **the swarm's value proposition cannot be located anywhere a current
+model already succeeds on the first try — and that is now most short-form tasks,
+free tier included.** Any future case for the swarm has to be made where single-pass
+success is genuinely below ceiling. If that regime cannot be found either, the
+honest move is the one the criterion already pre-committed to: keep the reliability
+engineering, and stop paying 4–7× latency for the ensemble.

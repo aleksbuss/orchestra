@@ -1,0 +1,39 @@
+{
+  "id": "200-audit-http-basics",
+  "description": "Six-claim audit (http basics) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. HTTP status 301 is a permanent redirect.\n2. A GET request is forbidden from having a body by the HTTP specification.\n3. HTTP/2 uses a binary framing layer rather than plain text.\n4. The `Authorization` header is encrypted by HTTPS in transit.\n5. Status 403 means the client is unauthenticated and should log in.\n6. CORS is enforced by the browser, not by the server.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct|верно)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,200}(false|not forbidden|discouraged|allowed|may have a body)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,220}(false|401|authenticated but|not authorized|permission)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

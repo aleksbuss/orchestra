@@ -90,6 +90,28 @@ describe("scrubProcessEnv", () => {
 
     expect(env.Authorization).toBeUndefined();
   });
+
+  // The CGI-convention names carry a real credential but contain no
+  // SECRET_ENV_RE token, so only their ALWAYS_SCRUB_NAMES entries stop them.
+  // The two KEPT names are the reason those entries are exact-match rather
+  // than an AUTH/AUTHORIZATION regex token: SSH_AUTH_SOCK is an agent socket
+  // path (scrubbing it breaks ssh/git in subprocesses) and AUTHORIZATION_HEADER
+  // is pinned as KEPT by the code-execution-env contract. Both directions are
+  // asserted here — a widened matcher fails on the keeps, a dropped entry fails
+  // on the scrubs.
+  it("scrubs HTTP_/PROXY_AUTHORIZATION, keeps SSH_AUTH_SOCK + AUTHORIZATION_HEADER", () => {
+    process.env.HTTP_AUTHORIZATION = "Bearer y";
+    process.env.PROXY_AUTHORIZATION = "Basic z";
+    process.env.SSH_AUTH_SOCK = "/tmp/ssh-agent.sock";
+    process.env.AUTHORIZATION_HEADER = "Bearer ...";
+
+    const env = scrubProcessEnv();
+
+    expect(env.HTTP_AUTHORIZATION).toBeUndefined();
+    expect(env.PROXY_AUTHORIZATION).toBeUndefined();
+    expect(env.SSH_AUTH_SOCK).toBe("/tmp/ssh-agent.sock");
+    expect(env.AUTHORIZATION_HEADER).toBe("Bearer ...");
+  });
 });
 
 describe("cliProviderEnv — keeps the CLI's OWN auth, drops everything else secret", () => {

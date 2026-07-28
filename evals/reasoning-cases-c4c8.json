@@ -1,0 +1,4 @@
+[
+  { "id": "c4", "q": "How many distinct ways can you make exactly 500 cents using coins worth 1, 5, 10, 25, 50, and 100 cents, if you may use AT MOST TWO of the 100-cent coins? Give a single number.", "answer": "95683" },
+  { "id": "c8", "q": "How many 4-digit numbers (from 1000 to 9999 inclusive) have four all-distinct digits AND are divisible by 12? Give a single number.", "answer": "388" }
+]

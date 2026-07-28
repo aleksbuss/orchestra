@@ -15,7 +15,13 @@ import { MockLanguageModelV3 } from "ai/test";
 import type { LanguageModelV3GenerateResult } from "@ai-sdk/provider";
 import type { AppSettings } from "@/lib/types";
 import { turnHasDeliverableAnswer, resolveTurnContinuation } from "./agent";
-import { detectPrematureCompletion, isDroppedNativeToolCall } from "./agent-response";
+import {
+  detectPrematureCompletion,
+  isDroppedNativeToolCall,
+  countTrailingLoopBlockSteps,
+  isLoopGuardRepeatBlock,
+  LOOP_GUARD_REPEAT_MARKER,
+} from "./agent-response";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -49,6 +55,57 @@ const assistantText = (text: string): ModelMessage => ({
   role: "assistant",
   content: [{ type: "text", text }],
 }) as unknown as ModelMessage;
+
+// ── Loop-abort detector (2026-07-28, DoubleTake-reviewed) ────────────────────
+// A "step" as the SDK exposes it in onFinish/stopWhen: only `toolResults` matter.
+const blockStep = () => ({
+  toolResults: [{ output: `${LOOP_GUARD_REPEAT_MARKER} you have issued this exact call...` }],
+});
+const okStep = (out: unknown = "ok") => ({ toolResults: [{ output: out }] });
+const textStep = () => ({ toolResults: [] as { output?: unknown }[] });
+
+describe("loop-abort — isLoopGuardRepeatBlock", () => {
+  it("detects the marker in a string output", () => {
+    expect(isLoopGuardRepeatBlock(`${LOOP_GUARD_REPEAT_MARKER} looping`)).toBe(true);
+  });
+  it("detects the marker in an object/JSON output shape", () => {
+    expect(isLoopGuardRepeatBlock({ type: "json", value: `${LOOP_GUARD_REPEAT_MARKER} x` })).toBe(true);
+  });
+  it("returns false for a normal successful result", () => {
+    expect(isLoopGuardRepeatBlock("✅ ALL TESTS PASSED")).toBe(false);
+    expect(isLoopGuardRepeatBlock({ ok: true })).toBe(false);
+  });
+});
+
+describe("loop-abort — countTrailingLoopBlockSteps (the strong-model safety guarantee)", () => {
+  it("counts consecutive trailing pure-block steps", () => {
+    expect(countTrailingLoopBlockSteps([okStep(), blockStep(), blockStep(), blockStep()])).toBe(3);
+  });
+
+  it("STRONG-MODEL SAFETY: a single block at the tail (then cap) does NOT reach the threshold", () => {
+    // The DoubleTake regression scenario: a strong model double-submits one
+    // identical call once near the cap. One trailing block ≪ LOOP_ABORT_CONSECUTIVE(3).
+    const steps = [okStep(), okStep(), okStep(), blockStep()];
+    expect(countTrailingLoopBlockSteps(steps)).toBe(1);
+  });
+
+  it("ANY forward progress resets the run — block, progress, block ⇒ tail count is 1", () => {
+    expect(countTrailingLoopBlockSteps([blockStep(), okStep(), blockStep()])).toBe(1);
+  });
+
+  it("a text-only (no-tool) tail step is NOT a loop — count 0", () => {
+    expect(countTrailingLoopBlockSteps([blockStep(), blockStep(), textStep()])).toBe(0);
+  });
+
+  it("a step mixing a block AND a successful result is progress, not a pure block", () => {
+    const mixed = { toolResults: [{ output: `${LOOP_GUARD_REPEAT_MARKER} x` }, { output: "real result" }] };
+    expect(countTrailingLoopBlockSteps([blockStep(), blockStep(), mixed])).toBe(0);
+  });
+
+  it("empty steps ⇒ 0", () => {
+    expect(countTrailingLoopBlockSteps([])).toBe(0);
+  });
+});
 
 describe("PM #69 — turnHasDeliverableAnswer", () => {
   it("DELIVERED: a `response` tool call carries the answer", () => {
@@ -166,6 +223,43 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
   // ── Step-cap PAUSE (operator-requested): a turn that exhausts its per-turn
   // step budget without delivering an answer must emit a DETERMINISTIC "press
   // Continue" notice, NOT a forced (masquerading-as-complete) model answer. ────
+  it("loop-abort PAUSE: no answer + loopAbortReached → deterministic loop-abort notice, NO model call", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [searchToolCall(), searchToolResult()],
+      finishReason: "tool-calls",
+      loopAbortReached: true,
+      model: modelThrowing() as never, // would throw if the forced-answer path ran
+    });
+    expect(res.text).toContain("stuck in a tool loop");
+    expect(res.text).toContain("Continue");
+    expect(res.uiNotice).toContain("tool loop");
+  });
+
+  it("loop-abort PAUSE does NOT fire when an answer WAS delivered via the response tool", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [responseToolCall("Actually finished.")],
+      finishReason: "tool-calls",
+      loopAbortReached: true,
+      model: modelThrowing() as never,
+    });
+    expect(res.text).toBe(""); // delivered → no pause, no auto-submit of prose
+  });
+
+  it("loop-abort takes PRECEDENCE over the step-cap (more specific stop reason)", async () => {
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [searchToolCall(), searchToolResult()],
+      finishReason: "tool-calls",
+      loopAbortReached: true,
+      stepLimitReached: true, // both set — loop-abort message must win
+      model: modelThrowing() as never,
+    });
+    expect(res.text).toContain("stuck in a tool loop");
+    expect(res.text).not.toContain("Reached the step limit");
+  });
+
   it("step-cap PAUSE: no answer + stepLimitReached → deterministic Continue notice, NO model call", async () => {
     const res = await resolveTurnContinuation({
       ...base,
@@ -263,7 +357,11 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
       model: modelThrowing() as never,
     });
     expect(res.text).toBe("");
-    expect(res.uiNotice).toMatch(/Could not produce a final answer/i);
+    // Free-tier track Sprint 3 — the contract is unchanged (empty text + a
+    // notice, never a throw); the message now names the likely cause and the
+    // operator's next move instead of just reporting the raw error.
+    expect(res.uiNotice).toMatch(/empty response/i);
+    expect(res.uiNotice).toMatch(/Continue|Settings/);
   });
 });
 

@@ -31,6 +31,7 @@ import {
   MOA_PROPOSERS,
   type MoAProposer,
 } from "@/lib/agent/moa-personas";
+import { applyIdenticalPromptsArm } from "@/lib/agent/eval-arms";
 
 /**
  * DDD / PM #89 — classify a Router failure so the fallback telemetry says WHY
@@ -233,7 +234,10 @@ INSTRUCTIONS:
     );
     return {
       requiresSwarm: object.requiresSwarm,
-      personas: applySkepticControlArm(personas),
+      // Both wrappers are strict no-ops unless their dev-only eval flag is set.
+      // Identical-prompts runs LAST because it replaces every persona outright
+      // (the self-MoA arm has no roles at all, skeptic control included).
+      personas: applyIdenticalPromptsArm(applySkepticControlArm(personas)),
       usage,
     };
   } catch (err) {
@@ -261,7 +265,7 @@ INSTRUCTIONS:
 
     return {
       requiresSwarm: true,
-      personas: applySkepticControlArm(fallbackPersonas),
+      personas: applyIdenticalPromptsArm(applySkepticControlArm(fallbackPersonas)),
       // Usage is unknown when the Router crashes; the chat banner just
       // misses the Router's tokens for this turn (a small undercount).
     };

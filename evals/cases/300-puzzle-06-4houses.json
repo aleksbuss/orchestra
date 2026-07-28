@@ -1,0 +1,36 @@
+{
+  "id": "300-puzzle-06-4houses",
+  "description": "Generated logic-grid puzzle (4 houses, 6 clues, unique solution verified by brute force).",
+  "tags": [
+    "puzzle",
+    "selection-ab",
+    "generated"
+  ],
+  "input": {
+    "message": "There are 4 houses in a row, numbered 1 to 4 from left to right. Each house has a different colour (red, green, blue, amber) and exactly one resident (Ada, Bruno, Chen, Dara).\n\nClues:\n1. Dara lives in the green house.\n2. Chen lives in house number 1 (houses are numbered 1 to 4 from left to right).\n3. Ada lives in house number 3 (houses are numbered 1 to 4 from left to right).\n4. Bruno lives somewhere to the left of Dara.\n5. Chen does NOT live in the amber house.\n6. Bruno lives in the blue house.\n\nDetermine, for every house number, who lives there and what colour it is. This puzzle has exactly one solution.\n\nEnd your answer with one line per house in EXACTLY this format:\nHouse 1: <name> - <colour>\nHouse 2: <name> - <colour>\n(and so on)",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "House\\s*1\\s*[:\\-]?\\s*\\**\\s*Chen\\s*\\**\\s*[-–—:]\\s*\\**\\s*red",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*2\\s*[:\\-]?\\s*\\**\\s*Bruno\\s*\\**\\s*[-–—:]\\s*\\**\\s*blue",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*3\\s*[:\\-]?\\s*\\**\\s*Ada\\s*\\**\\s*[-–—:]\\s*\\**\\s*amber",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*4\\s*[:\\-]?\\s*\\**\\s*Dara\\s*\\**\\s*[-–—:]\\s*\\**\\s*green",
+      "flags": "i"
+    }
+  ]
+}

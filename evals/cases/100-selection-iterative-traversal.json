@@ -1,0 +1,39 @@
+{
+  "id": "100-selection-iterative-traversal",
+  "description": "Recursion→iteration conversion with 6 constraints including an explicit complexity note.",
+  "tags": [
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Convert this recursive function to an ITERATIVE one:\n\ndef walk(node):\n    if node is None:\n        return []\n    return walk(node.left) + [node.value] + walk(node.right)\n\nRequirements, ALL must hold:\n1. Name it `walk_iterative`.\n2. It must NOT call itself (no recursion).\n3. Use an explicit stack (a list or collections.deque).\n4. Preserve in-order traversal semantics (left, value, right).\n5. Return an empty list for a None root.\n6. Include a comment stating the time complexity as O(n).\nOutput one Python code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+walk_iterative"
+    },
+    {
+      "type": "matches",
+      "pattern": "stack|deque"
+    },
+    {
+      "type": "matches",
+      "pattern": "while\\s+"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\.left"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\.right"
+    },
+    {
+      "type": "matches",
+      "pattern": "O\\(\\s*n\\s*\\)"
+    }
+  ]
+}

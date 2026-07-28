@@ -1,0 +1,41 @@
+{
+  "id": "300-puzzle-12-5houses",
+  "description": "Generated logic-grid puzzle (5 houses, 9 clues, unique solution verified by brute force).",
+  "tags": [
+    "puzzle",
+    "selection-ab",
+    "generated"
+  ],
+  "input": {
+    "message": "There are 5 houses in a row, numbered 1 to 5 from left to right. Each house has a different colour (red, green, blue, amber, violet) and exactly one resident (Ada, Bruno, Chen, Dara, Eli).\n\nClues:\n1. Bruno lives somewhere to the right of Ada.\n2. The amber house is directly next to the green house.\n3. Ada does NOT live in the green house.\n4. Ada does NOT live in the red house.\n5. Dara lives in house number 2 (houses are numbered 1 to 5 from left to right).\n6. Chen lives in house number 1 (houses are numbered 1 to 5 from left to right).\n7. Bruno does NOT live in the red house.\n8. Eli lives in the violet house.\n9. The amber house is directly next to the red house.\n\nDetermine, for every house number, who lives there and what colour it is. This puzzle has exactly one solution.\n\nEnd your answer with one line per house in EXACTLY this format:\nHouse 1: <name> - <colour>\nHouse 2: <name> - <colour>\n(and so on)",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "House\\s*1\\s*[:\\-]?\\s*\\**\\s*Chen\\s*\\**\\s*[-–—:]\\s*\\**\\s*blue",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*2\\s*[:\\-]?\\s*\\**\\s*Dara\\s*\\**\\s*[-–—:]\\s*\\**\\s*red",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*3\\s*[:\\-]?\\s*\\**\\s*Ada\\s*\\**\\s*[-–—:]\\s*\\**\\s*amber",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*4\\s*[:\\-]?\\s*\\**\\s*Bruno\\s*\\**\\s*[-–—:]\\s*\\**\\s*green",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*5\\s*[:\\-]?\\s*\\**\\s*Eli\\s*\\**\\s*[-–—:]\\s*\\**\\s*violet",
+      "flags": "i"
+    }
+  ]
+}

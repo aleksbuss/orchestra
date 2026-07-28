@@ -1,0 +1,41 @@
+{
+  "id": "300-puzzle-10-5houses",
+  "description": "Generated logic-grid puzzle (5 houses, 8 clues, unique solution verified by brute force).",
+  "tags": [
+    "puzzle",
+    "selection-ab",
+    "generated"
+  ],
+  "input": {
+    "message": "There are 5 houses in a row, numbered 1 to 5 from left to right. Each house has a different colour (red, green, blue, amber, violet) and exactly one resident (Ada, Bruno, Chen, Dara, Eli).\n\nClues:\n1. Chen does NOT live in the amber house.\n2. Ada lives somewhere to the left of Chen.\n3. Eli lives in house number 2 (houses are numbered 1 to 5 from left to right).\n4. Dara lives in the green house.\n5. The green house is directly next to the violet house.\n6. Ada lives in house number 4 (houses are numbered 1 to 5 from left to right).\n7. Ada does NOT live in the amber house.\n8. Bruno lives in the red house.\n\nDetermine, for every house number, who lives there and what colour it is. This puzzle has exactly one solution.\n\nEnd your answer with one line per house in EXACTLY this format:\nHouse 1: <name> - <colour>\nHouse 2: <name> - <colour>\n(and so on)",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "House\\s*1\\s*[:\\-]?\\s*\\**\\s*Bruno\\s*\\**\\s*[-–—:]\\s*\\**\\s*red",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*2\\s*[:\\-]?\\s*\\**\\s*Eli\\s*\\**\\s*[-–—:]\\s*\\**\\s*amber",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*3\\s*[:\\-]?\\s*\\**\\s*Dara\\s*\\**\\s*[-–—:]\\s*\\**\\s*green",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*4\\s*[:\\-]?\\s*\\**\\s*Ada\\s*\\**\\s*[-–—:]\\s*\\**\\s*violet",
+      "flags": "i"
+    },
+    {
+      "type": "matches",
+      "pattern": "House\\s*5\\s*[:\\-]?\\s*\\**\\s*Chen\\s*\\**\\s*[-–—:]\\s*\\**\\s*blue",
+      "flags": "i"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "id": "84-agentic-debug-and-prove",
+  "description": "Multi-step agentic debugging: find the bug, fix it, RUN the fixed code to prove it, report the proven output. Role headroom: debugger / verifier.",
+  "tags": ["agentic", "tools", "multi-constraint", "honest-test"],
+  "input": {
+    "message": "This Python function is supposed to return the number of vowels in a string but it is buggy:\n\ndef count_vowels(s):\n    vowels = 'aeiou'\n    count = 0\n    for ch in s:\n        if ch in vowels:\n            count = 1\n    return count\n\nFind the bug, fix it, then ACTUALLY RUN the fixed function with the code_execution tool on the string 'Orchestra Evaluation Harness' and report the exact count it printed. State the bug in one sentence.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    { "type": "matches", "pattern": "\\b11\\b" },
+    { "type": "matches", "pattern": "count\\s*\\+=\\s*1|count\\s*=\\s*count\\s*\\+\\s*1" }
+  ]
+}

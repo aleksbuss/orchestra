@@ -1,0 +1,39 @@
+{
+  "id": "99-selection-api-spec",
+  "description": "API endpoint spec with 6 prose-level constraints (format-insensitive but checkable).",
+  "tags": [
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Specify a REST endpoint for creating a payment.\nRequirements, ALL must appear in your answer:\n1. State the HTTP method and path explicitly.\n2. The success response status must be 201.\n3. A validation failure must return 400.\n4. An unauthenticated request must return 401.\n5. Describe an idempotency mechanism (e.g. an Idempotency-Key header) so a retried request cannot double-charge.\n6. List the JSON request body fields with their types.\nBe concise. Plain markdown, no preamble.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "POST\\s+/"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b201\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b400\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\b401\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "idempoten"
+    },
+    {
+      "type": "matches",
+      "pattern": "amount[\\s\\S]{0,40}(number|integer|float|decimal|int)|(string|number|integer)[\\s\\S]{0,40}currency"
+    }
+  ]
+}

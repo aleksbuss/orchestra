@@ -1,0 +1,39 @@
+{
+  "id": "210-audit-git",
+  "description": "Six-claim audit (git) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `git commit --amend` rewrites the most recent commit, creating a new hash.\n2. Amending a commit that has already been pushed is safe for collaborators.\n3. `git force push` with `--force-with-lease` is safer than plain `--force`.\n4. `git revert` deletes the offending commit from history.\n5. A detached HEAD state means commits can be lost if you switch branches without a reference.\n6. `.gitignore` stops tracking a file that is already committed.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,240}(false|rewrites|diverge|not safe|force)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,240}(false|new commit|inverse|does not delete|keeps history)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,240}(false|already tracked|git rm --cached|does not)"
+    }
+  ]
+}

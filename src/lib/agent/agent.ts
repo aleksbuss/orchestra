@@ -7,6 +7,10 @@ import {
   type PrepareStepFunction,
 } from "ai";
 import { buildBoundedRecallBlock, resolveRecallBudgetChars } from "@/lib/agent/deep-recall";
+import {
+  resolveDegradationPolicy,
+  type DegradationPolicy,
+} from "@/lib/agent/degradation-policy";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
@@ -61,6 +65,8 @@ import {
   detectPrematureCompletion,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
+  countTrailingLoopBlockSteps,
+  LOOP_ABORT_CONSECUTIVE,
 } from "@/lib/agent/agent-response";
 import type { TurnContinuationResult } from "@/lib/agent/agent-response";
 // PM #81 Sprint 2 — active self-heal for hallucinated (printed-as-text) tool calls.
@@ -102,6 +108,22 @@ export type { TurnContinuationResult };
 // "done"). See resolveTurnContinuation (agent-response.ts).
 const MAX_TOOL_STEPS_PER_TURN = 50;
 const MAX_TOOL_STEPS_SUBORDINATE = 25;
+
+/**
+ * stopWhen predicate (2026-07-28, DoubleTake-reviewed): abort the tool loop when
+ * the model is STUCK repeating an identical (tool+args) call the loop guard keeps
+ * blocking (≥ LOOP_ABORT_CONSECUTIVE consecutive pure loop-guard-block steps).
+ *
+ * A spiral is a FAILURE state, not a finish — so we bound it, we do NOT convert
+ * it to "done". A WEAK model that compulsively re-runs one passing command now
+ * aborts in ~3 steps instead of bleeding to the 50-step cap; a STRONG model never
+ * repeats one BLOCKED call 3× in a row (it changes arguments), so this has ZERO
+ * regression surface for strong models. onFinish re-derives the same signal
+ * (`countTrailingLoopBlockSteps`) to drive the honest loop-abort PAUSE notice.
+ */
+const loopAbortStop = (opts: {
+  steps: ReadonlyArray<{ toolResults?: ReadonlyArray<{ output?: unknown }> }>;
+}): boolean => countTrailingLoopBlockSteps(opts.steps) >= LOOP_ABORT_CONSECUTIVE;
 
 /**
  * Sprint A4 — number of most-recent messages kept VERBATIM in the live context
@@ -294,7 +316,7 @@ async function runSubAgent(
       tools,
       maxRetries: 3,
       prepareStep: tokenGovernor,
-      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal,
@@ -373,6 +395,14 @@ export interface RunAgentOptions {
    * `settings.reflection.enabled` for this run only. PM #22: same threading.
    */
   deepAudit?: boolean;
+  /**
+   * Sprint 4 (free-tier failover) — per-request degradation policy. Governs
+   * whether Orchestra may substitute another configured model when the chosen
+   * one will not answer. PM #22: same threading as `forceSwarm`/`deepAudit`
+   * (interactive stream + background dispatch + queue persistence + daemon
+   * continuation). Unattended runs are forced to `speed` via `isBackground`.
+   */
+  degradationPolicy?: DegradationPolicy;
   isBackground?: boolean;
   abortSignal?: AbortSignal;
   preset?: PresetTier;
@@ -748,6 +778,8 @@ export async function runAgent(options: RunAgentOptions) {
         forceSwarm: options.forceSwarm,
         skepticModelOverride: options.skepticModelOverride,
         deepAudit: options.deepAudit,
+        degradationPolicy: options.degradationPolicy,
+        background: options.isBackground,
       });
       turnExtraUsage = moaResult.cumulativeUsage;
 
@@ -932,7 +964,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       ? {
           // PM #65 — AI SDK v5 removed `maxSteps` from streamText; it was a
           // silently-ignored no-op here. The tool loop is bounded by `stopWhen`.
-          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")]
+          stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response"), loopAbortStop]
         }
       : {}),
     temperature: settings.chatModel.temperature ?? 0.7,
@@ -1028,6 +1060,18 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         const stepLimitReached =
           stepCount !== undefined && stepCount >= MAX_TOOL_STEPS_PER_TURN;
 
+        // Loop-abort (2026-07-28): did the turn stop EARLY because the model was
+        // stuck repeating an identical blocked call? Re-derive the same signal
+        // the `loopAbortStop` stopWhen used, from the final steps, so the pause
+        // notice can distinguish "stuck in a loop" from "hit the 50-step cap".
+        const loopAbortReached =
+          Array.isArray((event as unknown as { steps?: unknown[] }).steps) &&
+          countTrailingLoopBlockSteps(
+            (event as unknown as {
+              steps: ReadonlyArray<{ toolResults?: ReadonlyArray<{ output?: unknown }> }>;
+            }).steps
+          ) >= LOOP_ABORT_CONSECUTIVE;
+
         const rawResponseMessages = event.response.messages;
 
         // PM #81 Sprint 2 — action-tool hallucination self-heal. A degraded model
@@ -1089,7 +1133,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           isDroppedNativeToolCall({
             finishReason,
             useTools,
-            stepLimitReached,
+            // A loop-abort is a STOP REASON, not a dropped native call — treat it
+            // like the step-cap so the dropped-call re-issue never fires on it.
+            stepLimitReached: stepLimitReached || loopAbortReached,
             hallucinated: hallucinatedCall !== null,
             responseMessages: rawResponseMessages,
           })
@@ -1143,6 +1189,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // this is a no-op then; a FAILED re-issue (markup stripped, nothing added)
         // is non-deliverable → it forces a plain final answer (the Sprint 1 path).
         const turnExtra = await resolveTurnContinuation({
+          loopAbortReached,
           responseMessages,
           finishReason,
           model,
@@ -1152,6 +1199,17 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           settings,
           stepLimitReached,
           abortSignal: options.abortSignal,
+          // Free-tier track Sprint 3 — the endpoint identity the forced
+          // final-answer path needs to track health against and to substitute
+          // away from when it delivers nothing.
+          brainConfig: resolvedModelConfig,
+          projectId: options.projectId,
+          currentPath: options.currentPath,
+          degradationPolicy: resolveDegradationPolicy(
+            settings,
+            options.degradationPolicy,
+            { background: options.isBackground }
+          ),
         });
         const continuationText = turnExtra.text;
         const continuationUsage = turnExtra.usage;
@@ -1485,7 +1543,7 @@ export async function runAgentText(options: {
       tools,
       maxRetries: 3,
       prepareStep: tokenGovernor,
-      stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response")],
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal: options.abortSignal,
@@ -1695,7 +1753,7 @@ export async function runSubordinateAgent(options: {
       tools,
       maxRetries: 3,
       prepareStep: tokenGovernor,
-      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response")],
+      stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       abortSignal: options.abortSignal,

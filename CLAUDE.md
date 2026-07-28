@@ -537,7 +537,7 @@ When you add a new persistent surface, add a row here in the same commit (Critic
 - Run `npm run scrub:secrets` before sharing the tree externally (issue attachments, demos, repomix bundles, screenshots of editor panes).
 - Before deleting or overwriting files in `data/`, copy the affected file aside — `data/` IS the database, and there is no undo.
 - For changes to SSE / agent / MoA / file-storage paths, run the relevant Vitest suite (`npm test -- <pattern>`) AND boot the dev server to manually verify a real chat completes end-to-end. Unit tests do not catch PM #4/#5-class bugs.
-- **Audit gate (Sprint 1 audit follow-up).** `npm run audit:gate` = `npm audit --audit-level=critical --omit=dev` is wired into `verify:strict`. Today's bar is **zero critical advisories on prod dependencies**. We deliberately do NOT block on `high` yet because 15 known transitive highs remain (their parents need coordinated bumps tracked as ongoing tech debt — see `npm audit` output for the list). Raising the bar to `high` is a one-character change here once those transitives are cleared; do it then. Reasoning: a permanently-red `high` gate trains everyone to ignore the gate, defeating the point.
+- **Audit gate (Sprint 1 audit follow-up).** `npm run audit:gate` = `npm audit --audit-level=critical --omit=dev` is wired into `verify:strict`. Today's bar is **zero critical advisories on prod dependencies**. We deliberately do NOT block on `high` yet because known transitive highs remain (**8 of them as of 2026-07-28**, down from 15 — `sharp`→`libvips` is the bulk; their parents need coordinated bumps tracked as ongoing tech debt — re-read `npm audit --omit=dev` for the live list rather than trusting this number). Raising the bar to `high` is a one-character change here once those transitives are cleared; do it then. Reasoning: a permanently-red `high` gate trains everyone to ignore the gate, defeating the point.
 
 ### 10. Sprint 3 — File-size decomposition follow-ups
 
@@ -627,8 +627,8 @@ A 2026-06 track that fixed **silent context-window overflow** (especially local/
 - **Start Production:** `npm run start`
 - **Run Unit Tests:** `npm run test`
 - **Linting:** `npm run lint` (allows warnings — this is what CI runs) / `npm run lint:strict` (`--max-warnings 0`; a **local** tidiness target, NOT wired into CI — see the "What CI actually enforces" note below).
-- **TypeScript Check:** `npm run typecheck` (standalone `tsc --noEmit`)
-- **Pre-Deploy Gate:** `npm run verify` (lint + typecheck + tests + build; one-stop check before shipping)
+- **TypeScript Check:** `npm run typecheck` — TWO passes: `tsc --noEmit` (the app) **and** `tsc --noEmit -p tsconfig.node.json` (which is what covers `scripts/`).
+- **Pre-Deploy Gate:** `npm run verify` = **lint + tests + build**. ⚠️ It does **NOT** run typecheck — that lives only in **`npm run verify:strict`** (= lint + **typecheck** + tests + **audit:gate** + build). A `scripts/` type error (TS2352 on a `ChatMessage[]` cast) shipped through `verify` clean in 2026-07 and was caught only by running the steps by hand. **Run `verify:strict` before opening a PR; `verify` is the fast loop, not the gate.**
 - **Scrub Secrets:** `npm run scrub:secrets` (before sharing the tree externally)
 - **Reset Auth:** `npm run auth:reset` (recovery from forgotten password — see "Auth escape hatches" in Security Patterns)
 - **Sync test badge:** `npm run badge:sync` (derives the README "tests" badge count from vitest's own total; `-- --check` exits non-zero if stale). The count lives ONLY in the badge — prose is number-free — so this is the single update site (QA audit F-04). Don't hand-edit the badge number. **Run it in any PR that changes the test count** — it is a *manual* hygiene step, NOT a CI gate (so it CAN drift; it had to be re-synced 2644→2701 during the 2026-06 context-management track because nothing enforced it).

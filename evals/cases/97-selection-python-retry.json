@@ -1,0 +1,39 @@
+{
+  "id": "97-selection-python-retry",
+  "description": "Retry helper with 6 constraints (backoff, jitter, cap, exception filter, hints, docstring).",
+  "tags": [
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a Python function `retry_call(fn, attempts=3, base_delay=1.0)` that calls `fn()` and retries on failure.\nRequirements, ALL must hold:\n1. Use EXPONENTIAL backoff between attempts (delay doubles).\n2. Re-raise the last exception if every attempt fails — do NOT swallow it.\n3. Do not sleep after the FINAL failed attempt.\n4. Add full type hints on the signature.\n5. Include a docstring.\n6. Only use the standard library.\nOutput one Python code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+retry_call"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\*\\s*2|2\\s*\\*\\*|<<\\s*1|\\*=\\s*2"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "attempts\\s*-\\s*1|<\\s*attempts\\s*-|range\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "->\\s*\\w|:\\s*int\\b|:\\s*float\\b|Callable"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    }
+  ]
+}

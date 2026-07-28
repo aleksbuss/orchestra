@@ -54,9 +54,16 @@ vi.mock("@/lib/agent/presets", () => ({
   getWorkerConfig: vi.fn((_tier, chatModel) => chatModel),
 }));
 
-vi.mock("./semaphore", () => ({
-  agentSemaphore: { run: vi.fn(async (fn: () => Promise<unknown>) => fn()) },
-}));
+// Stub the GLOBAL agent semaphore (pass-through, so the fan-out isn't bounded
+// by this machine's RAM tier in tests) but keep the real `Semaphore` class —
+// `proposer-pacing.ts` (Sprint 2 free-tier pacing) constructs one.
+vi.mock("./semaphore", async (orig) => {
+  const actual = await orig<typeof import("./semaphore")>();
+  return {
+    ...actual,
+    agentSemaphore: { run: vi.fn(async (fn: () => Promise<unknown>) => fn()) },
+  };
+});
 
 vi.mock("@/lib/tools/search-engine", () => ({
   searchWeb: vi.fn(),
@@ -87,6 +94,14 @@ import {
 } from "./moa";
 import type { AppSettings } from "@/lib/types";
 import { generateText, generateObject } from "ai";
+import { createModel } from "@/lib/providers/llm-provider";
+import {
+  resetModelHealth,
+  recordModelFailure,
+  isModelCircuitOpen,
+  getModelHealthSnapshot,
+} from "./model-health";
+import { resetFreeTierPacing } from "./proposer-pacing";
 
 const mockedGenerateText = vi.mocked(generateText);
 const mockedGenerateObject = vi.mocked(generateObject);
@@ -111,6 +126,11 @@ function fakeSettings(): AppSettings {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Sprint 1 (free-tier failover) — the model-health breaker is PROCESS-GLOBAL
+  // and survives module reloads (Symbol.for store), so a failure-path test that
+  // opens a circuit would leak model substitution into every later test in this
+  // file. Reset it per test.
+  resetModelHealth();
 });
 
 describe("MOA_PROPOSERS — static fallback constant", () => {
@@ -445,6 +465,308 @@ describe("degradation signal — ALL proposers fail sets degradedToSingleAgent",
     // A healthy or bypassed run must NOT carry the flag (guard against a
     // future refactor setting it unconditionally).
     expect(result.bypassed).toBeUndefined();
+  }, 30_000);
+});
+
+describe("free-tier failover Sprint 1 — model circuit breaker in the proposer fan-out", () => {
+  const DEAD = "vendor/dead-model:free";
+
+  /** Settings whose every proposer tier lands on ONE (dead) free endpoint. */
+  function freeTierSettings(): AppSettings {
+    const s = fakeSettings();
+    const dead = { provider: "openrouter" as const, model: DEAD, apiKey: "k" };
+    s.proposerTiers = { fast: dead, balanced: dead, frontier: dead, skeptic: dead };
+    return s;
+  }
+
+  function threePersonas() {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Systems Analyst", systemPrompt: "You are a Systems Analyst.", color: "blue" },
+          { id: "pragmatist", role: "Pragmatist", systemPrompt: "You are a Pragmatist.", color: "green" },
+          { id: "critic", role: "Adversarial Critic", systemPrompt: "You are an Adversarial Critic and Red-Teamer.", color: "rose" },
+        ],
+      },
+    } as never);
+  }
+
+  /** Every model id `createModel` was asked to build. */
+  function createdModels(): string[] {
+    return vi
+      .mocked(createModel)
+      .mock.calls.map((c) => (c[0] as { model: string }).model);
+  }
+
+  beforeEach(() => {
+    delete process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD;
+    delete process.env.ORCHESTRA_MODEL_CIRCUIT_COOLDOWN_MS;
+    delete process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES;
+    // The test tier model ends in `:free`, so Sprint 2 pacing engages and would
+    // add ~900ms × index of real wall-clock per case. Collapse the stagger —
+    // the pacing MATH is covered by `proposer-pacing.test.ts`; what these cases
+    // assert is the breaker behaviour around it.
+    process.env.ORCHESTRA_FREE_STAGGER_MS = "1";
+    // Same reasoning for the empty-retry backoff: the LADDER is not what these
+    // cases assert, and the real 2s/4s steps would add ~12s of wall clock.
+    process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS = "1";
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    mockedGenerateText.mockReset();
+    vi.restoreAllMocks();
+    delete process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD;
+    delete process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES;
+    delete process.env.ORCHESTRA_FREE_STAGGER_MS;
+    delete process.env.ORCHESTRA_FREE_TIER_CONCURRENCY;
+    delete process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS;
+    resetFreeTierPacing();
+  });
+
+  it("paces the free-tier fan-out: no more than the configured number of proposers dispatch at once", async () => {
+    process.env.ORCHESTRA_FREE_TIER_CONCURRENCY = "1";
+    resetFreeTierPacing();
+    threePersonas();
+
+    let inFlight = 0;
+    let peak = 0;
+    mockedGenerateText.mockImplementation((async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 20));
+      inFlight -= 1;
+      return { text: "draft" };
+    }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    // 3 free proposers, budget 1 → strictly serialized. (The aggregator runs on
+    // the paid brain model, so it is not subject to the free-tier budget.)
+    expect(peak).toBe(1);
+  }, 30_000);
+
+  it("an OPEN circuit substitutes a healthy pool model — the dead endpoint is never dispatched", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+
+    // Mark the (single) configured tier model dead.
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", DEAD, "empty");
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(true);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    const models = createdModels();
+    expect(models.length).toBeGreaterThan(0);
+    // Substituted to the worker config (the only healthy pool entry).
+    expect(models).not.toContain(DEAD);
+    expect(models).toContain("gpt-4o");
+  }, 30_000);
+
+  it("a CLOSED circuit leaves the operator's tier model in place (no gratuitous substitution)", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    expect(createdModels()).toContain(DEAD);
+  }, 30_000);
+
+  it("empty bodies open the circuit so the NEXT turn substitutes", async () => {
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1";
+    process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES = "0";
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "" }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(true);
+  }, 30_000);
+
+  it("audit A2 — a proposer's empty ATTEMPTS count as ONE failure, not one per attempt", async () => {
+    // The counter is shared by every concurrent proposer on this endpoint.
+    // Per-attempt recording made 3 proposers × 1 transient empty look like 3
+    // consecutive failures → spurious open → in-flight retries abandoned →
+    // drafts lost. Only an EXHAUSTED proposer may count.
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "99"; // never open — measure raw counts
+    process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES = "2"; // 3 attempts per proposer
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "" }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    const entry = getModelHealthSnapshot().find((e) => e.model === DEAD)!;
+    // 3 proposers × 3 attempts = 9 empty bodies, but only 3 recorded failures.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(9);
+    expect(entry.totalFailures).toBe(3);
+  }, 60_000);
+
+  it("audit A2 — a transient empty that recovers on retry leaves NO mark on the breaker", async () => {
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1"; // one failure would open it
+    process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES = "2";
+    threePersonas();
+    // Every proposer: empty first, then a real draft on the retry.
+    const attempts = new Map<string, number>();
+    mockedGenerateText.mockImplementation((async (args: { system?: string }) => {
+      const key = args.system ?? "";
+      const n = (attempts.get(key) ?? 0) + 1;
+      attempts.set(key, n);
+      return n === 1 ? { text: "" } : { text: "recovered draft" };
+    }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(false);
+  }, 60_000);
+
+  it("a parent abort is NOT counted against the endpoint's circuit", async () => {
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1";
+    threePersonas();
+    mockedGenerateText.mockImplementation((async () => {
+      throw new Error("The operation was aborted.");
+    }) as never);
+
+    const controller = new AbortController();
+    controller.abort();
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+      abortSignal: controller.signal,
+    });
+
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(false);
+  }, 30_000);
+
+  it("DoubleTake #1 — a THROWN 429 is retried in-loop, not fatal to the proposer", async () => {
+    process.env.ORCHESTRA_PROPOSER_EMPTY_RETRIES = "2";
+    threePersonas();
+    const seen = new Map<string, number>();
+    mockedGenerateText.mockImplementation((async (args: { system?: string }) => {
+      const key = args.system ?? "";
+      const n = (seen.get(key) ?? 0) + 1;
+      seen.set(key, n);
+      // First call throttles; the retry succeeds.
+      if (n === 1) throw new Error("429 Too Many Requests");
+      return { text: "draft after throttle" };
+    }) as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    // Before the fix the throw escaped the retry loop and killed every
+    // proposer → 0 successful drafts → degraded collapse.
+    expect(result.degradedToSingleAgent).toBeFalsy();
+    expect(result.drafts.some((d) => d.text.includes("draft after throttle"))).toBe(true);
+  }, 60_000);
+
+  it("DoubleTake #4 — a non-endpoint error (over-long prompt) does NOT trip the circuit", async () => {
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1";
+    threePersonas();
+    mockedGenerateText.mockImplementation((async () => {
+      throw new Error("This model's maximum context length is 8192 tokens");
+    }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    // Our prompt was too long — marking the MODEL dead for every concurrent
+    // chat would be a wildly disproportionate response to our own bug.
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(false);
+  }, 30_000);
+
+  it("Sprint 4 — degradationPolicy=quality does NOT substitute a dead proposer model", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", DEAD, "empty");
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(true);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+      degradationPolicy: "quality",
+    });
+
+    // The user asked us NOT to swap models. The dead tier model is still what
+    // the proposers dial — the ensemble survives on whatever drafts come back.
+    expect(createdModels()).toContain(DEAD);
+  }, 30_000);
+
+  it("Sprint 4 — a BACKGROUND run substitutes even under quality (nobody to ask)", async () => {
+    threePersonas();
+    mockedGenerateText.mockImplementation(async () => ({ text: "draft" }) as never);
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", DEAD, "empty");
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+      degradationPolicy: "quality",
+      background: true,
+    });
+
+    expect(createdModels()).not.toContain(DEAD);
+  }, 30_000);
+
+  it("a provider error DOES open the circuit (classified, not swallowed)", async () => {
+    process.env.ORCHESTRA_MODEL_CIRCUIT_THRESHOLD = "1";
+    threePersonas();
+    mockedGenerateText.mockImplementation((async () => {
+      throw new Error("proposer model rate-limited (429)");
+    }) as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: freeTierSettings(),
+    });
+
+    expect(isModelCircuitOpen("openrouter", DEAD)).toBe(true);
   }, 30_000);
 });
 

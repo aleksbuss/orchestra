@@ -1,0 +1,39 @@
+{
+  "id": "98-selection-error-refactor",
+  "description": "Refactor to proper error handling — 6 constraints that trade off against each other.",
+  "tags": [
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Refactor this Python function:\n\ndef load(path):\n    f = open(path)\n    data = f.read()\n    print(\"loaded\")\n    return data\n\nRequirements, ALL must hold:\n1. Keep the name `load` and add full type hints.\n2. Use a context manager (`with`) so the file is always closed.\n3. Replace `print` with the `logging` module.\n4. Raise a custom exception class named `LoadError` when the file is missing, chaining the original with `raise ... from`.\n5. Add a docstring.\n6. Explicitly open the file with `encoding=\"utf-8\"`.\nOutput one Python code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "def\\s+load\\s*\\(\\s*path\\s*:\\s*str"
+    },
+    {
+      "type": "matches",
+      "pattern": "with\\s+open"
+    },
+    {
+      "type": "matches",
+      "pattern": "logging\\.|logger\\."
+    },
+    {
+      "type": "matches",
+      "pattern": "class\\s+LoadError"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise[\\s\\S]{0,80}\\bfrom\\b"
+    },
+    {
+      "type": "matches",
+      "pattern": "encoding\\s*=\\s*[\"']utf-8[\"']"
+    }
+  ]
+}

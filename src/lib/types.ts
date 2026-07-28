@@ -31,6 +31,15 @@ export interface ModelConfig {
 }
 
 export interface AppSettings {
+  /**
+   * What Orchestra may do when the configured model will not answer (free-tier
+   * failover, Sprint 4). `speed` (default) substitutes a healthy configured
+   * model and says so; `quality` never substitutes; `ask` never substitutes and
+   * offers the choice in the turn's closing notice. Background/Auto-Pilot runs
+   * always behave as `speed` — nobody is there to read a "try later" notice.
+   * See `agent/degradation-policy.ts`.
+   */
+  degradationPolicy?: "speed" | "quality" | "ask";
   chatModel: ModelConfig;
   utilityModel: ModelConfig;
   embeddingsModel: {

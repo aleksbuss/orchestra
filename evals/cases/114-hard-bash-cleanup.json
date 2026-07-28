@@ -1,0 +1,67 @@
+{
+  "id": "114-hard-bash-cleanup",
+  "description": "Shell script with 12 hardening constraints including trap cleanup and NUL-safe iteration.",
+  "tags": [
+    "multi-constraint",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Bash script that finds every `*.tmp` file under a directory given as `-d <dir>` and deletes files older than N days given as `-n <days>`.\nRequirements — ALL must hold:\n1. Shebang `#!/usr/bin/env bash`.\n2. `set -euo pipefail`.\n3. Parse the flags with `getopts` (not manual `$1` positional parsing).\n4. Print a usage message to STDERR and exit non-zero when a required flag is missing.\n5. Validate that the directory exists before doing anything.\n6. Validate that the days argument is a non-negative integer.\n7. Create a temporary working file with `mktemp`.\n8. Register a `trap` on EXIT that removes the temporary file.\n9. Iterate results NUL-safely: `find ... -print0` piped into `while IFS= read -r -d ''`.\n10. Never parse `ls` output.\n11. Quote every variable expansion.\n12. Do not use `eval`.\nOutput one bash code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "contains",
+      "value": "#!/usr/bin/env bash"
+    },
+    {
+      "type": "matches",
+      "pattern": "set\\s+-euo\\s+pipefail"
+    },
+    {
+      "type": "matches",
+      "pattern": "getopts"
+    },
+    {
+      "type": "matches",
+      "pattern": ">&2"
+    },
+    {
+      "type": "matches",
+      "pattern": "-d\\s+\"?\\$"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\[\\[?\\s*\"?\\$\\{?\\w+\\}?\"?\\s*=~|\\[0-9\\]\\+|\\*\\[!0-9\\]\\*"
+    },
+    {
+      "type": "matches",
+      "pattern": "mktemp"
+    },
+    {
+      "type": "matches",
+      "pattern": "trap\\s+"
+    },
+    {
+      "type": "matches",
+      "pattern": "EXIT"
+    },
+    {
+      "type": "matches",
+      "pattern": "-print0"
+    },
+    {
+      "type": "matches",
+      "pattern": "read\\s+-r\\s+-d\\s*''|read\\s+-d\\s*''\\s+-r"
+    },
+    {
+      "type": "matches",
+      "pattern": "-mtime|-newermt|\\+\\$\\{?\\w+"
+    },
+    {
+      "type": "not_contains",
+      "value": "eval "
+    }
+  ]
+}

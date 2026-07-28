@@ -1,0 +1,39 @@
+{
+  "id": "203-audit-databases",
+  "description": "Six-claim audit (databases) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `TRUNCATE` and `DELETE` without a WHERE clause are equivalent in every respect.\n2. A PRIMARY KEY column needs a separate index created manually for fast lookups.\n3. `COUNT(*)` and `COUNT(column)` can return different numbers.\n4. Adding an index to every column always improves database performance.\n5. `NULL = NULL` evaluates to NULL, not TRUE, in standard SQL.\n6. A transaction at READ COMMITTED isolation can still see non-repeatable reads.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,240}(false|ddl|not logged|cannot be rolled back|resets|different)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,220}(false|automatically|already indexed|implicitly)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,220}(false|slows|write|overhead|not always)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

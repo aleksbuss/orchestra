@@ -1,0 +1,39 @@
+{
+  "id": "207-audit-floats-time",
+  "description": "Six-claim audit (floats time) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `0.1 + 0.2 == 0.3` is false in IEEE-754 double arithmetic.\n2. Money should be stored as a float and rounded on display.\n3. A day is always exactly 86400 seconds.\n4. UTC has no daylight saving time.\n5. A leap year is any year divisible by 4, without exception.\n6. Unix timestamps are timezone independent.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,240}(false|decimal|integer|minor unit|cents|never)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,240}(false|leap second|dst|daylight|not always)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,240}(false|100|400|century|exception)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "id": "211-audit-encoding",
+  "description": "Six-claim audit (encoding) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. UTF-8 encodes every character in exactly two bytes.\n2. One Unicode code point always equals one user-perceived character.\n3. ASCII is a subset of UTF-8 at the byte level.\n4. `Math.random()` is suitable for generating session tokens.\n5. Base64 encoding is a form of encryption.\n6. A UTF-8 BOM is required at the start of every UTF-8 file.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,220}(false|one to four|1-4|variable|four bytes)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,240}(false|grapheme|combining|cluster|emoji)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,240}(false|not cryptograph|predictable|csprng|crypto)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,220}(false|encoding|not encryption|reversible)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,220}(false|not required|optional|discouraged)"
+    }
+  ]
+}

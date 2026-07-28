@@ -1,0 +1,67 @@
+{
+  "id": "120-hard-rate-limiter",
+  "description": "Token-bucket limiter with 12 constraints including monotonic time and lazy refill.",
+  "tags": [
+    "multi-constraint",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python class `TokenBucket` implementing rate limiting.\nRequirements — ALL must hold:\n1. Class named exactly `TokenBucket`.\n2. Constructor takes `rate: float` (tokens per second) and `capacity: int`.\n3. Raise `ValueError` when rate <= 0 or capacity < 1.\n4. `allow(cost: int = 1) -> bool` consumes tokens and returns whether the request is permitted.\n5. Refill tokens LAZILY based on elapsed time — do not use a background thread or timer.\n6. Use `time.monotonic()`, NOT `time.time()` (a wall-clock jump must not grant free tokens).\n7. Never let the bucket exceed `capacity` tokens.\n8. Never let the token count go negative.\n9. Guard state with a `threading.Lock`.\n10. Full type hints on every method.\n11. A class docstring explaining the algorithm.\n12. Standard library only.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "class\\s+TokenBucket"
+    },
+    {
+      "type": "matches",
+      "pattern": "rate\\s*:\\s*float"
+    },
+    {
+      "type": "matches",
+      "pattern": "capacity\\s*:\\s*int"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "rate\\s*<=\\s*0|rate\\s*<\\s*=\\s*0|not\\s+rate\\s*>\\s*0"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+allow\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "->\\s*bool"
+    },
+    {
+      "type": "matches",
+      "pattern": "monotonic\\s*\\("
+    },
+    {
+      "type": "not_contains",
+      "value": "time.time()"
+    },
+    {
+      "type": "matches",
+      "pattern": "min\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "threading\\.Lock|Lock\\(\\)"
+    },
+    {
+      "type": "matches",
+      "pattern": "with\\s+self\\._?lock"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    }
+  ]
+}

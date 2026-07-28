@@ -1,0 +1,40 @@
+{
+  "id": "90-multi-constraint-python-fn",
+  "description": "6 independent constraints on one function — a reviewer/skeptic persona should catch the ones a single agent forgets.",
+  "tags": [
+    "agentic",
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a Python function named `normalize_scores` that takes a list of numbers and returns a new list scaled to the 0..1 range. Requirements, ALL of which must hold:\n1. Function name must be exactly `normalize_scores`.\n2. It must handle an EMPTY list by returning an empty list (no exception).\n3. It must handle the case where all values are IDENTICAL by returning a list of 0.0 values (no division by zero).\n4. It must include a docstring.\n5. It must NOT use numpy or any import.\n6. It must include a comment line stating the time complexity as O(n).\nOutput the final code in one Python code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "contains",
+      "value": "def normalize_scores"
+    },
+    {
+      "type": "matches",
+      "pattern": "if not .{0,20}(scores|values|nums|lst|data|arr)|len\\(.{1,12}\\)\\s*==\\s*0"
+    },
+    {
+      "type": "matches",
+      "pattern": "(max_?v?a?l?u?e?|mx|hi)\\s*(==|-)\\s*(min_?v?a?l?u?e?|mn|lo)|all.*(identical|same|equal)|range\\s*==\\s*0"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    },
+    {
+      "type": "not_contains",
+      "value": "import numpy"
+    },
+    {
+      "type": "matches",
+      "pattern": "O\\(\\s*n\\s*\\)"
+    }
+  ]
+}

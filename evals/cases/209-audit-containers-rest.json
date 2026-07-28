@@ -1,0 +1,39 @@
+{
+  "id": "209-audit-containers-rest",
+  "description": "Six-claim audit (containers rest) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. A Docker container runs its own kernel, separate from the host.\n2. A REST API must use JSON to be RESTful.\n3. REST statelessness means the server may not keep a database.\n4. PUT is idempotent while POST generally is not.\n5. An ORM makes an application immune to SQL injection.\n6. Containers share the host kernel but isolate namespaces and cgroups.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,220}(false|shares|host kernel|namespace)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,220}(false|xml|any representation|not required|media type)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,240}(false|session|per-request|client state|may keep|database is fine)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,240}(false|raw query|not immune|still)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

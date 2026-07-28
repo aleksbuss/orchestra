@@ -1,0 +1,39 @@
+{
+  "id": "93-selection-js-dedupe",
+  "description": "JS utility with 6 independent constraints (naming, JSDoc, immutability, empty input, no var, order preservation).",
+  "tags": [
+    "multi-constraint",
+    "honest-test"
+  ],
+  "input": {
+    "message": "Write a JavaScript function that removes duplicate values from an array.\nRequirements, ALL of which must hold:\n1. The function must be named exactly `dedupe`.\n2. It must be exported with `export function` (ES module syntax).\n3. It must NOT mutate the input array — return a NEW array.\n4. It must preserve the ORDER of first appearance.\n5. It must return an empty array for an empty input (no error).\n6. It must have a JSDoc comment block (/** ... */) above it, and must not use `var`.\nOutput the final code in one JavaScript code block.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "function\\s+dedupe|const\\s+dedupe\\s*="
+    },
+    {
+      "type": "matches",
+      "pattern": "export\\s+(function\\s+dedupe|const\\s+dedupe|default\\s+dedupe|\\{[^}]*dedupe)"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\[\\s*\\.\\.\\.new Set|new Set\\s*\\(|\\.filter\\s*\\(|\\.reduce\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "length\\s*===?\\s*0|!\\w+\\.length|\\.length\\s*<\\s*1|\\[\\s*\\]"
+    },
+    {
+      "type": "matches",
+      "pattern": "/\\*\\*"
+    },
+    {
+      "type": "not_contains",
+      "value": "var "
+    }
+  ]
+}

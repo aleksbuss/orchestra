@@ -1,0 +1,71 @@
+{
+  "id": "116-hard-money-type",
+  "description": "Value type with 12 constraints including a banned float and dunder completeness.",
+  "tags": [
+    "multi-constraint",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a Python class `Money` representing an amount in a currency.\nRequirements — ALL must hold:\n1. Class named exactly `Money`, immutable (use `__slots__` AND reject attribute mutation).\n2. Store the amount as `decimal.Decimal` — NEVER `float` (a float amount must be rejected or converted via `str`).\n3. Fields: `amount` and `currency` (a 3-letter uppercase code).\n4. Raise `ValueError` for a currency that is not exactly 3 letters.\n5. Implement `__add__` and `__sub__`, raising `ValueError` when the currencies differ.\n6. Implement `__eq__`.\n7. Implement `__hash__` consistently with `__eq__`.\n8. Implement `__repr__` showing amount and currency.\n9. Implement `__mul__` by an int or Decimal, but NOT by another Money.\n10. Round to 2 decimal places using `ROUND_HALF_UP` when formatting.\n11. Full type hints and a class docstring.\n12. Standard library only.\nOutput one Python code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "class\\s+Money"
+    },
+    {
+      "type": "matches",
+      "pattern": "__slots__"
+    },
+    {
+      "type": "matches",
+      "pattern": "Decimal"
+    },
+    {
+      "type": "matches",
+      "pattern": "len\\s*\\(\\s*currency\\s*\\)\\s*!=\\s*3|len\\s*\\(\\s*currency\\s*\\)\\s*==\\s*3"
+    },
+    {
+      "type": "matches",
+      "pattern": "raise\\s+ValueError"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__add__"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__sub__"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__eq__"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__hash__"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__repr__"
+    },
+    {
+      "type": "matches",
+      "pattern": "def\\s+__mul__"
+    },
+    {
+      "type": "matches",
+      "pattern": "ROUND_HALF_UP"
+    },
+    {
+      "type": "matches",
+      "pattern": "currency\\s*!=|self\\.currency\\s*!=\\s*other\\.currency"
+    },
+    {
+      "type": "matches",
+      "pattern": "\"\"\"|'''"
+    }
+  ]
+}

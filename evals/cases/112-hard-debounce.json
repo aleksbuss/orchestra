@@ -1,0 +1,71 @@
+{
+  "id": "112-hard-debounce",
+  "description": "JS debounce with 12 constraints (leading/trailing, cancel/flush, this-binding, JSDoc).",
+  "tags": [
+    "multi-constraint",
+    "hard"
+  ],
+  "input": {
+    "message": "Write a JavaScript `debounce` utility.\nRequirements — ALL must hold:\n1. Export a function named exactly `debounce` using ES module syntax.\n2. Signature `debounce(fn, wait, options)` where options supports `leading` and `trailing` booleans.\n3. `trailing` defaults to true, `leading` defaults to false.\n4. The returned function must expose a `.cancel()` method that clears any pending invocation.\n5. It must also expose a `.flush()` method that invokes the pending call immediately and returns its result.\n6. Preserve the caller's `this` binding when invoking `fn`.\n7. Forward all arguments to `fn`.\n8. Always `clearTimeout` the previous timer before scheduling a new one.\n9. Store and return the last result of `fn`.\n10. No external libraries (no lodash).\n11. A JSDoc block with at least one `@param` and a `@returns`.\n12. Do not use `var`.\nOutput one JavaScript code block and nothing else.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "export\\s+(function\\s+debounce|const\\s+debounce|default\\s+debounce|\\{[^}]*debounce)"
+    },
+    {
+      "type": "matches",
+      "pattern": "leading"
+    },
+    {
+      "type": "matches",
+      "pattern": "trailing"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\.cancel\\s*=|cancel\\s*[:(]"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\.flush\\s*=|flush\\s*[:(]"
+    },
+    {
+      "type": "matches",
+      "pattern": "\\.apply\\s*\\(|\\.call\\s*\\("
+    },
+    {
+      "type": "matches",
+      "pattern": "this"
+    },
+    {
+      "type": "matches",
+      "pattern": "clearTimeout"
+    },
+    {
+      "type": "matches",
+      "pattern": "setTimeout"
+    },
+    {
+      "type": "matches",
+      "pattern": "result"
+    },
+    {
+      "type": "matches",
+      "pattern": "@param"
+    },
+    {
+      "type": "matches",
+      "pattern": "@returns?"
+    },
+    {
+      "type": "not_contains",
+      "value": "var "
+    },
+    {
+      "type": "not_contains",
+      "value": "lodash"
+    }
+  ]
+}

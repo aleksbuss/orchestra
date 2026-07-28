@@ -1,0 +1,10 @@
+[
+  { "id": "c1", "q": "How many integers from 1 to 1000000 inclusive are divisible by EXACTLY TWO of the four numbers 2, 3, 5, and 7? Give a single number.", "answer": "266666" },
+  { "id": "c2", "q": "How many 5-digit numbers (from 10000 to 99999 inclusive) have digits that sum to exactly 20 AND are divisible by 11? Give a single number.", "answer": "486" },
+  { "id": "c3", "q": "How many subsets of the set {1,2,3,...,20} (including the empty set) have a sum that is divisible by 7? Give a single number.", "answer": "149800" },
+  { "id": "c4", "q": "How many distinct ways can you make exactly 500 cents using coins worth 1, 5, 10, 25, 50, and 100 cents, if you may use AT MOST TWO of the 100-cent coins? Give a single number.", "answer": "95683" },
+  { "id": "c5", "q": "What are the last three digits (the value modulo 1000) of 7^(7^7) + 3^(3^3), where 7^7 = 823543 and 3^3 = 27? Give a single number.", "answer": "330" },
+  { "id": "c6", "q": "How many integers n with 1 <= n <= 2000 are coprime to 2000 AND also satisfy n mod 7 = 1? Give a single number.", "answer": "114" },
+  { "id": "c7", "q": "How many monotonic lattice paths (moving only right or up, one unit at a time) from (0,0) to (7,7) do NOT pass through the point (3,4)? Give a single number.", "answer": "2207" },
+  { "id": "c8", "q": "How many 4-digit numbers (from 1000 to 9999 inclusive) have four all-distinct digits AND are divisible by 12? Give a single number.", "answer": "388" }
+]

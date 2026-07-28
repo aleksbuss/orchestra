@@ -8,9 +8,42 @@ import type {
   Assertion,
   AssertionResult,
   ContainsAssertion,
+  JudgeAssertion,
   MatchesAssertion,
   NotContainsAssertion,
 } from "./types";
+
+/**
+ * Score a single `judge` assertion asynchronously (LLM-as-judge). Kept out of
+ * the sync `runAssertion` switch so the string assertions stay pure/sync; the
+ * runner calls this to overwrite the SKIPPED judge slots under --real. Fails
+ * closed on a judge error.
+ */
+export async function scoreJudgeAssertion(
+  response: string,
+  spec: JudgeAssertion,
+  index: number,
+  judge: (rubric: string, response: string) => Promise<{ passed: boolean; reason: string }>
+): Promise<AssertionResult> {
+  try {
+    const verdict = await judge(spec.rubric, response);
+    return {
+      index,
+      type: "judge",
+      passed: verdict.passed,
+      reason: verdict.passed
+        ? undefined
+        : `judge FAIL for rubric ${JSON.stringify(spec.rubric)} — ${verdict.reason}`,
+    };
+  } catch (err) {
+    return {
+      index,
+      type: "judge",
+      passed: false,
+      reason: `judge error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
 
 function runContains(
   response: string,
@@ -72,7 +105,7 @@ export function runAssertion(
   assertion: Assertion,
   index: number
 ): AssertionResult {
-  let outcome: { passed: boolean; reason?: string };
+  let outcome: { passed: boolean; reason?: string; skipped?: boolean };
   switch (assertion.type) {
     case "contains":
       outcome = runContains(response, assertion);
@@ -82,6 +115,13 @@ export function runAssertion(
       break;
     case "matches":
       outcome = runMatches(response, assertion);
+      break;
+    case "judge":
+      // The judge is an async LLM call; this SYNC pass cannot run it. It is
+      // scored separately by the runner (`scoreJudgeAssertion`) under --real,
+      // which overwrites this slot. Left un-scored here it counts as SKIPPED so
+      // mock-only mode (CI) neither burns tokens nor false-fails the case.
+      outcome = { passed: true, skipped: true, reason: "skipped: judge requires --real" };
       break;
     default:
       // Exhaustiveness check — if someone adds a new AssertionKind to the
@@ -96,6 +136,7 @@ export function runAssertion(
     index,
     type: assertion.type,
     passed: outcome.passed,
+    skipped: outcome.skipped,
     reason: outcome.reason,
   };
 }

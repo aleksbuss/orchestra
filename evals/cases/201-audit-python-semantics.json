@@ -1,0 +1,39 @@
+{
+  "id": "201-audit-python-semantics",
+  "description": "Six-claim audit (python semantics) — mixed true/false, scored per claim.",
+  "tags": [
+    "audit",
+    "multi-claim"
+  ],
+  "input": {
+    "message": "Review the following statements. For EACH numbered statement, state whether it is TRUE or FALSE, and for every FALSE one give the correction in the same sentence. Be precise and do not skip any statement.\n\n1. `is` compares identity, not equality.\n2. A tuple is immutable, so it can never contain a mutable object.\n3. A mutable default argument is evaluated once at function definition time.\n4. `[] == False` evaluates to True in Python.\n5. Strings in Python are immutable.\n6. `sorted()` returns a new list while `list.sort()` sorts in place and returns None.",
+    "swarmEnabled": true,
+    "forceSwarm": true
+  },
+  "assertions": [
+    {
+      "type": "matches",
+      "pattern": "1[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "2[^\\n]{0,220}(false|can contain|may contain|references)"
+    },
+    {
+      "type": "matches",
+      "pattern": "3[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "4[^\\n]{0,220}(false|falsy but not equal|bool\\(\\[\\]\\)|is False|not equal)"
+    },
+    {
+      "type": "matches",
+      "pattern": "5[^\\n]{0,120}(true|correct)"
+    },
+    {
+      "type": "matches",
+      "pattern": "6[^\\n]{0,120}(true|correct)"
+    }
+  ]
+}

@@ -9,6 +9,18 @@ When working on this repository, you must strictly follow these rules:
 - Do not remove existing comments unless explicitly refactoring the commented logic.
 - **Consult `POST_MORTEMS.md`** before refactoring core logic (especially SSE streams, MoA, or file storage) to avoid repeating known historical bugs.
 
+### 🧭 Before you grep or open a raw file: query the graph
+
+This repo has a knowledge-graph index at `graphify-out/graph.json` (4698 nodes, 10131 edges, built from this exact codebase — code nodes come from deterministic AST parsing of the current working tree, not a cached summary). Before running `grep`/`rg`/`find` or opening a source file to explore ("where is X defined", "how does Y work", "what calls Z"), run:
+
+```
+graphify query "<question>"       # broad: scoped subgraph for a question
+graphify explain "<concept>"      # focused: one node + its neighbors
+graphify path "<A>" "<B>"         # how two things connect
+```
+
+It's usually cheaper and more precise than grep output, and it's current — not something to double-check against raw source before trusting. Fall back to raw `grep`/`Read` only when the graph doesn't surface what you need, or when you're modifying/debugging specific lines and need the literal text. This applies to subagents too — include it in any subagent prompt that explores code.
+
 ### 📚 Mandatory reading order (before any non-trivial change)
 
 1. This file (`CLAUDE.md`) — architectural rules and contracts.
@@ -625,4 +637,9 @@ A 2026-06 track that fixed **silent context-window overflow** (especially local/
 Don't trust prose that calls something "the CI gate" — read `ci.yml`. Today it runs exactly: `npm run lint` (warnings **allowed**), `npm run test:coverage` (vitest + the per-module/global coverage floors in `vitest.config.ts`), `npm run build`, and the Playwright `e2e` job. That's it. **`lint:strict` and `badge:sync --check` are deliberately NOT in CI:** `eslint.config.mjs` keeps `no-explicit-any` / `prefer-const` / `ban-ts-comment` / `react/no-unescaped-entities` at `warn` for vendor-SDK legacy debt, and wiring `--max-warnings 0` would make CI permanently red on ~26 known warnings — the same "a permanently-red gate trains everyone to ignore it" reasoning the `audit:gate` uses for `high` advisories. Clean the warnings incrementally (the 11 dead `eslint-disable` directives were swept 2026-06; the lint config is the single rule-severity source of truth — there is no longer a vestigial `.eslintrc.json`). If you tighten `lint` toward zero warnings, wire `lint:strict` into `ci.yml` IN THE SAME PR, not before.
 
 ---
-*Note for AI Assistants: Read this file entirely before making architectural changes to Orchestra. When in doubt, read the source code of `agent.ts` or `moa.ts` before writing new logic.*
+*Note for AI Assistants: Read this file entirely before making architectural changes to Orchestra. When in doubt, run `graphify query`/`graphify explain` on `agent.ts` or `moa.ts` before writing new logic — see "Before you grep or open a raw file" near the top of this file.*
+
+## graphify
+
+See "🧭 Before you grep or open a raw file: query the graph" near the top of this file — that's the live rule. Extra references: `graphify-out/wiki/index.md` for broad navigation, `graphify-out/GRAPH_REPORT.md` for a full architecture writeup.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

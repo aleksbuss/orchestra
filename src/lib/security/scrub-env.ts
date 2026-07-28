@@ -12,11 +12,20 @@
 
 const SECRET_ENV_RE =
   /(?:^|_)(?:KEY|KEYS|SECRET|SECRETS|TOKEN|TOKENS|PASSWORD|PASSWORDS|PASSWD|CREDENTIAL|CREDENTIALS|PRIVATE)(?:$|_)/i;
+// HTTP_AUTHORIZATION / PROXY_AUTHORIZATION: CGI-convention names that carry
+// real credentials but contain no SECRET_ENV_RE token. Exact-match here on
+// purpose — an AUTH/AUTHORIZATION regex token would scrub SSH_AUTH_SOCK
+// (breaking ssh/git in subprocesses) and AUTHORIZATION_HEADER (pinned as KEPT
+// in code-execution-env.test.ts). Arbitrary app-specific names (APP_AUTH,
+// X_AUTH_HEADER, …) are unbounded and NOT enumerated — accepted residual risk
+// under the single-trusted-operator threat model.
 const ALWAYS_SCRUB_NAMES = new Set([
   "ORCHESTRA_AUTH_SECRET",
   "ORCHESTRA_SESSION_SECRET",
   "AUTH",
   "AUTHORIZATION",
+  "HTTP_AUTHORIZATION",
+  "PROXY_AUTHORIZATION",
 ]);
 
 /**

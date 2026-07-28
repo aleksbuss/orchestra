@@ -15,6 +15,10 @@
  */
 import fsSync from "fs";
 import path from "path";
+// Type-only: erased at compile time, so it does NOT pull the module graph in
+// before `loadEnvLocal()` runs (the reason everything else is imported lazily
+// inside `main`).
+import type { ChatMessage } from "@/lib/types";
 
 function loadEnvLocal(): void {
   const envPath = path.join(process.cwd(), ".env.local");
@@ -34,7 +38,7 @@ if (!projectId || !task) {
   process.exit(2);
 }
 
-function summarizeTurn(messages: Array<Record<string, unknown>>, sinceIndex: number): void {
+function summarizeTurn(messages: ChatMessage[], sinceIndex: number): void {
   const slice = messages.slice(sinceIndex);
   const tools: Record<string, number> = {};
   const exitCodes: number[] = [];
@@ -42,16 +46,15 @@ function summarizeTurn(messages: Array<Record<string, unknown>>, sinceIndex: num
   let loopGuard = 0;
   let streak = 0;
   for (const m of slice) {
-    const content = typeof m.content === "string" ? (m.content as string) : JSON.stringify(m.content ?? "");
     if (m.role === "tool" || m.toolName) {
-      const t = (m.toolName as string) || "?";
+      const t = m.toolName || "?";
       tools[t] = (tools[t] || 0) + 1;
-      const mm = content.match(/Exit code:\s*(\d+)/);
+      const mm = m.content.match(/Exit code:\s*(\d+)/);
       if (mm) exitCodes.push(Number(mm[1]));
     }
-    if (/<tool_call>|<function=|<｜tool▁call|\{"call":"/.test(content)) printedMarkup++;
-    if (/loop guard|Loop guard|\[Loop/i.test(content)) loopGuard++;
-    if (/streak|read.*verify.*ask|refus/i.test(content)) streak++;
+    if (/<tool_call>|<function=|<｜tool▁call|\{"call":"/.test(m.content)) printedMarkup++;
+    if (/loop guard|Loop guard|\[Loop/i.test(m.content)) loopGuard++;
+    if (/streak|read.*verify.*ask|refus/i.test(m.content)) streak++;
   }
   console.log(`\n  ── turn summary ──`);
   console.log(`  new messages: ${slice.length}`);
@@ -127,7 +130,7 @@ async function main(): Promise<void> {
     }
     const chat = await getChat(chatId);
     if (chat) {
-      summarizeTurn(chat.messages as Array<Record<string, unknown>>, lastMsgCount);
+      summarizeTurn(chat.messages, lastMsgCount);
       console.log(`  turn wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s${ttft ? `, TTFT ${(ttft / 1000).toFixed(1)}s` : ""}`);
       lastMsgCount = chat.messages.length;
     }

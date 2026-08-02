@@ -168,7 +168,7 @@ Violating any of these causes data loss, data egress, RCE, or a silent productio
    const res = await fetch(safeUrl, { signal: AbortSignal.timeout(5000) });
    ```
 8. **`resolveGuardedAgentSettings()`** (`src/lib/agent/agent-privacy.ts`) in the agent layer — NEVER bare `getSettings()`. Privacy Mode is an air-gap; the guard is folded into settings acquisition so it cannot be skipped. Non-agent routes that embed (`/api/memory`, project knowledge import) call the guard explicitly and 403 before embedding.
-9. **`scrubProcessEnv({ EXPLICIT_VAR })`** (`src/lib/security/scrub-env.ts`) for every child process. NEVER `env: process.env` or `...process.env`.
+9. **`scrubProcessEnv({ EXPLICIT_VAR })`** (`src/lib/security/scrub-env.ts`) for every child process. NEVER `env: process.env` or `...process.env`. ⚠️ The CI gate scans only `src/lib/tools` and `src/lib/providers` — a spawn added anywhere else (`src/app/api/`, `src/lib/agent/`) is **unguarded**, so apply this by hand there and widen `ROOTS` in the gate.
 10. **RCE-class tools and MCP are denied to untrusted triggers by default.** Thread `context.untrustedTrigger` through EVERY delegated run — one `call_subordinate` hop must not launder the bypass. Route MCP acquisition through `getProjectMcpToolsForContext`.
 11. **Wrap every untrusted external byte** — MCP tool output, tool metadata, server-authored descriptions/schemas, fetched web pages — in `<UNTRUSTED_*>` markers before it reaches the prompt.
 12. **Never log, echo, or bundle** `.env.local` / `data/settings/*.json` contents.
@@ -203,7 +203,7 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | --- | --- |
 | [`abort-contract.test.ts`](src/lib/agent/abort-contract.test.ts) | `abortSignal` present at every generate/stream/embed callsite under `src/` |
 | [`agent-preflight-gate.test.ts`](src/lib/agent/agent-preflight-gate.test.ts) | No `src/lib/agent` module imports `getSettings` directly (Privacy-Mode chokepoint) |
-| [`no-raw-process-env.test.ts`](src/lib/security/no-raw-process-env.test.ts) | No `...process.env` / `env: process.env` in `src/lib/tools` or `src/lib/providers` |
+| [`no-raw-process-env.test.ts`](src/lib/security/no-raw-process-env.test.ts) | No `...process.env` / `env: process.env` — **only under `src/lib/tools` and `src/lib/providers`**; spawns elsewhere are unguarded |
 | [`frontend-invariants.test.ts`](src/components/frontend-invariants.test.ts) | No `new EventSource` outside `use-background-sync.ts`; no no-arg `useAppStore()` |
 | [`tool-support.test.ts`](src/lib/providers/tool-support.test.ts) | Cross-provider tool-capability detection stays consistent |
 | [`tool.test.ts`](src/lib/tools/tool.test.ts) | Full tool inventory + each availability gate's exact delta |

@@ -46,11 +46,26 @@ import path from "node:path";
 const ROOTS = ["src/lib", "src/app"];
 
 /**
- * A CALL to one of the delegation entry points — not its declaration. The
- * negative lookbehind on `function ` keeps the two `export async function`
- * definitions out of the scan, and `\b` keeps `callSubordinateFoo(` out.
+ * A CALL to one of the delegation entry points — not its declaration.
+ *
+ * The negative lookbehind on `function\s` keeps the two `export async function`
+ * definitions out of the scan (it inspects the characters IMMEDIATELY before the
+ * identifier, so `export async function callSubordinate(` is excluded — the
+ * `async` in front is irrelevant); `\b` keeps `callSubordinateFoo(` out; the
+ * optional `?.` covers an optional-chained call, which a bare `\s*\(` misses.
+ *
+ * KNOWN BOUNDS — this is a grep, not an AST pass, so it cannot see:
+ *   - An ALIASED call (`const run = runSubordinateAgent; run(...)`). Nothing
+ *     short of type-aware analysis catches that. Accepted: it is a deliberate
+ *     act, not the accidental refactor this gate exists to catch.
+ *   - A declaration split so the identifier starts its own line. That direction
+ *     is a false POSITIVE (a blocked build), which is the safe failure mode.
+ * A RENAME of either function or of the `untrustedTrigger` parameter does not
+ * silently disarm the gate: the `totalCalls` vacuity guard and the consumer
+ * assertions below both go red.
  */
-const DELEGATION_CALL = /(?<!function\s)\b(callSubordinate|runSubordinateAgent)\s*\(/;
+const DELEGATION_CALL =
+  /(?<!function\s)\b(callSubordinate|runSubordinateAgent)\s*(?:\?\.)?\s*\(/;
 
 /** Where the trust decision is made for external (untrusted) traffic. */
 const UNTRUSTED_ENTRY = "src/lib/external/handle-external-message.ts";
@@ -271,8 +286,14 @@ describe("PM #92 — the call_subordinate hop carries the value, not just the na
     const { callSubordinate } = await import("@/lib/tools/call-subordinate");
     await callSubordinate("task", undefined, 0, [], undefined, undefined);
 
+    // Assert the call happened before reading its args — otherwise a hop that
+    // stopped delegating entirely would surface as a confusing TypeError on
+    // `calls[0]` instead of a clear "was never called".
+    expect(runSubordinateAgent).toHaveBeenCalledTimes(1);
     // A trusted parent leaves it undefined — the gates treat that as trusted.
-    // Asserting the negative pins that the hop is a pass-through, not a default.
+    // Asserting the negative pins that the hop is a pass-through, not a default:
+    // hardcoding `true` inside callSubordinate would "fix" the structural scan
+    // while breaking every trusted caller (cron), and this catches that.
     expect(runSubordinateAgent.mock.calls[0][0].untrustedTrigger).toBeUndefined();
   });
 });

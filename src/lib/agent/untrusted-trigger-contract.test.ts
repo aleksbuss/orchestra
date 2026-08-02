@@ -65,6 +65,64 @@ interface Finding {
 }
 
 /**
+ * Blank out comments and string/template literals, preserving line structure.
+ *
+ * Every check in this file greps source text, and mutation-testing this gate
+ * proved a naive grep is worse than useless — it reports GREEN on a broken
+ * invariant. Two confirmed false negatives before this helper existed:
+ *
+ *   - Removing `context.untrustedTrigger` from the `callSubordinate(...)` call
+ *     and leaving `// untrustedTrigger deliberately not forwarded here` in the
+ *     argument span: the scanner saw the identifier and passed.
+ *   - Flipping the entry point to `untrustedTrigger: false` while a comment
+ *     still read "historically this was `untrustedTrigger: true,`": the entry
+ *     assertion passed with the gate fully disarmed.
+ *
+ * Blanking (rather than deleting) keeps every character position and newline,
+ * so reported line numbers still point at the real source line. It also fixes
+ * the bracket scanner below: a stray paren inside a comment or a string used to
+ * shift the end of the argument span, which can extend it past the real call.
+ */
+function blankCommentsAndStrings(src: string): string {
+  const out = src.split("");
+  let i = 0;
+  const blankTo = (end: number) => {
+    for (let k = i; k < end && k < out.length; k++) {
+      if (out[k] !== "\n") out[k] = " ";
+    }
+  };
+  while (i < src.length) {
+    const two = src.slice(i, i + 2);
+    if (two === "//") {
+      let end = src.indexOf("\n", i);
+      if (end === -1) end = src.length;
+      blankTo(end);
+      i = end;
+    } else if (two === "/*") {
+      let end = src.indexOf("*/", i + 2);
+      end = end === -1 ? src.length : end + 2;
+      blankTo(end);
+      i = end;
+    } else if (src[i] === '"' || src[i] === "'" || src[i] === "`") {
+      const quote = src[i];
+      let j = i + 1;
+      while (j < src.length) {
+        if (src[j] === "\\") j += 2;
+        else if (src[j] === quote) break;
+        else j++;
+      }
+      const end = Math.min(j + 1, src.length);
+      i += 1; // keep the opening quote so the token still reads as a literal
+      blankTo(end - 1);
+      i = end;
+    } else {
+      i++;
+    }
+  }
+  return out.join("");
+}
+
+/**
  * Bracket-balanced scan, same mechanism as the PM #23 abort audit: once a call
  * opens, walk to its matching close paren and check whether `untrustedTrigger`
  * appears anywhere inside the argument span.
@@ -73,7 +131,7 @@ function findDelegationCallsMissingFlag(file: string): {
   total: number;
   missing: Finding[];
 } {
-  const src = fs.readFileSync(file, "utf8").split("\n");
+  const src = blankCommentsAndStrings(fs.readFileSync(file, "utf8")).split("\n");
   let inCall = false;
   let depth = 0;
   let callStart = 0;
@@ -157,17 +215,19 @@ describe("PM #92 — untrustedTrigger threaded through every delegated run", () 
   it("the untrusted entry point still marks external runs as untrusted", () => {
     // Without this, every assertion above holds while the flag is never TRUE
     // for anyone — the gate would be perfectly threaded and completely inert.
-    const src = fs.readFileSync(UNTRUSTED_ENTRY, "utf8");
+    const src = blankCommentsAndStrings(fs.readFileSync(UNTRUSTED_ENTRY, "utf8"));
     expect(
-      /untrustedTrigger:\s*true/.test(src),
-      `${UNTRUSTED_ENTRY} must set \`untrustedTrigger: true\` — it is the only ` +
-        `place external (prompt-injectable) traffic is marked untrusted. Without ` +
-        `it the whole PM #92 gate is inert.`
+      /untrustedTrigger:\s*true/.test(src) && !/untrustedTrigger:\s*false/.test(src),
+      `${UNTRUSTED_ENTRY} must set \`untrustedTrigger: true\` (and never \`false\`) — ` +
+        `it is the only place external (prompt-injectable) traffic is marked ` +
+        `untrusted. Without it the whole PM #92 gate is inert. Note the check runs ` +
+        `over comment-stripped source, so a decoy literal in a comment will not ` +
+        `satisfy it.`
     ).toBe(true);
   });
 
   it.each(CONSUMERS)("%s still reads the flag to gate its capability", (file) => {
-    const src = fs.readFileSync(file, "utf8");
+    const src = blankCommentsAndStrings(fs.readFileSync(file, "utf8"));
     expect(
       /context\.untrustedTrigger/.test(src),
       `${file} no longer reads \`context.untrustedTrigger\`. The RCE-class tool ` +

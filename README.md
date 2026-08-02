@@ -6,7 +6,7 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-3680%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-3682%20passing-brightgreen)](#tests)
 [![Post-Mortems](https://img.shields.io/badge/post--mortems-97%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
@@ -236,7 +236,8 @@ Start with **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — guided tour 
 | [`docs/request-flow.md`](./docs/request-flow.md) | Implementing or debugging a new feature; need to know the request lifecycle |
 | [`docs/observability.md`](./docs/observability.md) | Operator / SRE; logging, tracing, on-disk audit trail |
 | [`POST_MORTEMS.md`](./POST_MORTEMS.md) | Before refactoring core orchestration logic; every architectural bug we've hit |
-| [`CLAUDE.md`](./CLAUDE.md) | Working on the codebase with AI assistance (Claude Code, Cursor, etc.); the rules a code-changing agent should follow |
+| [`CLAUDE.md`](./CLAUDE.md) | Working on the codebase with AI assistance (Claude Code, Cursor, etc.); the rules a code-changing agent should follow, plus a trigger index into `docs/references/` |
+| [`docs/references/`](./docs/references/) | The full contract text behind each rule — loaded on demand, not every session |
 | [`SECURITY.md`](./SECURITY.md) | Reporting a security issue or deploying beyond `localhost` |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | Opening an issue or PR |
 | [`NOTICE.md`](./NOTICE.md) | Per-directory licensing for the `bundled-skills/` collection |

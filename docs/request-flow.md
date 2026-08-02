@@ -2,7 +2,7 @@
 
 How the app processes a user message: from API entry to response streaming.
 
-> **Scope.** §1–§8 trace the **single-agent** path (swarm OFF, or the Router's bypass). When **Swarm is ON**, an MoA ensemble runs *inside* `runAgent` before the final stream — see **§7.5**. How the finished answer reaches the live UI is **§9**. For the deep MoA contracts see `CLAUDE.md` §1 and `docs/swarm-architecture.md`.
+> **Scope.** §1–§8 trace the **single-agent** path (swarm OFF, or the Router's bypass). When **Swarm is ON**, an MoA ensemble runs *inside* `runAgent` before the final stream — see **§7.5**. How the finished answer reaches the live UI is **§9**. For the deep MoA contracts see [`docs/references/moa-swarm-contracts.md`](./references/moa-swarm-contracts.md) §1 and `docs/swarm-architecture.md`.
 
 ---
 

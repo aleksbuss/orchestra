@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync, statSync } from "fs";
+import { readFileSync, existsSync, statSync, readdirSync } from "fs";
 import { fileURLToPath } from "url";
 
 /**
- * CLAUDE.md line-count drift gate (§7 doc-as-code + §8 file-size discipline).
+ * CLAUDE.md size budget + line-count drift gate (§7 doc-as-code + §8 file-size discipline).
  *
  * WHY THIS EXISTS: a 2026-07 skeptical audit found the §8/§10 "god-file" line
  * counts had silently rotted — `tool.ts` was documented at 1919 LOC while the
@@ -37,6 +37,28 @@ const CLAUDE_MD = fileURLToPath(new URL("../CLAUDE.md", import.meta.url));
 // Resolve against the URL OBJECT (not a `file://${string}` concat) so a repo
 // checked out under a path with spaces / unicode still resolves correctly.
 const REPO_ROOT_URL = new URL("../", import.meta.url);
+const REFERENCES_DIR = fileURLToPath(new URL("../docs/references/", import.meta.url));
+
+/**
+ * Level 1 size budget (§ "How this document is organized").
+ *
+ * WHY: CLAUDE.md loads into EVERY session, so its size is a permanent tax on the
+ * context the actual task needs — and it is over the instruction budget long
+ * before it is over any byte limit (frontier models follow ~150-200 instructions
+ * reliably; the harness's own system prompt already spends a chunk of that).
+ * The file reached 169K chars carrying shipped-track narrative that duplicated
+ * POST_MORTEMS.md, docs/ and git history. A hand-trim to 138K in 2026-07 regrew
+ * past 150K within 15 commits BECAUSE NOTHING ENFORCED IT — same lesson as every
+ * other invariant here: a control that depends on a human remembering is a
+ * control that gets skipped. The detail lives in `docs/references/*.md` and is
+ * loaded on demand via the trigger tables.
+ *
+ * The budget is deliberately well UNDER the harness limit: firing only at 150K
+ * would let the file rot back to unusable first. When a genuinely new *rule*
+ * needs Level 1 and pushes past the budget, move narrative out or raise this
+ * number consciously in the same PR — do not let it drift silently.
+ */
+const LEVEL_1_BUDGET_CHARS = 40_000;
 
 /**
  * Matches ONLY the structured §10 header form `` `src/lib/tools/tool.ts` (1919 LOC ``
@@ -77,8 +99,49 @@ function toleranceFor(claimed: number): number {
   return Math.max(50, Math.ceil(claimed * 0.05));
 }
 
+/**
+ * The §10 decomposition plan moved to `docs/references/file-size-decomposition.md`
+ * when CLAUDE.md was split into Level 1 / Level 2. Scan BOTH surfaces — every
+ * Level 2 reference, not just that one file — so a LOC claim is gated wherever it
+ * is written and moving a section between files can never silently un-gate it.
+ */
+function docSurfaces(): string {
+  const parts = [readFileSync(CLAUDE_MD, "utf8")];
+  if (existsSync(REFERENCES_DIR)) {
+    for (const name of readdirSync(REFERENCES_DIR)) {
+      if (name.endsWith(".md")) {
+        parts.push(readFileSync(fileURLToPath(new URL(name, new URL("../docs/references/", import.meta.url))), "utf8"));
+      }
+    }
+  }
+  return parts.join("\n");
+}
+
+describe("CLAUDE.md size budget", () => {
+  it(`Level 1 stays under the ${LEVEL_1_BUDGET_CHARS.toLocaleString()}-char budget`, () => {
+    const size = readFileSync(CLAUDE_MD, "utf8").length;
+    expect(
+      size <= LEVEL_1_BUDGET_CHARS,
+      `CLAUDE.md is ${size.toLocaleString()} chars, over the ${LEVEL_1_BUDGET_CHARS.toLocaleString()} Level 1 budget ` +
+        `(+${(size - LEVEL_1_BUDGET_CHARS).toLocaleString()}). CLAUDE.md loads into EVERY session. ` +
+        `Move rationale, per-PM narrative, shipped-track history or edge cases into docs/references/*.md ` +
+        `and leave a trigger-table row pointing at it — see "How this document is organized" in CLAUDE.md.`
+    ).toBe(true);
+  });
+
+  it("every docs/references file linked from CLAUDE.md exists", () => {
+    const doc = readFileSync(CLAUDE_MD, "utf8");
+    const linked = [...doc.matchAll(/docs\/references\/([a-z0-9-]+\.md)/g)].map((m) => m[1]);
+    expect(linked.length).toBeGreaterThanOrEqual(8);
+    for (const name of new Set(linked)) {
+      const abs = fileURLToPath(new URL(`../docs/references/${name}`, import.meta.url));
+      expect(existsSync(abs), `CLAUDE.md links docs/references/${name} but it does not exist`).toBe(true);
+    }
+  });
+});
+
 describe("CLAUDE.md line-count drift gate", () => {
-  const doc = readFileSync(CLAUDE_MD, "utf8");
+  const doc = docSurfaces();
   const claims = parseLocClaims(doc);
 
   it("finds the §10 god-file LOC claims to validate (guards against a broken parser)", () => {
@@ -88,12 +151,12 @@ describe("CLAUDE.md line-count drift gate", () => {
   });
 
   it.each(
-    parseLocClaims(readFileSync(CLAUDE_MD, "utf8")).map((c) => [c.file, c.claimed] as const)
+    parseLocClaims(docSurfaces()).map((c) => [c.file, c.claimed] as const)
   )("`%s` documented at %i LOC matches the real file within tolerance", (file, claimed) => {
     const abs = fileURLToPath(new URL(file, REPO_ROOT_URL));
     expect(
       existsSync(abs),
-      `CLAUDE.md §10 references "${file}" but the file does not exist. ` +
+      `The §10 decomposition plan references "${file}" but the file does not exist. ` +
         `Update or remove the LOC claim.`
     ).toBe(true);
     expect(statSync(abs).isFile(), `"${file}" is not a regular file`).toBe(true);
@@ -103,9 +166,9 @@ describe("CLAUDE.md line-count drift gate", () => {
     const drift = real - claimed;
     expect(
       Math.abs(drift) <= tol,
-      `CLAUDE.md says "${file}" is ${claimed} LOC; real is ${real} ` +
+      `The docs say "${file}" is ${claimed} LOC; real is ${real} ` +
         `(drift ${drift >= 0 ? "+" : ""}${drift}, tolerance ±${tol}). ` +
-        `Update the number in CLAUDE.md §8/§10 (doc-as-code, Critical Rule §7).`
+        `Update the number in docs/references/file-size-decomposition.md (doc-as-code, Critical Rule §7).`
     ).toBe(true);
   });
 });

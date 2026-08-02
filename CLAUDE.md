@@ -208,6 +208,7 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | [`tool-support.test.ts`](src/lib/providers/tool-support.test.ts) | Cross-provider tool-capability detection stays consistent |
 | [`tool.test.ts`](src/lib/tools/tool.test.ts) | Full tool inventory + each availability gate's exact delta |
 | [`claude-md-drift.test.ts`](src/claude-md-drift.test.ts) | This file's size budget + the LOC claims in the decomposition reference |
+| [`untrusted-trigger-contract.test.ts`](src/lib/agent/untrusted-trigger-contract.test.ts) | `untrustedTrigger` forwarded at every delegation callsite, set at the untrusted entry, and read by both capability gates (rule 10) |
 
 ---
 

@@ -83,7 +83,7 @@ The UI subscribes via `useChatError(chatId)` and renders the structured banner. 
 | `orchestra_tail_logs` | Recent structured log entries with filtering by `traceId`, `chatId`, `minLevel`, substring, time window. |
 | `orchestra_recent_errors` | Newest-first warn+error entries from a tight default window (1h). |
 | `orchestra_get_trace` | Every log line carrying a given `traceId` — the full server-side story of one chat turn. |
-| `orchestra_get_chat` | The on-disk JSON for a chat (canonical state, see CLAUDE.md § 'Observability'). |
+| `orchestra_get_chat` | The on-disk JSON for a chat (canonical state, see [`docs/references/observability-runbook.md`](./references/observability-runbook.md)). |
 | `orchestra_list_chats` | Recent chats from the chat index, newest first. |
 
 ### Setup

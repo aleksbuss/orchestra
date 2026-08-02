@@ -213,7 +213,7 @@ data/
 └── tmp/                      ← ephemeral, safe to wipe
 ```
 
-**Concurrency safety:** Every read-modify-write to a JSON file goes through [`withFileLock`](../src/lib/storage/fs-utils.ts) (in-process Map-keyed mutex) and writes through [`safeWriteFile`](../src/lib/storage/fs-utils.ts) (tmp-then-rename atomic write). **Single-process invariant** — this scheme provides no cross-process safety; deploying Orchestra in cluster mode (PM2 `instances: > 1`) is **not supported**. See `CLAUDE.md` §"Critical Rules" for the upgrade path if you need it.
+**Concurrency safety:** Every read-modify-write to a JSON file goes through [`withFileLock`](../src/lib/storage/fs-utils.ts) (in-process Map-keyed mutex) and writes through [`safeWriteFile`](../src/lib/storage/fs-utils.ts) (tmp-then-rename atomic write). **Single-process invariant** — this scheme provides no cross-process safety; deploying Orchestra in cluster mode (PM2 `instances: > 1`) is **not supported**. See [`docs/references/critical-rules.md`](./references/critical-rules.md) §1 for the upgrade path if you need it.
 
 **Project portability:** the `data/projects/<id>/` subtree is fully self-contained. `GET /api/projects/<id>/export` streams it as a ZIP including matching chats and a manifest. This is intentional: you can fork-and-share an entire project state.
 
@@ -250,7 +250,7 @@ What that means concretely:
 | Concern | How it's handled |
 |---|---|
 | Authentication | scrypt-hashed password in `data/settings/settings.json`. Session cookie signed with HMAC-SHA256 over `ORCHESTRA_AUTH_SECRET`. Refuses to start in production without a real secret (PM #12). |
-| Path traversal | Every API route that takes a user-supplied filename runs it through `assertPathInside` + a strict basename sanitizer. Audited routes are listed in `CLAUDE.md` §"Security Patterns". Pre-fix bugs caught by [PM #6](../POST_MORTEMS.md), [PM #16](../POST_MORTEMS.md), [PM #21](../POST_MORTEMS.md). |
+| Path traversal | Every API route that takes a user-supplied filename runs it through `assertPathInside` + a strict basename sanitizer. Audited routes are listed in [`docs/references/security-patterns.md`](./references/security-patterns.md). Pre-fix bugs caught by [PM #6](../POST_MORTEMS.md), [PM #16](../POST_MORTEMS.md), [PM #21](../POST_MORTEMS.md). |
 | SSRF | Server-side `fetch` to user-supplied URLs goes through `assertSafeOutboundUrl`. Rejects private/link-local/cloud-metadata addresses (169.254.169.254 etc.). PM #8. |
 | Secret leakage on SSR | `RootLayout` never reads files that contain auth secrets — UI preferences (theme, locale) load via inline `<script>` from `localStorage`. PM #15. |
 | Code execution | The agent's `code_execution` tool runs in `child_process.spawn` with `cwd` pinned to the project sandbox. In Docker, the `node` user has passwordless sudo to allow apt installs — this is a deliberate trade-off for OOTB experience. |
@@ -318,7 +318,7 @@ Documents and code paths to read next, in roughly increasing depth:
 1. [`README.md`](../README.md) — quick-start.
 2. [`docs/request-flow.md`](./request-flow.md) — narrative walkthrough of § 5 with file-by-file pointers.
 3. [`POST_MORTEMS.md`](../POST_MORTEMS.md) — every architectural bug found in development. Reads as a design retrospective.
-4. [`CLAUDE.md`](../CLAUDE.md) — AI-assistant-facing rules. Doubles as an architectural-decision register: every "Critical Rule" maps to a real incident.
+4. [`CLAUDE.md`](../CLAUDE.md) — AI-assistant-facing rules and the trigger index into [`docs/references/`](./references/), where the full contracts live. Together they double as an architectural-decision register: every non-negotiable maps to a real incident.
 5. [`docs/observability.md`](./observability.md) — logging, tracing, on-disk audit trail.
 6. The hot files in § 9 above, in order.
 

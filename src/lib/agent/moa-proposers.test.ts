@@ -63,7 +63,7 @@ vi.mock("@/lib/observability/logger", async (orig) => {
 });
 
 import { runProposerFanOut, type ProposerFanOutContext } from "./moa-proposers";
-import type { AppSettings } from "@/lib/types";
+import type { AppSettings, ModelConfig } from "@/lib/types";
 import { generateText } from "ai";
 import { resetModelHealth } from "./model-health";
 
@@ -88,11 +88,11 @@ function fakeSettings(): AppSettings {
 }
 
 function fakeCtx(overrides: Partial<ProposerFanOutContext> = {}): ProposerFanOutContext {
-  const workerConfig = { provider: "openai", model: "gpt-4o", apiKey: "k" };
+  const workerConfig: ModelConfig = { provider: "openai", model: "gpt-4o", apiKey: "k" };
   return {
     dynamicProposers: [
-      { id: "analyst", role: "First-Principles Analyst", systemPrompt: "You analyze from first principles." },
-      { id: "pragmatist", role: "Pragmatic Executor", systemPrompt: "You ship working solutions." },
+      { id: "analyst", role: "First-Principles Analyst", systemPrompt: "You analyze from first principles.", color: "blue" },
+      { id: "pragmatist", role: "Pragmatic Executor", systemPrompt: "You ship working solutions.", color: "green" },
     ],
     chatId: "c1",
     routerNodeId: "router-1",
@@ -104,7 +104,7 @@ function fakeCtx(overrides: Partial<ProposerFanOutContext> = {}): ProposerFanOut
     settings: fakeSettings(),
     degradationPolicy: undefined,
     background: undefined,
-    skepticConfig: null,
+    skepticConfig: undefined,
     workerConfig,
     safeHistory: [],
     searchEnabled: false,

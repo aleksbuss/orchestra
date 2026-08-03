@@ -5,6 +5,7 @@ import { useShallow } from "zustand/react/shallow";
 import { Users, Plane, Zap, ShieldAlert, Gauge } from "lucide-react";
 import { PresetSelector } from "./preset-selector";
 import { SkepticSelector } from "./skeptic-selector";
+import { FreeModeToggle } from "./free-mode-toggle";
 
 /**
  * Shared pill styling. The strip lives inside a fixed-height header that
@@ -32,6 +33,11 @@ export function SwarmConfig() {
           Model
         </span>
         <PresetSelector />
+        {/*
+          Sits with the model controls, not the per-turn pills: Free Mode
+          REPLACES model selection rather than modifying one turn's behaviour.
+        */}
+        <FreeModeToggle />
       </div>
 
       <div className="w-px h-5 bg-border mx-1.5 shrink-0 hidden sm:block" />

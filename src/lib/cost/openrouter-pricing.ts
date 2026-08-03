@@ -76,6 +76,13 @@ interface OpenRouterModelEntry {
     max_completion_tokens?: number | null;
     context_length?: number | null;
   };
+  // Capability list (`tools`, `structured_outputs`, `response_format`, …).
+  // Free Mode needs this: the MoA Router and the tournament judges go through
+  // `generateObject`, and a free model WITHOUT `structured_outputs` answers
+  // HTTP 400 — the Router then falls back to three STATIC personas and every
+  // judge fails, silently costing the swarm the two features that distinguish
+  // it from N-sampling. `tools` support does NOT imply `structured_outputs`.
+  supported_parameters?: string[] | null;
 }
 
 interface OpenRouterListing {
@@ -93,6 +100,11 @@ interface CacheFileShape {
   // posture as `maxOutput` — survives a warm-cache boot so `resolveContextWindow`
   // has exact OpenRouter windows before the first network fetch lands.
   contextLength?: Record<string, number>;
+  // Per-model capability list (`supported_parameters`). Same
+  // optional-for-back-compat posture: an older cache file loads clean, and
+  // persisting it means Free Mode can pick a structured-output-capable Router
+  // model on a warm-cache boot with no network fetch.
+  supportedParameters?: Record<string, string[]>;
 }
 
 const OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models";
@@ -117,6 +129,8 @@ interface PricingStore {
   fetchedAt: number | null;
   maxOutput: Map<string, number>;
   contextLength: Map<string, number>;
+  /** Per-model `supported_parameters`. Keys double as the full model-id list. */
+  supportedParameters: Map<string, string[]>;
 }
 const PRICING_STORE_KEY = Symbol.for("orchestra.openrouter-pricing.store");
 function store(): PricingStore {
@@ -126,11 +140,13 @@ function store(): PricingStore {
     fetchedAt: null,
     maxOutput: new Map(),
     contextLength: new Map(),
+    supportedParameters: new Map(),
   });
   // Defensive backfill: a store created by an older bundle (dev HMR, where the
   // Symbol.for store survives a reload) may predate a newly-added map field.
   s.maxOutput ??= new Map();
   s.contextLength ??= new Map();
+  s.supportedParameters ??= new Map();
   return s;
 }
 
@@ -180,9 +196,19 @@ export async function fetchOpenRouterPricing(options: {
   const map = new Map<string, ModelPricing>();
   const maxOut = new Map<string, number>();
   const ctxLen = new Map<string, number>();
+  const supported = new Map<string, string[]>();
   for (const entry of entries) {
     if (!entry?.id) continue;
     const id = entry.id.toLowerCase();
+    // Recorded for EVERY id (empty array when the field is absent) so the key
+    // set is the complete model catalogue — Free Mode enumerates candidates
+    // from it, and free models carry no pricing to be listed under.
+    supported.set(
+      id,
+      Array.isArray(entry.supported_parameters)
+        ? entry.supported_parameters.filter((p): p is string => typeof p === "string")
+        : []
+    );
     // Capture the output ceiling + context window BEFORE the pricing guard so
     // free models (no pricing) still contribute them.
     const mo = entry.top_provider?.max_completion_tokens;
@@ -201,6 +227,7 @@ export async function fetchOpenRouterPricing(options: {
   }
   store().maxOutput = maxOut;
   store().contextLength = ctxLen;
+  store().supportedParameters = supported;
   return map;
 }
 
@@ -266,6 +293,16 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     }
     if (cl.size > 0) store().contextLength = cl;
   }
+  // Same for the per-model capability list.
+  if (parsed.supportedParameters && typeof parsed.supportedParameters === "object") {
+    const sp = new Map<string, string[]>();
+    for (const [id, v] of Object.entries(parsed.supportedParameters)) {
+      if (Array.isArray(v)) {
+        sp.set(id.toLowerCase(), v.filter((p): p is string => typeof p === "string"));
+      }
+    }
+    if (sp.size > 0) store().supportedParameters = sp;
+  }
   return { pricing: map, fetchedAt };
 }
 
@@ -291,6 +328,9 @@ export async function saveCachedOpenRouterPricing(
     maxOutput: Object.fromEntries(store().maxOutput),
     // Persist the per-model context windows for the same warm-cache reason.
     contextLength: Object.fromEntries(store().contextLength),
+    // Persist capabilities so Free Mode can pick a structured-output-capable
+    // Router model on a warm-cache boot, before any network fetch lands.
+    supportedParameters: Object.fromEntries(store().supportedParameters),
   };
   await safeWriteFile(cachePath, JSON.stringify(payload, null, 2));
 }
@@ -442,6 +482,7 @@ export function __resetOpenRouterPricingForTests(): void {
   store().fetchedAt = null;
   store().maxOutput = new Map();
   store().contextLength = new Map();
+  store().supportedParameters = new Map();
 }
 
 /**
@@ -485,6 +526,46 @@ export function getOpenRouterContextWindow(modelId: string): number | undefined 
 /** Test-only: seed the OpenRouter context-window map without a network fetch. */
 export function __setOpenRouterContextLengthForTest(map: Map<string, number>): void {
   store().contextLength = new Map(
+    Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
+  );
+}
+
+/**
+ * Every OpenRouter model id the cache knows about. Recorded for every entry
+ * (including free models, which carry no pricing), so this is the catalogue
+ * Free Mode enumerates candidates from. Empty until the first fetch or a
+ * warm-cache load — callers must handle that and fall back.
+ */
+export function listOpenRouterModelIds(): string[] {
+  return Array.from(store().supportedParameters.keys());
+}
+
+/**
+ * Whether OpenRouter advertises `structured_outputs` for this model.
+ *
+ * Load-bearing for Free Mode: the MoA Router's persona generation and the
+ * tournament judges' ballots both go through `generateObject`. A model without
+ * this capability answers HTTP 400 `model features structured outputs not
+ * support`; the Router then falls back to three STATIC personas and every judge
+ * fails — both fallbacks are fail-safe and loud in stdout, but the run still
+ * LOOKS healthy, so the swarm silently loses the two features that distinguish
+ * it from N-sampling. Only a minority of free models qualify.
+ *
+ * Returns `undefined` when the catalogue has not loaded yet — that is NOT
+ * `false`, and callers must not treat an unknown model as incapable.
+ */
+export function modelSupportsStructuredOutputs(modelId: string): boolean | undefined {
+  if (!modelId) return undefined;
+  const params = store().supportedParameters.get(modelId.toLowerCase());
+  if (!params) return undefined;
+  return params.includes("structured_outputs");
+}
+
+/** Test-only: seed the OpenRouter capability map without a network fetch. */
+export function __setOpenRouterSupportedParametersForTest(
+  map: Map<string, string[]>
+): void {
+  store().supportedParameters = new Map(
     Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
   );
 }

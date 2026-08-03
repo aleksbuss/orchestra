@@ -101,6 +101,11 @@ interface Finding {
 function blankCommentsAndStrings(src: string): string {
   const out = src.split("");
   let i = 0;
+  // The last non-whitespace character of real code seen so far. It is the only
+  // way to tell `a / b` (division) from `= /re/` (a regex literal) in a
+  // character scanner: a `/` after a value-ish token divides, otherwise it opens
+  // a regex.
+  let lastSignificant = "";
   const blankTo = (end: number) => {
     for (let k = i; k < end && k < out.length; k++) {
       if (out[k] !== "\n") out[k] = " ";
@@ -130,7 +135,36 @@ function blankCommentsAndStrings(src: string): string {
       i += 1; // keep the opening quote so the token still reads as a literal
       blankTo(end - 1);
       i = end;
+      lastSignificant = quote; // a completed literal — a following `/` divides
+    } else if (src[i] === "/" && !/[A-Za-z0-9_$)\]]/.test(lastSignificant)) {
+      // A REGEX LITERAL. Without this branch a pattern containing a quote —
+      // `/["']/` — opened a phantom string that swallowed the real code after
+      // it, INCLUDING a delegation call, so the scanner never inspected it: a
+      // silent pass, the unsafe direction. Today the `totalCalls` vacuity guard
+      // happens to catch it (swallowing 1 of exactly 2 calls drops the count
+      // under the floor), but that is arithmetic luck — a third callsite would
+      // leave the floor satisfied and the hole silent.
+      let j = i + 1;
+      let inClass = false;
+      while (j < src.length) {
+        const c = src[j];
+        if (c === "\\") {
+          j += 2;
+          continue;
+        }
+        if (c === "\n") break; // unterminated: bail rather than eat the file
+        if (c === "[") inClass = true;
+        else if (c === "]") inClass = false;
+        else if (c === "/" && !inClass) break;
+        j++;
+      }
+      const end = Math.min(j + 1, src.length);
+      i += 1; // keep the opening slash
+      blankTo(end - 1);
+      i = end;
+      lastSignificant = "/";
     } else {
+      if (!/\s/.test(src[i])) lastSignificant = src[i];
       i++;
     }
   }

@@ -11,6 +11,8 @@ import { isLocalProvider } from "@/lib/providers/llm-provider";
 import { getSettings } from "@/lib/storage/settings-store";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import type { SkepticModelOverride } from "@/lib/agent/moa-personas";
+import { applyFreeMode, describeFreeModeSelection } from "@/lib/agent/free-mode";
+import { log } from "@/lib/observability/logger";
 
 /**
  * PM #47 — Privacy Mode runtime guard. Throws when the operator has
@@ -143,7 +145,44 @@ export function assertPrivacyModeAllowsSkepticOverride(
  * `assertPrivacyModeAllowsSkepticOverride` (runAgent + the `/api/chat` route).
  */
 export async function resolveGuardedAgentSettings(): Promise<AppSettings> {
-  const settings = await getSettings();
+  const raw = await getSettings();
+
+  // Free Mode overlays the model slots with free OpenRouter models. It belongs
+  // HERE, at the same chokepoint as the air-gap, for the same PM #58 reason:
+  // every agent entry point already acquires settings through this function
+  // (CI-enforced — no `src/lib/agent` module may import `getSettings`
+  // directly), so a new `runAgent`-like path inherits Free Mode without anyone
+  // remembering to thread it. Cron, Auto-Pilot and the external-message path
+  // are covered by construction.
+  const { settings, selection, suppressedByPrivacyMode } = applyFreeMode(raw);
+
+  if (selection) {
+    // LOUD by design. A model the user did not choose is answering, and the
+    // Router may have silently lost structured outputs — the operator must be
+    // able to see both without reading the code.
+    log.info("free_mode_active", {
+      module: "agent-privacy",
+      source: selection.source,
+      brain: selection.chatModel.model,
+      router: selection.utilityModel.model,
+      routerStructuredOutputs: selection.routerSupportsStructuredOutputs,
+      endpointSpread: selection.endpointSpread,
+      candidates: selection.candidateCount,
+    });
+    console.log(`[FreeMode] ${describeFreeModeSelection(selection)}`);
+  } else if (suppressedByPrivacyMode) {
+    // Not an error: Privacy Mode wins on purpose. But a user who switched Free
+    // Mode on and sees their own paid models running deserves to know why.
+    log.warn("free_mode_suppressed_by_privacy_mode", { module: "agent-privacy" });
+    console.warn(
+      "[FreeMode] suppressed — Privacy Mode is ON, which forbids cloud egress. " +
+        "Your configured local models are being used instead."
+    );
+  }
+
+  // Asserted on the FINAL settings, after any overlay. `applyFreeMode` already
+  // yields to Privacy Mode, so this is defence in depth: were that ever to
+  // regress, the air-gap still refuses the run rather than shipping data out.
   assertPrivacyModeAllowsSettings(settings);
   return settings;
 }

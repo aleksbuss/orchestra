@@ -136,3 +136,19 @@ If you add another runtime-invariant escape hatch, document it here in the same 
 
 ---
 
+
+---
+
+## Free Mode — zero-configuration operation on `:free` endpoints (2026-08-03)
+
+`settings.freeMode.enabled` overlays the model slots with free OpenRouter models chosen from the live catalogue, so a user configures nothing. Implementation: [`src/lib/agent/free-mode.ts`](../../src/lib/agent/free-mode.ts), applied inside `resolveGuardedAgentSettings` ([`agent-privacy.ts`](../../src/lib/agent/agent-privacy.ts)).
+
+**Why that chokepoint.** Same PM #58 reasoning as the air-gap: every agent entry point already acquires settings there (CI-enforced — no `src/lib/agent` module may import `getSettings` directly), so cron, Auto-Pilot and external-message turns inherit Free Mode by construction rather than by someone remembering to thread it.
+
+**Privacy Mode always wins.** Free Mode means OpenRouter; Privacy Mode forbids cloud egress. `applyFreeMode` yields when `privacyMode.enabled` is set, returns `suppressedByPrivacyMode: true`, and the caller says so out loud. `assertPrivacyModeAllowsSettings` then runs on the FINAL post-overlay settings — defence in depth, so a regression in the yield still cannot ship data out. Regression: the Privacy-Mode case in [`free-mode.test.ts`](../../src/lib/agent/free-mode.test.ts).
+
+**The Router needs `structured_outputs`.** Persona generation and tournament ballots go through `generateObject`; a free model without the capability answers HTTP 400, the Router falls back to three STATIC personas and every judge fails — fail-safe and loud in stdout, but the turn still *looks* healthy. `modelSupportsStructuredOutputs` ([`openrouter-pricing.ts`](../../src/lib/cost/openrouter-pricing.ts)) reads the per-model `supported_parameters` captured from `/api/v1/models`; the Router slot is filled only from that subset, and when none qualifies the selection reports `routerSupportsStructuredOutputs: false` instead of pretending. `undefined` (catalogue not loaded) is NOT `false` — an unknown model is never treated as incapable.
+
+**Proposer tiers are spread across DIFFERENT free models.** A free endpoint under load returns HTTP 200 with an empty body, triggered by exactly the shape MoA generates: 3–5 proposers at one endpoint through one key. Pacing bounds the burst in time; spreading tiers across endpoints spreads it across upstream quotas, removing the contention rather than queueing behind it. The failover stack itself needs no extra switch — it keys on the `:free` id suffix (`isFreeTierModel`), so selecting free ids engages every layer automatically.
+
+**Security shape:** selections carry `provider` + `model` ONLY, never an `apiKey` or `baseUrl` — keys resolve server-side, the same posture the per-request Skeptic override settled on. The overlay is computed per request and NEVER persisted, so turning Free Mode off restores the operator's own models verbatim. `freeMode` is an allowed `PATCH /api/settings` root (the header pill toggles it); `privacyMode` deliberately is NOT — an air-gap must not be flippable from a one-click surface.

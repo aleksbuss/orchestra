@@ -74,3 +74,10 @@ scripts/benchmark-report.md
 stryker.log
 reports/stryker/*.json
 reports/stryker/*.html
+
+# graphify knowledge-graph index — 33 MB of generated output, rebuilt by `graphify update .`
+# (AST-only, no API cost). CLAUDE.md documents it as a local tool, not a repo artefact.
+graphify-out/
+
+# Editor-local config
+.obsidian/

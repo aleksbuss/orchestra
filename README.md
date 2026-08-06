@@ -12,7 +12,7 @@
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
 
-A team of specialized agents, not just one model. Self-hosted, BYOK, MIT-licensed.
+Built, measured, and honest about where it helps. Self-hosted, BYOK, MIT-licensed.
 
 ![Orchestra answering a question — note the live cost banner at the top showing tokens AND the real USD estimate (~$0.0026), plus an inline web-search fact-check](docs/assets/orchestra-hero.png)
 
@@ -45,6 +45,26 @@ If that sounds like a paper instead of a feature list — that's intentional. Or
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
 
 **Who it's for:** developers who want a self-hosted assistant with a panel of experts and a code-guaranteed critic behind it — debugging gnarly systems problems, research that needs fact-checking before it's trusted, or private work on local models where nothing leaves your machine.
+
+---
+
+## 🔬 What the ensemble actually measures — including the result I didn't want
+
+The pipeline below is the design. This is the evidence for it, reported the way I would want to read someone else's.
+
+I pre-registered a five-arm evaluation of the swarm against a single agent — same model everywhere, kill criterion written and committed **before any arm ran**: *if the best swarm arm does not beat the single-agent control by ≥ +0.05 mean score, the MoA feature does not earn its place.* Full protocol and results: [`docs/moa-selection-vs-averaging.md`](./docs/moa-selection-vs-averaging.md).
+
+**The factorial never ran.** I could not construct a task where the single agent had room to improve. On logic-grid puzzles generated from a seeded RNG and brute-forced to a unique solution — problems no model can have memorised — one *free* model scored 36/36. Across five independently built task classes the control sat at 0.96–1.00.
+
+So the measured difference is **0.0000**, and that number means the instrument was saturated, not that the ensemble lost. A contrast against a control at 1.0 is mechanically bounded at ≤ 0 before any arm runs. Nothing was demonstrated about the ensemble's answer quality in either direction.
+
+What this does and does not license:
+
+- **Tested:** short-form verifiable tasks — constrained code authoring, fact traps, sycophancy pressure, multi-claim auditing, novel deductive puzzles. On these, the model is not the bottleneck, and the swarm costs **4.4× wall clock** and 4.5× completion tokens for no measurable gain. Swarm mode still ships **on**, with the Router deciding per turn whether a prompt is worth fanning out at all — but on this evidence, turning it off for short verifiable work costs you nothing and saves the 4.4×.
+- **Not tested:** long-horizon agentic work — multi-file edits, long tool loops, many turns where errors compound. That is the only regime where an ensemble still has a plausible case, and it needs a harness that verifies a repo end-state. That harness does not exist yet.
+- **One clearly positive result:** across 24 swarm runs — three free proposers fanned out at one shared free endpoint, the exact herd that triggers upstream 429s — there were **zero delivery failures and zero silent collapses to single-agent**. Twenty-four runs is a pilot, not an uptime claim, and what it measures is robustness to upstream throttling specifically — but that is the one thing here that held under a deliberate stress.
+
+If you are here to evaluate the engineering rather than the marketing, that document and [`POST_MORTEMS.md`](./POST_MORTEMS.md) are the two files to read.
 
 ---
 

@@ -1,17 +1,35 @@
 import { describe, it, expect } from "vitest";
 
 /**
- * Integration tests that hit the running dev server.
+ * Integration tests that hit a running Orchestra server.
  * These verify the actual HTTP endpoints respond correctly.
  *
- * Prerequisites: `npm run dev` must be running on localhost:3000.
- * When the server is NOT running — or :3000 is occupied by an unrelated
- * app (any Next.js dev server defaults to this port; verified via the
- * /api/health `product` marker) — all tests gracefully skip instead of
- * failing against the wrong server.
+ * Prerequisites: a server must be running at `ORCHESTRA_E2E_BASE_URL`
+ * (default `http://127.0.0.1:3000`, i.e. `npm run dev`). When no server is
+ * there — or the port is occupied by an unrelated app (any Next.js dev server
+ * defaults to 3000; verified via the /api/health `product` marker) — every
+ * test below reports as SKIPPED rather than passing vacuously.
+ *
+ * WHY THE SKIP MUST BE VISIBLE: these tests used to `return` early, which
+ * vitest counts as a PASS. In CI nothing listens on :3000, so all five
+ * silently "passed" without asserting anything, and the suite total implied
+ * coverage that did not exist. `ctx.skip()` puts them in the skipped column
+ * where a reader can see they did not run. Do not revert this to a bare
+ * `return` — a test that cannot run must never look like a test that passed.
  */
 
-const BASE_URL = "http://127.0.0.1:3000";
+/**
+ * Overridable so the suite can be pointed at a production build on another
+ * port (`ORCHESTRA_E2E_BASE_URL=http://localhost:3100 npx vitest run …`)
+ * instead of only ever reaching whatever happens to hold :3000. A stale dev
+ * server on the default port once failed this suite while a clean build of
+ * the same commit was healthy — with the URL hardcoded there was no way to
+ * tell those two apart without editing the test.
+ */
+const BASE_URL = process.env.ORCHESTRA_E2E_BASE_URL ?? "http://127.0.0.1:3000";
+
+/** Minimal shape of the vitest test context used here. */
+type SkippableContext = { skip: (note?: string) => void };
 
 /** Wrapper around fetch that returns null when the server is unreachable. */
 async function safeFetch(
@@ -49,12 +67,22 @@ const orchestraDetected: Promise<boolean> = (async () => {
   }
 })();
 
+/** Skip (visibly) unless a real Orchestra is answering at BASE_URL. */
+async function requireOrchestra(ctx: SkippableContext): Promise<void> {
+  if (!(await orchestraDetected)) {
+    ctx.skip(`no Orchestra at ${BASE_URL}`);
+  }
+}
+
 describe("API Integration Tests", () => {
   describe("Health Check API", () => {
-    it("should respond with 200 and subsystem statuses", async () => {
-      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
+    it("should respond with 200 and subsystem statuses", async (ctx) => {
+      await requireOrchestra(ctx);
       const res = await safeFetch(`${BASE_URL}/api/health`);
-      if (!res) return; // Server not running — skip
+      if (!res) {
+        ctx.skip("server became unreachable mid-run");
+        return;
+      }
 
       expect(res.status).toBe(200);
 
@@ -66,21 +94,24 @@ describe("API Integration Tests", () => {
   });
 
   describe("Chat API", () => {
-    it("should reject POST without a message (returns 400 or 401 if auth required)", async () => {
-      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
+    it("should reject POST without a message (returns 400 or 401 if auth required)", async (ctx) => {
+      await requireOrchestra(ctx);
       const res = await safeFetch(`${BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chatId: "test-empty" }),
       });
-      if (!res) return; // Server not running — skip
+      if (!res) {
+        ctx.skip("server became unreachable mid-run");
+        return;
+      }
 
       // 400 = message validation failed, 401 = auth required before validation
       expect([400, 401]).toContain(res.status);
     }, 10000);
 
-    it("should accept a valid background message and return queued status (or 401 if auth required)", async () => {
-      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
+    it("should accept a valid background message and return queued status (or 401 if auth required)", async (ctx) => {
+      await requireOrchestra(ctx);
       const res = await safeFetch(`${BASE_URL}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -90,10 +121,15 @@ describe("API Integration Tests", () => {
           background: true,
         }),
       });
-      if (!res) return; // Server not running — skip
+      if (!res) {
+        ctx.skip("server became unreachable mid-run");
+        return;
+      }
 
       if (res.status === 401) {
-        // Auth is enabled — integration test cannot proceed without credentials
+        // Auth is enabled — this test cannot proceed without credentials, and
+        // that is a skip, not a pass: nothing about the queue path was checked.
+        ctx.skip("auth enabled; no credentials available to this suite");
         return;
       }
 
@@ -105,10 +141,13 @@ describe("API Integration Tests", () => {
   });
 
   describe("Settings API", () => {
-    it("should return current settings", async () => {
-      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
+    it("should return current settings", async (ctx) => {
+      await requireOrchestra(ctx);
       const res = await safeFetch(`${BASE_URL}/api/settings`);
-      if (!res) return; // Server not running — skip
+      if (!res) {
+        ctx.skip("server became unreachable mid-run");
+        return;
+      }
 
       if (res.status === 200) {
         const data = await res.json();
@@ -122,10 +161,13 @@ describe("API Integration Tests", () => {
   });
 
   describe("Dashboard accessibility", () => {
-    it("should serve the dashboard page", async () => {
-      if (!(await orchestraDetected)) return; // No Orchestra on :3000 — skip
+    it("should serve the dashboard page", async (ctx) => {
+      await requireOrchestra(ctx);
       const res = await safeFetch(`${BASE_URL}/dashboard`);
-      if (!res) return; // Server not running — skip
+      if (!res) {
+        ctx.skip("server became unreachable mid-run");
+        return;
+      }
 
       expect([200, 302, 307, 308]).toContain(res.status);
     }, 10000);

@@ -8,6 +8,10 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 const ALLOWED_PATCH_ROOTS = new Set([
   "chatModel", "utilityModel", "embeddingsModel",
   "codeExecution", "memory", "search", "general", "providerApiKeys",
+  // Free Mode is toggled from the header pill, so it needs a patch root.
+  // Deliberately NOT adding `privacyMode` here: an air-gap must not be
+  // flippable from a one-click surface.
+  "freeMode",
 ]);
 
 const FORBIDDEN_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);

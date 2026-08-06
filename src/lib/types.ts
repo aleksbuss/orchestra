@@ -194,6 +194,21 @@ export interface AppSettings {
     enabled: boolean;
   };
   /**
+   * Free Mode — run with zero model configuration on OpenRouter `:free`
+   * endpoints. When enabled, `resolveGuardedAgentSettings` overlays the model
+   * slots from the live free catalogue (see `agent/free-mode.ts`); the user
+   * picks nothing. The overlay is computed per request and NEVER written back,
+   * so turning it off restores the operator's own models verbatim.
+   *
+   * Mutually exclusive with `privacyMode` by construction — Free Mode means
+   * OpenRouter, and Privacy Mode forbids cloud egress. Privacy Mode WINS: the
+   * overlay is suppressed and the conflict is surfaced, never silently
+   * resolved in favour of the cloud.
+   */
+  freeMode?: {
+    enabled: boolean;
+  };
+  /**
    * Persistent successful-trace memory (PM #51). When enabled, Orchestra
    * captures MoA runs that meet a quality bar (proposer consensus,
    * clean critic, low latency) and stores them under `data/traces/`.

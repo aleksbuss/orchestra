@@ -157,6 +157,52 @@ describe("assertSafeOutboundUrl — IPv4-in-IPv6 bypass (PM #8 follow-up)", () =
   });
 });
 
+describe("assertSafeOutboundUrl — alternate IPv4 encodings (octal / hex / integer)", () => {
+  // `0251.0376.0251.0376`, `0xa9fea9fe` and `2851995390` are all the SAME
+  // address as `169.254.169.254`, and the OS resolver treats them as such.
+  // The guard is safe from them for a structural reason: it validates
+  // `new URL(raw).hostname`, and the WHATWG URL parser canonicalises every
+  // one of these forms to dotted-decimal BEFORE the blocklist runs.
+  //
+  // That guarantee is IMPLICIT — nothing in url-guard.ts mentions it, and
+  // `IPV4_RE` (`\d{1,3}` per octet) would not match the octal forms on its
+  // own. A refactor that validated the RAW string instead of the parsed
+  // hostname would reopen the whole class silently. These cases pin the
+  // guarantee so that refactor turns the suite RED.
+  //
+  // Do not eyeball these: `010.0.0.1` is octal for the PUBLIC 8.0.0.1,
+  // while `012.0.0.1` is 10.0.0.1 and must be blocked.
+
+  it("normalises the host before the blocklist runs (the mechanism under test)", () => {
+    expect(new URL("http://0xa9fea9fe/").hostname).toBe("169.254.169.254");
+  });
+
+  it.each([
+    ["octal dotted-quad → 169.254.169.254 (metadata)", "http://0251.0376.0251.0376/latest/meta-data/"],
+    ["octal dotted-quad → 10.0.0.1", "http://012.0.0.1/x"],
+    ["octal dotted-quad → 192.168.0.1", "http://0300.0250.0.1/x"],
+    ["hex integer → 169.254.169.254", "http://0xa9fea9fe/latest/meta-data/"],
+    ["hex integer → 192.168.0.1", "http://0xc0a80001/x"],
+    ["decimal integer → 192.168.0.1", "http://3232235521/x"],
+    ["decimal integer → 10.0.0.1", "http://167772161/x"],
+    ["short form → 192.168.0.1", "http://192.168.1/x"],
+  ])("rejects %s", (_label, url) => {
+    expect(() => assertSafeOutboundUrl(url)).toThrow(UnsafeOutboundUrlError);
+  });
+
+  it("allows a hex-encoded PUBLIC address (the encoding itself is not the offence)", () => {
+    expect(assertSafeOutboundUrl("http://0x08080808/x")).toBeInstanceOf(URL);
+  });
+
+  it("allows octal-encoded loopback (loopback policy survives normalisation)", () => {
+    expect(assertSafeOutboundUrl("http://0177.0.0.1/x")).toBeInstanceOf(URL);
+  });
+
+  it("allows an octal form that decodes to a PUBLIC address (010 → 8)", () => {
+    expect(assertSafeOutboundUrl("http://010.0.0.1/x")).toBeInstanceOf(URL);
+  });
+});
+
 describe("PM #47 — isLoopbackHost", () => {
   it.each([
     "localhost",

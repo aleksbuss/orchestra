@@ -20,6 +20,7 @@
  * Re-exported from `./moa` for backward compat.
  */
 
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateObject, type ModelMessage } from "ai";
 import { z } from "zod";
 import type { ModelConfig } from "@/lib/types";
@@ -173,7 +174,8 @@ INSTRUCTIONS:
    - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
    This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
 7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
-      abortSignal,
+      // PM #98 — the Router's generateObject had no time bound.
+      abortSignal: callDeadlineSignal(abortSignal),
     });
 
     // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises

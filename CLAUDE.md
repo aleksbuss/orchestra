@@ -174,7 +174,7 @@ Violating any of these causes data loss, data egress, RCE, or a silent productio
 12. **Never log, echo, or bundle** `.env.local` / `data/settings/*.json` contents.
 
 ### Agent runtime
-13. **`abortSignal` on every `generateText`, `generateObject`, `streamText`, `embed`, `embedMany`.** Background tasks own a separate `AbortController` (daemon), everything else threads `req.signal`. *If you cannot answer "what cancels this stream?" you MUST NOT merge the change.*
+13. **`abortSignal` on every `generateText`, `generateObject`, `streamText`, `embed`, `embedMany`.** Background tasks own a separate `AbortController` (daemon), everything else threads `req.signal`. *If you cannot answer "what cancels this stream?" you MUST NOT merge the change.* **And a caller signal is not a time bound** (PM #98): a streaming call also needs `createStreamWatchdog`, never a total-duration cap and never `signal: AbortSignal.timeout` on a streaming fetch.
 14. **Every agent-path `ToolSet` is built by `assembleAgentToolSet`** (`src/lib/agent/agent-tools.ts`), which applies `applyGlobalToolLoopGuard` last. MoA's proposer path wraps directly. Never hand-roll an unguarded ToolSet.
 15. **Tools return `{ success: false, error }` on failure — never throw.** Throwing kills the run; returning lets the agent self-heal.
 16. **`stopWhen: stepCountIs(n)` — never `maxSteps`** (removed in AI SDK v5; omitting it stops after step 1 and returns empty text).
@@ -191,7 +191,7 @@ Violating any of these causes data loss, data egress, RCE, or a silent productio
 ### Process
 24. **Doc-as-code.** A PR that renames/moves/refactors anything referenced here updates the reference in the same commit. Fixing an architectural production bug requires all three: a `POST_MORTEMS.md` entry, the rule encoded in the right Level 1 or Level 2 file, and a regression test.
 25. **File-size discipline.** Soft cap 800 lines per `.ts`/`.tsx`; past 1500 the file MUST be decomposed by the next substantive PR. Net growth in an already-bloated module is forbidden — extract something equivalent.
-    - **ONE recorded exception: `agent.ts` (1794 LOC).** It crossed 1500 and several substantive PRs landed without decomposing it, so the rule as written has been violated — say so rather than pretending otherwise. It is carried deliberately: the seams are already planned in [`file-size-decomposition.md`](docs/references/file-size-decomposition.md), every chat turn flows through this file, and a cut made while the project is being wrapped up buys maintainability nobody is currently spending against while risking the hottest path in the system. **The zero-net-growth half of the rule still binds it** — that is what is actually protecting the file, and it is why `agent-privacy.ts` and `agent-tools.ts` were extracted as offsets. Trigger to revisit: the next change that needs to ADD substantial logic to `agent.ts`. Adding a second file to this list is not an option — fix one before recording another.
+    - **ONE recorded exception: `agent.ts` (1774 LOC).** It crossed 1500 and several substantive PRs landed without decomposing it, so the rule as written has been violated — say so rather than pretending otherwise. It is carried deliberately: the seams are already planned in [`file-size-decomposition.md`](docs/references/file-size-decomposition.md), every chat turn flows through this file, and a cut made while the project is being wrapped up buys maintainability nobody is currently spending against while risking the hottest path in the system. **The zero-net-growth half of the rule still binds it** — that is what is actually protecting the file, and it is why `agent-privacy.ts` and `agent-tools.ts` were extracted as offsets. Trigger to revisit: the next change that needs to ADD substantial logic to `agent.ts`. Adding a second file to this list is not an option — fix one before recording another.
 26. **Before deleting or overwriting anything in `data/`, copy it aside.** There is no undo.
 
 ---
@@ -210,6 +210,8 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | [`tool.test.ts`](src/lib/tools/tool.test.ts) | Full tool inventory + each availability gate's exact delta |
 | [`claude-md-drift.test.ts`](src/claude-md-drift.test.ts) | This file's size budget + the LOC claims in the decomposition reference |
 | [`untrusted-trigger-contract.test.ts`](src/lib/agent/untrusted-trigger-contract.test.ts) | `untrustedTrigger` forwarded at every delegation callsite, set at the untrusted entry, and read by both capability gates (rule 10) |
+| [`llm-provider.headers-timeout.test.ts`](src/lib/providers/llm-provider.headers-timeout.test.ts) | Every provider factory in `llm-provider.ts` passes a bounded `fetch` (PM #98) |
+| [`call-deadline-contract.test.ts`](src/lib/agent/call-deadline-contract.test.ts) | Every `generate*`/`stream*` call under `src/lib/agent` carries a TIME BOUND, not just an `abortSignal` (PM #98) |
 
 ---
 

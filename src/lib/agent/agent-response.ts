@@ -7,6 +7,7 @@
  * back into agent.ts — so it is unit-testable with a mock model
  * (final-answer-guard.test.ts) and shrinks the agent.ts hot file.
  */
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
@@ -945,7 +946,7 @@ export async function resolveTurnContinuation(args: {
         providerOptions,
         temperature: settings.chatModel.temperature ?? 0.7,
         maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
-        abortSignal,
+        abortSignal: callDeadlineSignal(abortSignal),
       });
       return { text: (continuation.text || "").trim(), usage: readUsage(continuation) };
     } catch (error) {

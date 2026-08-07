@@ -23,6 +23,7 @@
  * budget. It is read/written entirely on the agent path (NOT boot-warmed /
  * route-read), so the PM #71 `globalThis` requirement does not apply.
  */
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import {
   generateText,
   stepCountIs,
@@ -187,7 +188,7 @@ export async function attemptToolReissue(args: {
       stopWhen: [stepCountIs(REISSUE_STEP_CAP), hasToolCall("response")],
       temperature: args.settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(args.settings.chatModel),
-      abortSignal: args.abortSignal,
+      abortSignal: callDeadlineSignal(args.abortSignal),
     });
 
     const responseMessages = (

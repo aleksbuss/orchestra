@@ -13,7 +13,10 @@ import {
 } from "@/lib/agent/degradation-policy";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
-import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { detectToolSupport } from "@/lib/agent/agent-tool-capability";
+import { createStreamWatchdog, callDeadlineSignal } from "@/lib/agent/stream-watchdog";
+import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
+import { handleStreamAbort, createPartialTextBuffer } from "@/lib/agent/agent-abort";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import {
   buildSystemPrompt,
@@ -138,36 +141,6 @@ const KEEP_RECENT_MESSAGES = 8;
  * an earlier, tighter compaction to break the long-context hallucination loop.
  */
 const DEGRADED_COMPACTION_RATIO = 0.5;
-
-// ── Swarm DAG Completion Guard ────────────────────────────────────────────────
-// Guarantees that the orchestrator node always transitions out of "running"
-// even when the SSE stream disconnects mid-response or onFinish throws.
-function publishOrchestratorFinished(
-  chatId: string,
-  projectId: string | null | undefined,
-  status: "completed" | "error",
-  reason?: string
-) {
-  publishUiSyncEvent({
-    topic: "chat",
-    projectId: projectId ?? null,
-    chatId,
-    reason: reason ?? "agent_turn_finished",
-  });
-  publishUiSyncEvent({
-    topic: "chat",
-    projectId: projectId ?? null,
-    chatId,
-    nodeType: "agent_node",
-    swarmNode: {
-      nodeId: chatId,
-      role: "orchestrator",
-      taskSummary: status === "completed" ? "Finished." : "Error.",
-      status,
-      completedAt: new Date().toISOString(),
-    },
-  });
-}
 
 /**
  * Concise, human-readable hint for a tool call's arguments, for the Swarm
@@ -319,7 +292,8 @@ async function runSubAgent(
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
-      abortSignal,
+      // PM #98 — sub-agent delegation: no human is watching this one.
+      abortSignal: callDeadlineSignal(abortSignal),
     });
     // PM #61 — unwrap a serialized `response` call if the model emitted it as
     // text (JSON/`<call:>`); no-op on clean text. Applies to the swarm-agent
@@ -881,50 +855,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
 
   // ── Tool Capability Detection ─────────────────────────────────────────
   // Some models (deepseek-r1, gemma3, phi4, etc.) don't support tool calling.
-  // Detect this and fall back to plain chat mode gracefully.
-  //
-  // PM #17 — Before the audit, the OpenRouter branch only checked for
-  // `deepseek-r1` while the Ollama branch consulted the broader pattern
-  // list. A user picking `google/gemma-4-31b-it` via OpenRouter got 63
-  // tools forwarded → 404 from OpenRouter → agent died silently after MoA
-  // had already succeeded. The shared `modelSupportsTools` helper
-  // (`@/lib/providers/tool-support`) is now the single source of truth for
-  // every non-Ollama provider; the Ollama branch keeps its live `/api/show`
-  // probe and falls back to the same helper on probe failure.
-  const isOllamaProvider = resolvedModelConfig.provider === "ollama";
-
-  let supportsTools: boolean;
-  if (isOllamaProvider) {
-    let detectedFromTemplate: boolean | null = null;
-    try {
-      const ollamaBase = (resolvedModelConfig.baseUrl || "http://localhost:11434").replace(/\/v1\/?$/, "");
-      const showRes = await fetch(`${ollamaBase}/api/show`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: resolvedModelConfig.model }),
-        signal: AbortSignal.timeout(3000),
-      });
-      if (showRes.ok) {
-        const showData = await showRes.json() as { template?: string };
-        const template = showData.template || "";
-        detectedFromTemplate = template.toLowerCase().includes("tools") || template.includes(".Tools");
-      }
-    } catch {
-      // probe failed — fall through to the shared pattern list below.
-    }
-    supportsTools = detectedFromTemplate ?? modelSupportsTools(
-      resolvedModelConfig.provider,
-      resolvedModelConfig.model ?? ""
-    );
-  } else {
-    supportsTools = modelSupportsTools(
-      resolvedModelConfig.provider,
-      resolvedModelConfig.model ?? ""
-    );
-  }
-
-  // Apply tool mode decision
-  const useTools = supportsTools;
+  // Detect this and fall back to plain chat mode gracefully. Full rationale
+  // (PM #17, the Ollama probe, why it is not in `tool-support.ts`) lives in
+  // `agent-tool-capability.ts`.
+  const useTools = await detectToolSupport(resolvedModelConfig);
   const effectiveTools = useTools ? tools : {};
 
   if (!useTools) {
@@ -951,6 +885,16 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       contextWindow,
       systemPrompt // Layer 0 — subtract the system-prompt size from the msg budget
     );
+    // PM #98 — the only time bound on this call. `options.abortSignal` covers a
+    // user pressing cancel; nothing covered a provider that accepts the
+    // connection and then goes silent. Full rationale, and why this is NOT a
+    // total-duration cap, in `stream-watchdog.ts`.
+    const watchdog = createStreamWatchdog(options.abortSignal, {
+      label: `${resolvedModelConfig.provider}/${resolvedModelConfig.model}`,
+    });
+    // PM #98 — `onAbort`'s `steps` holds only COMPLETED steps, so the text the
+    // user was actually watching is never in it. Buffer the deltas instead.
+    const partialText = createPartialTextBuffer();
     // Run the agent with streaming
     const result = streamText({
     model,
@@ -969,8 +913,20 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       : {}),
     temperature: settings.chatModel.temperature ?? 0.7,
     maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
-    abortSignal: options.abortSignal,
+    abortSignal: watchdog.signal,
+    onChunk: ({ chunk }) => {
+      // A tool call means execution — which emits no chunks and carries its own
+      // timeout (up to 10 minutes for `install-orchestrator`) — is about to
+      // start. Counting that silence as a stall would abort healthy work.
+      if (chunk.type === "tool-call") watchdog.pauseForToolExecution();
+      else watchdog.noteActivity();
+      if (chunk.type === "text-delta") partialText.append(chunk.text);
+    },
     onStepFinish: async (event) => {
+      // Each step opens a FRESH upstream request, which can hang exactly like
+      // the first one did — so the time-to-first-token bound is re-armed here,
+      // not just once at the top of the turn.
+      watchdog.noteStepBoundary();
       // PM #81 — incremental billing. If a multi-step loop crashes on step 3
       // (e.g. Rate Limit or Context Exceeded), `onFinish` might not fire or
       // might drop usage. We accumulate per-step to ensure actual spend is
@@ -1023,6 +979,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       }
     },
     onFinish: async (event) => {
+      // The stream is over — stop the clock before any of the persistence work
+      // below, which can legitimately take longer than the idle budget.
+      watchdog.settle();
       // ── Guaranteed DAG completion — even if this callback itself throws ──
       // This is the single source of truth for "agent turn done". All paths
       // (normal finish, tool-call finish, length truncation) converge here.
@@ -1342,7 +1301,25 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         finalizeDag("error");
       }
     },
+    onAbort: async () => {
+      // PM #98 — `ai@6` treats an abort as a CLEAN CLOSE: neither `onFinish`
+      // nor `onError` fires, so without this the watchdog would only shorten
+      // the silence from 640s to 90s. See `agent-abort.ts`.
+      await handleStreamAbort(watchdog, partialText.text(), {
+        chatId: options.chatId,
+        projectId: options.projectId,
+        model: `${resolvedModelConfig.provider}/${resolvedModelConfig.model}`,
+        request: {
+          userMessage: options.userMessage,
+          swarmEnabled: options.swarmEnabled !== false,
+          preset: options.preset,
+          currentPath: options.currentPath,
+        },
+        settings,
+      });
+    },
     onError: ({ error }) => {
+      watchdog.settle();
       // Called when the stream itself errors (network cut, provider timeout,
       // upstream 404, etc.) — fires even when SSE disconnects mid-stream, so we
       // guarantee DAG cleanup here. The classify → structured log → chat-error
@@ -1546,7 +1523,9 @@ export async function runAgentText(options: {
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
-      abortSignal: options.abortSignal,
+      // PM #98 — cron + the unauthenticated Telegram webhook run here. A
+      // hang has no user to notice it, so the bound matters MORE, not less.
+      abortSignal: callDeadlineSignal(options.abortSignal),
     });
 
     const responseMessages = (
@@ -1756,7 +1735,8 @@ export async function runSubordinateAgent(options: {
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_SUBORDINATE), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
-      abortSignal: options.abortSignal,
+      // PM #98 — delegated subordinate run; same no-observer argument.
+      abortSignal: callDeadlineSignal(options.abortSignal),
     });
     const responseMessages = (
       result as unknown as { response?: { messages?: ModelMessage[] } }

@@ -26,6 +26,7 @@ const ALL_KINDS: ChatErrorKind[] = [
   "upstream_4xx",
   "upstream_5xx",
   "abort",
+  "stream_stalled",
   "internal",
 ];
 
@@ -54,6 +55,14 @@ describe("styleForKind — color semantics", () => {
 
   it("slate (muted) for abort — user-initiated, not a system error", () => {
     expect(styleForKind("abort").container).toContain("slate");
+  });
+
+  it("amber, NOT slate, for stream_stalled — the user did not cancel", () => {
+    // PM #98: a stalled stream is aborted internally, so it is an AbortError by
+    // name. If it ever inherits `abort`'s slate treatment, a user who sat
+    // through a silent provider gets told they cancelled their own turn.
+    expect(styleForKind("stream_stalled").container).toContain("amber");
+    expect(styleForKind("stream_stalled").label).not.toMatch(/cancel/i);
   });
 
   it("emerald for model_fallback — system recovered, not an error", () => {

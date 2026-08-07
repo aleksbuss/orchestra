@@ -35,6 +35,7 @@
  * `assertPrivacyModeAllowsSettings`. No new network surface.
  */
 
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateObject } from "ai";
 import { z } from "zod";
 import { addUsageToCumulative } from "@/lib/cost/accumulator";
@@ -322,7 +323,7 @@ async function runSingleJudge(args: {
       }),
       system: JUDGE_SYSTEM_PROMPT,
       prompt: prompt + `\n\nValid ids: ${JSON.stringify(draftIds)}`,
-      abortSignal,
+      abortSignal: callDeadlineSignal(abortSignal),
     });
     return {
       ranking: {

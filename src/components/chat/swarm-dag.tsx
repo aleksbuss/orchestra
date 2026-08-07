@@ -16,6 +16,7 @@ import {
   Wrench,
   Square,
   XCircle,
+  CircleSlash,
 } from "lucide-react";
 import type { SwarmNodeStatus } from "@/lib/realtime/types";
 import { useUiSyncEvents } from "@/hooks/use-background-sync";
@@ -139,6 +140,9 @@ function getStatusColor(status: SwarmNodeStatus): string {
       return "text-foreground bg-emerald-500/5 border-emerald-500/20";
     case "error":
       return "text-foreground bg-red-500/5 border-red-500/20";
+    case "cancelled":
+      // PM #98 — a deliberate stop is not a failure. Muted slate, never red.
+      return "text-foreground bg-slate-500/5 border-slate-500/20";
   }
 }
 
@@ -152,6 +156,8 @@ function getStatusIcon(status: SwarmNodeStatus) {
       return <CheckCircle2 className="w-3 h-3 text-emerald-600 dark:text-emerald-600 dark:text-emerald-400" />;
     case "error":
       return <AlertCircle className="w-3 h-3 text-red-600 dark:text-red-400" />;
+    case "cancelled":
+      return <CircleSlash className="w-3 h-3 text-slate-500 dark:text-slate-400" />;
   }
 }
 
@@ -251,7 +257,7 @@ export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: stri
   };
 
   const allCompleted = Array.from(nodes.values()).every(
-    (n) => n.status === "completed" || n.status === "error"
+    (n) => n.status === "completed" || n.status === "error" || n.status === "cancelled"
   );
   const isActuallyFinished = allCompleted && Array.from(nodes.values()).some(n => n.role === "orchestrator");
 

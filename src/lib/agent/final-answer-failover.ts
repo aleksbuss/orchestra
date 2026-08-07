@@ -31,6 +31,7 @@
  * delivered nothing.
  */
 
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import type { RawUsage } from "@/lib/cost/accumulator";
 import { createModel } from "@/lib/providers/llm-provider";
@@ -124,7 +125,10 @@ async function attemptOnce(
       providerOptions: args.providerOptions,
       temperature: args.settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(args.settings.chatModel),
-      abortSignal: args.abortSignal,
+      // PM #98 — the RECOVERY ladder. It runs precisely when the brain has
+      // already failed, so an unbounded call here turns a recoverable turn
+      // into a total silent failure.
+      abortSignal: callDeadlineSignal(args.abortSignal),
     });
     const text = (result.text || "").trim();
     if (text) {

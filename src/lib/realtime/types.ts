@@ -1,6 +1,11 @@
 export type UiSyncTopic = "projects" | "chat" | "files" | "global";
 
-export type SwarmNodeStatus = "queued" | "running" | "completed" | "error";
+/**
+ * PM #98 — `cancelled` is distinct from `error` on purpose: a user pressing
+ * stop is not a system failure, and colouring their own deliberate action red
+ * is the same class of lie as reporting a provider stall as "cancelled".
+ */
+export type SwarmNodeStatus = "queued" | "running" | "completed" | "error" | "cancelled";
 
 export interface SwarmNodeData {
   nodeId: string;
@@ -34,6 +39,14 @@ export type ChatErrorKind =
   | "upstream_4xx"
   | "upstream_5xx"
   | "abort"
+  /**
+   * PM #98: the provider accepted the connection and then went silent — either
+   * it never sent a first token, or it stopped mid-answer. Distinct from
+   * `abort` (which means the USER cancelled) because the user did nothing, and
+   * distinct from `upstream_5xx` because the provider never said anything at
+   * all. Recoverable: a retry frequently lands on a healthier endpoint.
+   */
+  | "stream_stalled"
   | "internal"
   /**
    * Auto-recovery: the configured chat model was unavailable (404 / deprecated /

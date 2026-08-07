@@ -77,6 +77,15 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
         icon: "text-red-600 dark:text-red-400",
         label: "Provider rejected the request",
       };
+    case "stream_stalled":
+      // PM #98 — recoverable and NOT the user's doing, so amber like the other
+      // upstream faults, and pointedly NOT the muted slate of `abort`: someone
+      // who just waited out a silent provider must not be told they cancelled.
+      return {
+        container: "bg-amber-500/10 border-amber-500/20 text-amber-200",
+        icon: "text-amber-600 dark:text-amber-400",
+        label: "Provider went silent",
+      };
     case "abort":
       // User cancelled — neutral, not an error condition. Render at all
       // mostly for transparency: the user knows their stop button worked.

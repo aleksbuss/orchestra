@@ -19,6 +19,10 @@
  */
 import { describe, it, expect } from "vitest";
 import { classifyChatError } from "./classify-error";
+import {
+  StreamStalledError,
+  ProviderHeadersTimeoutError,
+} from "@/lib/observability/stream-stall";
 
 function fakeApiCallError(opts: {
   statusCode: number;
@@ -105,6 +109,47 @@ describe("classifyChatError — abort path", () => {
   it("generic Error with 'aborted' in the message → abort", () => {
     const out = classifyChatError(new Error("The operation was aborted."));
     expect(out.kind).toBe("abort");
+  });
+});
+
+describe("classifyChatError — PM #98 stream stall", () => {
+  it("a watchdog stall is NOT reported as a user cancellation", () => {
+    // The stall carries `name === "AbortError"` deliberately, so that the AI
+    // SDK does not retry it. That makes ORDER load-bearing here: if the stall
+    // branch ever moves below the abort branch, a user who sat waiting on a
+    // silent provider is told "Request was cancelled." — which they did not do.
+    const out = classifyChatError(new StreamStalledError("ttft", 90_000, 90_001, "openrouter/x:free"));
+    expect(out.kind).toBe("stream_stalled");
+    expect(out.message).not.toMatch(/cancel/i);
+  });
+
+  it("surfaces the model and the elapsed budget, and stays recoverable", () => {
+    const out = classifyChatError(new StreamStalledError("ttft", 90_000, 90_001, "openrouter/x:free"));
+    expect(out.message).toContain("openrouter/x:free");
+    expect(out.message).toContain("90s");
+    // A retry frequently lands on a healthier free endpoint, so the UI should
+    // offer one rather than presenting a dead end.
+    expect(out.recoverable).toBe(true);
+    expect(out.hint).toBeTruthy();
+  });
+
+  it("classifies the TRANSPORT-level stall identically to the semantic one", () => {
+    // Two layers can detect the same phenomenon; whichever fires first, the
+    // user must get the same story. The transport error carries a different
+    // `name` on purpose (it is retryable), so `name` cannot be the key.
+    const transport = classifyChatError(
+      new ProviderHeadersTimeoutError(60_000, 60_001, "openrouter")
+    );
+    expect(transport.kind).toBe("stream_stalled");
+    expect(transport.recoverable).toBe(true);
+    expect(transport.message).toContain("openrouter");
+  });
+
+  it("distinguishes a mid-answer drop from a provider that never spoke", () => {
+    const ttft = classifyChatError(new StreamStalledError("ttft", 1000, 1001, "m"));
+    const idle = classifyChatError(new StreamStalledError("idle", 1000, 1001, "m"));
+    expect(ttft.hint).not.toBe(idle.hint);
+    expect(idle.message).toMatch(/mid-response/i);
   });
 });
 

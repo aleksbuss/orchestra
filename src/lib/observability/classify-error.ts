@@ -13,6 +13,7 @@
  * they're discovered — keep the function small and explicit, not clever.
  */
 import type { ChatErrorPayload } from "@/lib/realtime/types";
+import { isStreamStall } from "@/lib/observability/stream-stall";
 
 interface ApiCallErrorShape {
   name?: string;
@@ -41,6 +42,41 @@ function isAbortError(err: unknown): boolean {
 }
 
 export function classifyChatError(err: unknown, traceId?: string): ChatErrorPayload {
+  // PM #98 — MUST precede the abort branch. A watchdog stall aborts the stream,
+  // so it IS an AbortError by name (deliberately, so the AI SDK does not retry
+  // it) and would otherwise be reported as "Request was cancelled." — telling a
+  // user they cancelled a turn they were sitting waiting on. The stall message
+  // is already user-safe: a model id and a duration, no paths or internals.
+  if (isStreamStall(err)) {
+    return {
+      traceId,
+      kind: "stream_stalled",
+      message: err.message,
+      hint:
+        err.orchestraStreamStall === "ttft"
+          ? "The provider accepted the connection and sent nothing. Free endpoints do " +
+            "this under load — retry, or switch models in Settings → Models."
+          : "The connection dropped mid-answer. Retry; if it repeats, switch models.",
+      recoverable: true,
+    };
+  }
+
+  // `AbortSignal.timeout` aborts with a `TimeoutError` DOMException whose
+  // message reads "…aborted due to timeout" — so it matches `isAbortError`'s
+  // /aborted/i test and, without this branch ahead of it, a call that BLEW ITS
+  // DEADLINE is reported as "Request was cancelled." Same lie as a stall, and
+  // it predates PM #98: the proposer and judge deadlines have always produced
+  // this error shape.
+  if (err && typeof err === "object" && (err as { name?: string }).name === "TimeoutError") {
+    return {
+      traceId,
+      kind: "stream_stalled",
+      message: "The model provider did not answer within the time limit.",
+      hint: "Retry — a free endpoint under load frequently succeeds on a second attempt.",
+      recoverable: true,
+    };
+  }
+
   if (isAbortError(err)) {
     return {
       traceId,

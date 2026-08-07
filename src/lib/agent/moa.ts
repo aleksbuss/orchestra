@@ -11,6 +11,7 @@
  *                ──▶ [Proposer₃ (Minimalist)]
  */
 
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { addUsageToCumulative, mergeUsage } from "@/lib/cost/accumulator";
@@ -776,7 +777,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       }),
       temperature: 0.3,
       maxOutputTokens: aggregatorMaxOutput,
-      abortSignal,
+      // PM #98 — the proposers below it were bounded; the aggregator that
+      // consumes their drafts was not, so one silent endpoint stalled the turn
+      // after all the expensive work had already succeeded.
+      abortSignal: callDeadlineSignal(abortSignal),
     });
 
     const aggregationLatencyMs = Date.now() - aggStart;

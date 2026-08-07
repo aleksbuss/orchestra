@@ -1,3 +1,4 @@
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import { encode } from "gpt-tokenizer/encoding/cl100k_base";
 import { createModel } from "@/lib/providers/llm-provider";
@@ -152,7 +153,7 @@ export async function compressChatHistory(
       model,
       system: COMPRESSOR_SYSTEM_PROMPT,
       messages: [{ role: "user", content: promptText }],
-      abortSignal,
+      abortSignal: callDeadlineSignal(abortSignal),
     });
     return result.text.trim();
   } catch (err) {

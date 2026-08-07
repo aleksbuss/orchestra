@@ -1,3 +1,4 @@
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, generateObject } from "ai";
 import { z } from "zod";
 import { createModel } from "@/lib/providers/llm-provider";
@@ -244,7 +245,7 @@ export async function reflectOnResponse(params: {
         ],
         temperature: 0.1,
         maxOutputTokens: 1024,
-        abortSignal,
+        abortSignal: callDeadlineSignal(abortSignal),
       });
     } catch (err) {
       // API-level failure — retry once on the fallback model.
@@ -393,7 +394,7 @@ export async function reviseWithCritique(params: {
       messages: [{ role: "user", content: userContent }],
       temperature: 0.3,
       maxOutputTokens,
-      abortSignal,
+      abortSignal: callDeadlineSignal(abortSignal),
     });
 
     const revisedText = result.object.diff?.trim() ?? "";
@@ -442,7 +443,7 @@ export async function reviseWithCritique(params: {
       messages: [{ role: "user", content: userContent }],
       temperature: 0.3,
       maxOutputTokens,
-      abortSignal,
+      abortSignal: callDeadlineSignal(abortSignal),
     });
     const revisedText = result.text.trim();
     if (!revisedText) {

@@ -398,12 +398,29 @@ describe("generateDynamicSwarm — prompt shape", () => {
   });
 
   it("forwards abortSignal into generateObject (PM #23 contract)", async () => {
+    // PM #98 changed this from an IDENTITY check to a BEHAVIOURAL one. The
+    // signal is now composed with a deadline (`callDeadlineSignal`), so it is
+    // no longer the same object — but the contract that matters was never
+    // "same object", it was "the caller can still cancel this call". Asserting
+    // identity would have blocked the deadline; asserting behaviour survives
+    // any future composition and is the stronger claim.
     mockedGenerateObject.mockResolvedValue(fakeObjectResult());
     const controller = new AbortController();
     await generateDynamicSwarm("x", [], STUB_MODEL, false, controller.signal);
-    expect((mockedGenerateObject.mock.calls[0][0] as any).abortSignal).toBe(
-      controller.signal
-    );
+    const forwarded = (mockedGenerateObject.mock.calls[0][0] as any).abortSignal as AbortSignal;
+    expect(forwarded).toBeInstanceOf(AbortSignal);
+    expect(forwarded.aborted).toBe(false);
+    controller.abort();
+    expect(forwarded.aborted).toBe(true);
+  });
+
+  it("bounds the Router call with a deadline (PM #98)", async () => {
+    // The Router is a `generateObject`, so it has no chunks and no watchdog —
+    // an unbounded one hangs the whole swarm before a single proposer runs.
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+    await generateDynamicSwarm("x", [], STUB_MODEL, false);
+    const forwarded = (mockedGenerateObject.mock.calls[0][0] as any).abortSignal;
+    expect(forwarded).toBeInstanceOf(AbortSignal);
   });
 
   it("caps output via resolveMaxOutputTokens — every other agent/MoA LLM call does (live bug fix)", async () => {

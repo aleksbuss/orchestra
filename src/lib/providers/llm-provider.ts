@@ -1,4 +1,5 @@
 import { createOpenAI } from "@ai-sdk/openai";
+import { createHeadersTimeoutFetch } from "@/lib/providers/fetch-timeout";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { LanguageModel } from "ai";
@@ -175,6 +176,9 @@ function createOpenAICompatibleChatModel(
     apiKey: settings.apiKey,
     baseURL,
     name: settings.providerName,
+    // PM #98 — bounds the connect-and-wait phase only. See `fetch-timeout.ts`
+    // for why this cannot be `AbortSignal.timeout` (it would truncate bodies).
+    fetch: createHeadersTimeoutFetch({ label: settings.providerName ?? config.provider }),
   });
   return provider.chat(config.model);
 }
@@ -190,6 +194,7 @@ function createOpenAICompatibleEmbeddingModel(config: {
     apiKey: settings.apiKey,
     baseURL,
     name: settings.providerName,
+    fetch: createHeadersTimeoutFetch({ label: settings.providerName ?? config.provider }),
   });
   return provider.embedding(config.model);
 }
@@ -283,6 +288,7 @@ export function createModel(
       const anthropic = createAnthropic({
         apiKey: resolveProviderApiKey(config, "ANTHROPIC_API_KEY"),
         baseURL,
+        fetch: createHeadersTimeoutFetch({ label: "anthropic" }),
       });
       return anthropic(config.model);
     }
@@ -296,6 +302,7 @@ export function createModel(
       const google = createGoogleGenerativeAI({
         apiKey: resolveProviderApiKey(config, "GOOGLE_API_KEY"),
         baseURL,
+        fetch: createHeadersTimeoutFetch({ label: "google" }),
       });
       return google(config.model);
     }
@@ -315,6 +322,12 @@ export function createModel(
           "OR-Models": "free", // Tells openrouter we strongly prefer free
           "OR-Route": "fallback", // Tells openrouter to fallback on outage
         },
+        // PM #98 — this is the path Free Mode runs on, and the one that hung
+        // for seven minutes. It builds its own provider rather than going
+        // through `createOpenAICompatibleChatModel` (it needs the OR-* headers),
+        // so the bound has to be repeated here; that duplication is what
+        // `llm-provider.headers-timeout.test.ts` pins.
+        fetch: createHeadersTimeoutFetch({ label: "openrouter" }),
       });
       return provider.chat(config.model);
     }
@@ -469,6 +482,7 @@ export function createEmbeddingModel(config: {
       const google = createGoogleGenerativeAI({
         apiKey: resolveProviderApiKey(config, "GOOGLE_API_KEY"),
         baseURL,
+        fetch: createHeadersTimeoutFetch({ label: "google" }),
       });
       return google.embedding(config.model);
     }

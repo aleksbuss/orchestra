@@ -18,7 +18,7 @@
  * on the `:free` id suffix via `isFreeTierModel`, so selecting free ids engages
  * every layer automatically. There is no second switch to forget.
  *
- * TWO CONSTRAINTS DRIVE THE SELECTION:
+ * THREE CONSTRAINTS DRIVE THE SELECTION:
  *
  * 1. **The Router needs `structured_outputs`.** Persona generation and the
  *    tournament judges' ballots go through `generateObject`. A free model
@@ -28,9 +28,25 @@
  *    proposers succeed, and nothing says the swarm just lost the two features
  *    that distinguish it from N-sampling. Only a minority of free models
  *    qualify, so the Router slot is filled from that subset or not at all.
- *    The brain and the proposers do NOT need the capability.
  *
- * 2. **Proposers should NOT share one endpoint.** A free endpoint under load
+ * 2. **The brain needs TOOLS.** PM #98 — the original version of this file said
+ *    "the brain and the proposers do NOT need the capability", which was
+ *    reasoned about the SWARM path: there the Router picks personas and the
+ *    proposers call the tools, and `moa-proposers.ts` already gates each
+ *    proposer on `modelSupportsTools` and degrades it to a tool-free draft.
+ *    In SINGLE AGENT mode there is no Router and no proposers — the brain IS
+ *    the thing that calls tools. Selecting it as `[0]` of an alphabetically
+ *    sorted catalogue handed the slot to `google/gemma-4-…` on the letter "g",
+ *    `agent.ts` dropped to plain-chat mode, and a "find me today's news"
+ *    question was answered from stale weights. Tool support is now the FIRST
+ *    key on the brain slot.
+ *
+ *    It is a PREFERENCE, not a filter: free tool-capable ids are a small
+ *    subset, and a filter that empties the pool would hard-fail Free Mode for
+ *    everyone. When nothing tool-capable exists we still run — and say so, so
+ *    the degradation is visible instead of silent.
+ *
+ * 3. **Proposers should NOT share one endpoint.** A free endpoint under load
  *    returns HTTP 200 with an empty body, and the trigger is exactly the shape
  *    MoA generates: 3-5 proposers firing at one shared endpoint through one key.
  *    Pacing bounds the burst in time; spreading the tiers across DIFFERENT free
@@ -47,6 +63,7 @@ import {
   modelSupportsStructuredOutputs,
 } from "@/lib/cost/openrouter-pricing";
 import { isFreeTierModel } from "@/lib/agent/proposer-pacing";
+import { modelSupportsTools } from "@/lib/providers/tool-support";
 
 /**
  * Used when the live catalogue has not loaded (cold boot before the first
@@ -65,7 +82,14 @@ export const FREE_ROUTER_FALLBACKS: readonly string[] = [
   "nvidia/nemotron-3-super-120b-a12b:free",
 ];
 
-/** Fallback pool for the brain + proposers, which need no special capability. */
+/**
+ * Fallback pool for the brain + proposers.
+ *
+ * Ordered tool-capable-first so that even a cold-boot run with no catalogue
+ * puts a tool-calling model in the brain slot. `google/gemma-4-…` is kept last
+ * rather than removed: it is a fine proposer, and dropping ids from a pool that
+ * is already tiny is how Free Mode ends up with nothing to run.
+ */
 export const FREE_GENERAL_FALLBACKS: readonly string[] = [
   "nvidia/nemotron-3-super-120b-a12b:free",
   "openai/gpt-oss-20b:free",
@@ -88,6 +112,13 @@ export interface FreeModeSelection {
    * mode will fall back to synthesis — the caller should say so out loud.
    */
   routerSupportsStructuredOutputs: boolean;
+  /**
+   * False when no free model known to support tool calling could be found, so
+   * the brain slot had to be filled with one that cannot. The run still works,
+   * but Single Agent mode drops to plain chat: no web search, no file access,
+   * answers from weights only. PM #98 — the caller MUST say this out loud.
+   */
+  brainSupportsTools: boolean;
   /** Every free id considered, for diagnostics. */
   candidateCount: number;
 }
@@ -109,6 +140,36 @@ function spread(pool: readonly string[], n: number): string[] {
   return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
 }
 
+/** Free OpenRouter ids are always reached through the `openrouter` provider. */
+const supportsTools = (id: string) => modelSupportsTools("openrouter", id);
+
+/**
+ * Pick the brain (the Single Agent chat model) from the general pool.
+ *
+ * Preference order, strongest key first:
+ *   1. tool-capable AND structured-output capable — the whole feature set;
+ *   2. tool-capable — tools beat well-formed JSON, because losing tools loses
+ *      web search and every file operation, while the brain rarely needs
+ *      `generateObject` (that is the Router's job);
+ *   3. structured-output capable — no tools exist in the pool, so fall back to
+ *      the previous heuristic rather than to raw alphabetical order;
+ *   4. whatever is first.
+ *
+ * Never returns undefined for a non-empty pool, and never narrows the pool:
+ * step 4 always fires. That is the "honesty over exclusion" rule — the caller
+ * reports the degradation via `brainSupportsTools` instead of Free Mode
+ * refusing to run because free tool-capable ids happen to be scarce this week.
+ */
+function pickBrain(generalPool: readonly string[], structured: readonly string[]): string {
+  const structuredSet = new Set(structured);
+  return (
+    generalPool.find((id) => supportsTools(id) && structuredSet.has(id)) ??
+    generalPool.find(supportsTools) ??
+    generalPool.find((id) => structuredSet.has(id)) ??
+    generalPool[0]
+  );
+}
+
 /**
  * Choose free models from the live OpenRouter catalogue, falling back to the
  * curated lists when it has not loaded. Pure apart from reading the cache.
@@ -120,23 +181,24 @@ export function selectFreeModels(): FreeModeSelection {
   const structured = catalogue.filter(
     (id) => modelSupportsStructuredOutputs(id) === true
   );
-  // `undefined` means "catalogue does not know", which is NOT "incapable" —
-  // treat only an explicit false as a disqualification for the general pool.
-  const general = catalogue.length > 0 ? catalogue : [];
 
   const live = catalogue.length > 0;
   const routerPool = structured.length > 0 ? structured : FREE_ROUTER_FALLBACKS;
-  const generalPool = general.length > 0 ? general : FREE_GENERAL_FALLBACKS;
+  // The whole catalogue is the general pool. `modelSupportsStructuredOutputs`
+  // returning `undefined` means "the catalogue does not know", which is NOT
+  // "incapable", so nothing is disqualified here on that basis.
+  const generalPool = live ? catalogue : FREE_GENERAL_FALLBACKS;
 
-  // Prefer a structured-output model for the brain too when one is available:
-  // it costs nothing and keeps the brain on a model known to be well-formed.
-  const brain = (structured.length > 0 ? structured : generalPool)[0];
+  const brain = pickBrain(generalPool, structured);
 
   // Spread the three proposer tiers across DISTINCT endpoints where possible.
-  // Rotating the general pool by 1 keeps the brain's endpoint out of the first
-  // proposer slot, so the brain's own quota is not the first one hammered.
+  // Rotating the pool to start AFTER the brain keeps the brain's endpoint out
+  // of the first proposer slot, so its own quota is not the first one hammered.
+  // Rotating by the brain's index — not by a hardcoded 1 — is what keeps that
+  // true now that the brain is chosen by capability rather than by position.
+  const brainAt = Math.max(0, generalPool.indexOf(brain));
   const rotated = generalPool.length > 1
-    ? [...generalPool.slice(1), generalPool[0]]
+    ? [...generalPool.slice(brainAt + 1), ...generalPool.slice(0, brainAt + 1)]
     : generalPool;
   const tiers = spread(rotated, 3);
 
@@ -151,6 +213,7 @@ export function selectFreeModels(): FreeModeSelection {
     source: live ? "live-catalogue" : "fallback-list",
     endpointSpread: new Set(tiers).size,
     routerSupportsStructuredOutputs: structured.length > 0,
+    brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
   };
 }
@@ -206,9 +269,14 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
   const router = s.routerSupportsStructuredOutputs
     ? `router=${s.utilityModel.model}`
     : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)`;
+  const brain = s.brainSupportsTools
+    ? `brain=${s.chatModel.model}`
+    : `brain=${s.chatModel.model} (NO tool support — Single Agent mode answers from ` +
+      `knowledge only: no web search, no file access. No free tool-capable model ` +
+      `was available; add a key or turn Free Mode off to get tools back)`;
   return (
     `Free Mode [${s.source}, ${s.candidateCount} free models seen]: ` +
-    `brain=${s.chatModel.model}, ${router}, ` +
+    `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +
     `${s.proposerTiers.fast.model}, ${s.proposerTiers.balanced.model}, ${s.proposerTiers.frontier.model}`
   );

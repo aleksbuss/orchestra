@@ -108,6 +108,74 @@ describe("Free Mode — model selection", () => {
     expect(selectFreeModels()).toEqual(selectFreeModels());
   });
 
+  // ── PM #98 — the brain slot is the thing that calls tools ────────────────
+  // These four are the regression: the brain used to be `[0]` of an
+  // ALPHABETICALLY sorted catalogue, so `google/gemma-4-…` won the slot on the
+  // letter "g", `agent.ts` dropped to plain-chat mode, and a web-search
+  // question was answered from stale weights with no tool call attempted.
+
+  it("does not hand the brain to a tool-incapable model just because it sorts first", () => {
+    seedCatalogue([
+      // Alphabetically first AND structured-output capable — it won both of
+      // the old heuristics. It matches `gemma-` in NO_TOOL_PATTERNS.
+      ["google/gemma-4-26b-a4b-it:free", ["structured_outputs"]],
+      ["nvidia/nemotron-nano-9b-v2:free", ["tools", "structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("nvidia/nemotron-nano-9b-v2:free");
+    expect(s.brainSupportsTools).toBe(true);
+  });
+
+  it("prefers tools over structured outputs when it cannot have both", () => {
+    seedCatalogue([
+      ["google/gemma-4-26b-a4b-it:free", ["structured_outputs"]],
+      ["nvidia/nemotron-nano-9b-v2:free", ["tools"]],
+    ]);
+    const s = selectFreeModels();
+    // Losing tools loses web search and every file operation; losing structured
+    // outputs on the BRAIN loses almost nothing, since `generateObject` is the
+    // Router's job and the Router has its own slot.
+    expect(s.chatModel.model).toBe("nvidia/nemotron-nano-9b-v2:free");
+    expect(s.utilityModel.model).toBe("google/gemma-4-26b-a4b-it:free");
+  });
+
+  it("still runs — loudly — when NO free model supports tools", () => {
+    seedCatalogue([
+      ["google/gemma-4-26b-a4b-it:free", ["structured_outputs"]],
+      ["mistralai/mistral-small:free", ["structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    // Honesty over exclusion: a filter here would empty the pool and hard-fail
+    // Free Mode. We keep the model and report the degradation instead.
+    expect(s.chatModel.model).toMatch(/:free$/);
+    expect(s.brainSupportsTools).toBe(false);
+    const described = describeFreeModeSelection(s);
+    expect(described).toContain("NO tool support");
+    expect(described).toContain("knowledge only");
+  });
+
+  it("keeps the brain's endpoint out of the first proposer slot when the brain is not pool[0]", () => {
+    seedCatalogue([
+      ["google/gemma-4-26b-a4b-it:free", ["tools"]], // sorts first, no tools
+      ["nvidia/a:free", ["tools"]],
+      ["nvidia/b:free", ["tools"]],
+      ["nvidia/c:free", ["tools"]],
+    ]);
+    const s = selectFreeModels();
+    // Rotation is by the BRAIN'S INDEX, not a hardcoded 1 — with the brain no
+    // longer at position 0, rotating by 1 would have put it back in `fast`.
+    expect(s.chatModel.model).toBe("nvidia/a:free");
+    expect(s.proposerTiers.fast.model).not.toBe(s.chatModel.model);
+  });
+
+  it("puts a tool-capable model in the brain slot on the fallback path too", () => {
+    // No catalogue at all — cold boot, no network, or Privacy Mode suppressed
+    // the refresh. The curated list is ordered tool-capable-first for this.
+    const s = selectFreeModels();
+    expect(s.source).toBe("fallback-list");
+    expect(s.brainSupportsTools).toBe(true);
+  });
+
   it("emits provider+model only — never a key or a baseUrl", () => {
     seedCatalogue([["v/a:free", ["structured_outputs"]]]);
     const s = selectFreeModels();

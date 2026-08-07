@@ -166,10 +166,21 @@ export async function resolveGuardedAgentSettings(): Promise<AppSettings> {
       brain: selection.chatModel.model,
       router: selection.utilityModel.model,
       routerStructuredOutputs: selection.routerSupportsStructuredOutputs,
+      brainSupportsTools: selection.brainSupportsTools,
       endpointSpread: selection.endpointSpread,
       candidates: selection.candidateCount,
     });
     console.log(`[FreeMode] ${describeFreeModeSelection(selection)}`);
+    if (!selection.brainSupportsTools) {
+      // PM #98 — this is the one degradation a user CANNOT infer from the
+      // answer they get: a tool-free brain still writes fluent prose, it just
+      // sources it from stale weights. `warn`, not `info`, so it survives a
+      // log level that filters the line above.
+      log.warn("free_mode_brain_without_tools", {
+        module: "agent-privacy",
+        brain: selection.chatModel.model,
+      });
+    }
   } else if (suppressedByPrivacyMode) {
     // Not an error: Privacy Mode wins on purpose. But a user who switched Free
     // Mode on and sees their own paid models running deserves to know why.

@@ -77,5 +77,30 @@ These seven are the legacy spot-check list, but the **source of truth is `abort-
 
 If you cannot answer "what cancels this stream?" you MUST NOT merge the change.
 
+### ⏱ The second half of the question (PM #98)
+
+"What cancels this stream?" is necessary and **not sufficient**, and PM #98 is the proof: the interactive `streamText` passed `options.abortSignal` correctly, satisfied the gate, and still hung for seven minutes. A caller-supplied signal answers "how does someone stop this", never "what ends it if the provider never answers" — a user who is sitting there waiting is by definition not cancelling. Ask BOTH.
+
+Two bounds now exist, and they are deliberately different instruments:
+
+| Layer | File | Watches | Budget (env) |
+| --- | --- | --- | --- |
+| Semantic | [`stream-watchdog.ts`](src/lib/agent/stream-watchdog.ts) | decoded chunks — time to first token (re-armed per step) + inter-chunk idle | `ORCHESTRA_STREAM_TTFT_MS` 90s / `ORCHESTRA_STREAM_IDLE_MS` 120s |
+| Transport | [`fetch-timeout.ts`](src/lib/providers/fetch-timeout.ts) | the socket — response HEADERS only | `ORCHESTRA_PROVIDER_HEADERS_TIMEOUT_MS` 60s |
+
+Three rules bind anything that touches them:
+
+1. **Never a total-duration cap.** A healthy agentic turn can legitimately run for many minutes — `install-orchestrator` alone permits a ten-minute command. A wall-clock cap kills real work, which is a worse failure than the hang.
+2. **The idle timer must stay disarmed while a tool executes.** Tool execution emits no chunks and carries its own timeout. `agent.ts` calls `pauseForToolExecution()` on a `tool-call` chunk for exactly this reason; remove that and the fix becomes a bug that aborts healthy installs.
+3. **Never bound a streaming fetch with `signal: AbortSignal.timeout(ms)`.** That signal stays live for the whole response and destroys the BODY, truncating every generation longer than the budget. `fetch` resolves at headers — clear the timer in a `finally`.
+
+Both raise the shared marker in [`stream-stall.ts`](src/lib/observability/stream-stall.ts), which `classifyChatError` checks **before** its abort branch. That ordering is load-bearing: the watchdog aborts via an `AbortController`, so without it a stall is reported as "Request was cancelled." to a user who cancelled nothing.
+
+**A fourth rule, and the one that cost the most to learn: an abort fires `onAbort`, NOT `onError` or `onFinish`.** Verified in the installed `ai@6.0.193`: the stream's `pull()` calls an internal `abort()` that fires `onAbort({ steps })`, enqueues an `{ type: "abort" }` part and closes the controller — it never calls `controller.error(...)`, and `onError` runs only for an `error` part. So every honest-failure path (the `chat-error` SSE, the postmortem, message persistence, the DAG finalize) must hang off `onAbort` — [`agent-abort.ts`](src/lib/agent/agent-abort.ts). Wiring them to `onError` compiles, passes tests that mock the SDK, and produces a turn that fails silently. **Before merging a bound, name the callback that runs when it fires and prove it runs.**
+
+**Non-streaming calls use `callDeadlineSignal()`, not the watchdog.** `generateText`/`generateObject` emit no chunks, so there is nothing to watch; the instrument there is a plain total-duration deadline (`AbortSignal.any([caller, AbortSignal.timeout(N)])`, `ORCHESTRA_CALL_DEADLINE_MS`, default 120s). That pattern lived in `moa-proposers.ts` for months and was applied at 2 of 9 callsites — including neither the Router, nor the aggregator, nor the delivery ladder, nor cron/Telegram. [`call-deadline-contract.test.ts`](src/lib/agent/call-deadline-contract.test.ts) now counts them, because nothing was counting and that is why it drifted. It also asserts the STREAMING call uses the watchdog and NOT a deadline — a wall-clock cap there would kill a legitimately long agentic turn.
+
+Do not replace the watchdog with `ai@6`'s built-in `timeout: { totalMs, stepMs, chunkMs }`. It was evaluated: `totalMs` is the rejected total cap, and both `stepMs` and `chunkMs` are armed across tool execution (`chunkMs` is reset only by chunks reaching the step transform), so any of them aborts a legitimate ten-minute tool.
+
 ---
 

@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-3802%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-97%20documented-purple)](./POST_MORTEMS.md)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-98%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -25,7 +25,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 | --- | --- | --- |
 | **Agent Architecture** | Single-agent chat loop | **Mixture-of-Agents (MoA)** ensemble with parallel proposers |
 | **Consensus & Verification**| Trust the single model | Code-guaranteed **Skeptic**, Disagreement Detection, Tournament Aggregation |
-| **Resilience & Testing** | Basic test suite | **97 Documented Post-Mortems**, a comprehensive unit-test suite, Trace-memory |
+| **Resilience & Testing** | Basic test suite | **A documented post-mortem per architectural failure mode**, a comprehensive unit-test suite, Trace-memory |
 | **Cost Transparency** | Unknown API usage | Live per-chat cost banner with USD estimates and tokens |
 | **Security** | Basic serverless API | Code-enforced SSRF guards, Path traversal guards, Sandbox constraints |
 
@@ -40,7 +40,7 @@ Built on [Eggent](https://github.com/eggent-ai/eggent) (MIT) — a hard fork, su
 
 Most "self-hosted ChatGPT" projects wrap a single LLM. Orchestra runs **3–5 specialized expert agents in parallel** on every substantive turn, with a critic that's *guaranteed by code* (not by prompt) to be present in the swarm. The synthesis then runs **inline in the final tool-capable stream by default** — the standalone aggregator is collapsed away, so a swarm turn costs **one brain generation, not two**, and the synthesizer can call tools mid-synthesis (set `aggregator.inlineSynthesis: false` to opt back into a standalone aggregator). If the experts diverge significantly (measured by embedding distance), the synthesizer is explicitly told to surface the conflict instead of smoothing it away. An optional reflection loop runs a critic over the synthesis output and applies a revisor pass when issues are flagged (enabling reflection, or setting `inlineSynthesis: false`, falls back to the standalone aggregator; tournament mode swaps synthesis for judge-ranking).
 
-If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) (97 entries and counting). The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
+If that sounds like a paper instead of a feature list — that's intentional. Orchestra is engineering-led: every architectural failure mode is documented in [`POST_MORTEMS.md`](./POST_MORTEMS.md) — root cause, resolution, and a pointer to the regression test that keeps it fixed. The aggregator prompt is adapted from the [Together AI MoA reference](https://github.com/togethercomputer/MoA). The infrastructure layer follows the published research — RadixAttention prefix-cache compatibility, Generator-Critic-Revisor (Reflexion pattern), embedding-based disagreement detection.
 
 You bring your own keys (or run fully local with Ollama). Every chat shows token + USD cost in real time so friends sharing the instance always know what they're spending.
 
@@ -204,7 +204,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 
 ### Observability
 - **`/api/_debug/chat/<id>`** — single-shot diagnostic endpoint
-- **`POST_MORTEMS.md`** — 97 architectural failure modes documented with regression-test pointers
+- **`POST_MORTEMS.md`** — architectural failure modes documented with regression-test pointers
 - **Structured JSONL logs** with `traceId` propagation
 
 ### Local-first design

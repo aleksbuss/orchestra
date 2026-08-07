@@ -26,9 +26,8 @@ interface MessageBubbleProps {
  * Wrap the rendered bubble in React.memo (PM #33). syncTick from
  * `useBackgroundSync` fires on every SSE pulse — without memoisation, the
  * entire message list re-renders on every tick. For a 500-message chat
- * that's 500 markdown re-parses + 500 highlight.js code-block re-renders
- * every few seconds, even though none of the messages have actually
- * changed.
+ * that's 500 markdown re-parses + 500 code-block re-renders every few
+ * seconds, even though none of the messages have actually changed.
  *
  * The custom comparator is strict by reference for the message OBJECT plus
  * a `parts.length` shortcut — streaming mid-message produces a new parts

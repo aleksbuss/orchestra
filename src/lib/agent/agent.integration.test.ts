@@ -203,6 +203,41 @@ vi.mock("@/lib/agent/stream-watchdog", async (orig) => {
   };
 });
 
+// The Swarm-Activity emit (PM #96) is fire-and-forget telemetry, so the only
+// observable is the event itself. Record every publish, and allow a test to
+// make the publisher throw — the emit is wrapped in agent.ts precisely so a
+// telemetry failure cannot take a turn down with it.
+const uiEvents = vi.hoisted(() => ({
+  published: [] as Array<{ reason?: string }>,
+  throwOnPublish: false,
+}));
+
+vi.mock("@/lib/realtime/event-bus", async (orig) => {
+  const actual = await orig<typeof import("@/lib/realtime/event-bus")>();
+  return {
+    ...actual,
+    publishUiSyncEvent: (input: Parameters<typeof actual.publishUiSyncEvent>[0]) => {
+      const rec = input as { reason?: string };
+      uiEvents.published.push(rec);
+      // Throw ONLY for the step-activity emit. agent.ts publishes elsewhere
+      // (turn start, orchestrator finish) and those calls are NOT wrapped —
+      // failing them all would kill the turn before the tool loop starts and
+      // would prove nothing about the emit this test is aiming at.
+      if (uiEvents.throwOnPublish && rec.reason?.startsWith("[Agent] ")) {
+        throw new Error("scripted telemetry failure");
+      }
+      return actual.publishUiSyncEvent(input);
+    },
+  };
+});
+
+/** Activity lines the step emit produced, e.g. "[Agent] read_text_file …". */
+function agentActivityReasons() {
+  return uiEvents.published
+    .map((e) => e.reason ?? "")
+    .filter((r) => r.startsWith("[Agent] "));
+}
+
 // Fault injection for the "a billing write that fails must not kill the turn"
 // contract. Default 0 → real behaviour, so the pre-existing tests are unaffected.
 const chatStoreFaults = vi.hoisted(() => ({ failNextUpdateChat: 0 }));
@@ -229,6 +264,8 @@ function resetHarness() {
   foldCalls.sources.length = 0;
   watchdogCalls.stepBoundaries = 0;
   chatStoreFaults.failNextUpdateChat = 0;
+  uiEvents.published.length = 0;
+  uiEvents.throwOnPublish = false;
 }
 
 /** Total prompt+completion tokens the accumulator recorded for a chat. */
@@ -566,5 +603,133 @@ describe("agent integration — onStepFinish contract (multi-step, mock model)",
     const total = totalTokens(chat?.cumulativeUsage);
     expect(Number.isNaN(total)).toBe(false);
     expect(total).toBe(expected);
+  });
+});
+
+/**
+ * The tool-loop half of the same prerequisite: a scripted `tool-call` step
+ * runs a REAL tool (the mock replaces only the model), the loop continues, and
+ * the Swarm-Activity emit (PM #96) reports it.
+ *
+ * PM #96 exists because the panel looked "done" while the brain worked for
+ * minutes: the ensemble's nodes went green fast and the multi-step tool loop
+ * that does the actual work emitted nothing. The emit is gated to the swarm
+ * path and fully try/caught — both halves are pinned here.
+ */
+describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", () => {
+  async function runToolLoop(chatId: string, opts: { swarmEnabled?: boolean } = {}) {
+    resetHarness();
+    modelOut.steps = [
+      { toolCall: { toolName: "read_text_file", input: { file_path: "no-such-file.txt" } },
+        usage: { inputTokens: 9, outputTokens: 2 } },
+      { text: "TOOL_LOOP_DONE", usage: { inputTokens: 4, outputTokens: 6 } },
+    ] satisfies ScriptedStep[];
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "tool-loop");
+    const result = await runAgent({ chatId, userMessage: "read it", ...opts });
+    await drain(result);
+
+    const deadline = Date.now() + 5000;
+    let chat = await getChat(chatId);
+    while (Date.now() < deadline) {
+      if (chat?.messages.some((m) => m.role === "assistant" && m.content.includes("TOOL_LOOP_DONE"))) break;
+      await new Promise((r) => setTimeout(r, 25));
+      chat = await getChat(chatId);
+    }
+    return chat;
+  }
+
+  it("executes the tool, continues the loop, and persists the final answer", async () => {
+    // Two model calls with a real tool execution between them. `read_text_file`
+    // on a missing path returns `{ success: false }` rather than throwing
+    // (tool contract §15) — a tool FAILING must not end the turn, only a
+    // delivered answer should.
+    const chat = await runToolLoop(`integ-loop-${Date.now()}`);
+    expect(
+      chat?.messages.some((m) => m.role === "assistant" && m.content.includes("TOOL_LOOP_DONE"))
+    ).toBe(true);
+    // Both model calls happened — the loop did not stop at the tool step.
+    expect(modelOut.stepCursor).toBe(2);
+  });
+
+  it("emits one Swarm-Activity line naming the tool when the swarm panel is live", async () => {
+    await runToolLoop(`integ-activity-on-${Date.now()}`, { swarmEnabled: true });
+    const reasons = agentActivityReasons();
+    expect(reasons.length).toBeGreaterThan(0);
+    expect(reasons.some((r) => r.includes("read_text_file"))).toBe(true);
+  });
+
+  it("emits NOTHING when swarm is off — the panel that would render it is absent", async () => {
+    await runToolLoop(`integ-activity-off-${Date.now()}`, { swarmEnabled: false });
+    expect(agentActivityReasons()).toEqual([]);
+  });
+
+  // ⚠️ Same caveat as the billing-write case above, and for the same reason:
+  // mutation-verified 2026-08, making the emit's `catch` rethrow leaves this
+  // GREEN because `ai@6` wraps the whole onStepFinish invocation in its own
+  // try/catch. NO test at this level can distinguish agent.ts's inner catch
+  // from the SDK's outer one — that is a property of where the callback runs,
+  // not a gap in the test. What this pins is the end-to-end guarantee: a
+  // telemetry failure does not cost the user their answer.
+  it("delivers the answer even if the telemetry publisher throws", async () => {
+    const chatId = `integ-activity-throw-${Date.now()}`;
+    resetHarness();
+    modelOut.steps = [
+      { toolCall: { toolName: "read_text_file", input: { file_path: "x.txt" } },
+        usage: { inputTokens: 9, outputTokens: 2 } },
+      { text: "SURVIVED_TELEMETRY_FAILURE", usage: { inputTokens: 4, outputTokens: 6 } },
+    ] satisfies ScriptedStep[];
+    uiEvents.throwOnPublish = true;
+
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "activity-throw");
+    const result = await runAgent({ chatId, userMessage: "read it", swarmEnabled: true });
+    await drain(result);
+
+    const deadline = Date.now() + 5000;
+    let chat = await getChat(chatId);
+    while (Date.now() < deadline) {
+      if (chat?.messages.some((m) => m.content.includes("SURVIVED_TELEMETRY_FAILURE"))) break;
+      await new Promise((r) => setTimeout(r, 25));
+      chat = await getChat(chatId);
+    }
+    expect(
+      chat?.messages.some((m) => m.content.includes("SURVIVED_TELEMETRY_FAILURE"))
+    ).toBe(true);
+  });
+
+  it("keeps the spend when the turn ends on a LENGTH finish, not a clean stop", async () => {
+    // A context-exhausted turn is the other way a multi-step loop ends early.
+    // The tokens were still burned; billing must survive the truncation.
+    const chatId = `integ-length-${Date.now()}`;
+    resetHarness();
+    modelOut.steps = [
+      { toolCall: { toolName: "read_text_file", input: { file_path: "x.txt" } },
+        usage: { inputTokens: 30, outputTokens: 10 } },
+      { text: "truncated…", usage: { inputTokens: 20, outputTokens: 5 }, finishReason: "length" },
+    ] satisfies ScriptedStep[];
+
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "length-finish");
+    const result = await runAgent({ chatId, userMessage: "go", swarmEnabled: false });
+    await drain(result);
+
+    const streamed = foldCalls.sources
+      .map((s) => s.streamUsage as { inputTokens?: number; outputTokens?: number } | null)
+      .filter((u): u is { inputTokens?: number; outputTokens?: number } => u != null)
+      .reduce((n, u) => n + (u.inputTokens ?? 0) + (u.outputTokens ?? 0), 0);
+    expect(streamed).toBe(65);
+
+    const deadline = Date.now() + 5000;
+    let chat = await getChat(chatId);
+    while (Date.now() < deadline) {
+      if (totalTokens(chat?.cumulativeUsage) >= 65) break;
+      await new Promise((r) => setTimeout(r, 25));
+      chat = await getChat(chatId);
+    }
+    expect(totalTokens(chat?.cumulativeUsage)).toBeGreaterThanOrEqual(65);
   });
 });

@@ -84,6 +84,8 @@ const res = await fetch(safeUrl, { signal: AbortSignal.timeout(5000) });
 - RFC 1918 private ranges, `169.254/16` (cloud metadata!), `0.0.0.0/8`, IPv6 ULA (`fc00::/7`), IPv6 link-local (`fe80::/10`) are rejected.
 - `AbortSignal.timeout(<ms>)` is non-negotiable on the `fetch` call.
 
+**The guard validates `new URL(raw).hostname`, NEVER the raw string — and that is load-bearing.** Octal (`http://0251.0376.0251.0376/`), hex (`http://0xa9fea9fe/`), integer (`http://3232235521/`) and short-form (`http://192.168.1/`) hosts are all the same addresses as `169.254.169.254` / `192.168.0.1`, and the OS resolver treats them as such. `IPV4_RE` (`\d{1,3}` per octet) does not match them; what saves the guard is that the WHATWG URL parser canonicalises every one of these to dotted-decimal *before* the blocklist runs. A refactor that inspected the raw authority instead would reopen the whole class silently — mutation-verified: doing so turns 8 blocklist cases into false negatives AND turns `http://010.0.0.1/` (octal for the **public** 8.0.0.1) into a false positive. Pinned by the `alternate IPv4 encodings` block in [`url-guard.test.ts`](src/lib/security/url-guard.test.ts). Do not eyeball these literals — `010.0.0.1` is public, `012.0.0.1` is `10.0.0.1`.
+
 **Known caveats** (carried in PM #8): DNS rebinding bypasses the guard; loopback scans of `localhost:<other-service>` are still reachable; no response-body size cap. The real defense for those is route auth + CSRF tokens, not URL filtering.
 
 Failure mode if you skip the helper: PM #8.
@@ -140,6 +142,17 @@ If you add another runtime-invariant escape hatch, document it here in the same 
 
 ---
 
+### Dependency advisories — why `audit:gate` stops at `critical` (audited 2026-08-07)
+
+`npm run audit:gate` is `npm audit --audit-level=critical --omit=dev`. It is **not** a claim that there are no `high` advisories — there are. Audit of `main` at `2087e43`:
+
+- **12 advisories in PRODUCTION dependencies (1 low, 2 moderate, 9 high)**; 18 including dev. Zero `critical`, which is why the gate is green.
+- **Zero are first-party.** All reach the tree through four roots: `agent-browser` (→ `webdriverio` → `undici`, `shell-quote`, part of `ip-address`), `@modelcontextprotocol/sdk` (→ `hono`, `fast-uri`, part of `ip-address`), `next` (→ `sharp`, `postcss`), `archiver` (→ `brace-expansion`).
+- **`npm audit fix` (non-breaking) closes none of them.** Measured, not assumed: `--dry-run` reports *added 129 packages, changed 23* and leaves the vulnerability count **unchanged at 18**. 152 packages of lockfile churn for zero advisories closed is a worse trade than carrying them.
+
+**`undici` deserves an explicit note because it is the one that LOOKS alarming and is not.** Nine of the advisories are `undici`, including a TLS-certificate-validation bypass — which reads like a direct hit on the SSRF guard's threat model. It is not. Orchestra imports `undici` **nowhere** in `src/`; the npm package arrives only via `agent-browser → webdriverio → {cheerio, webdriver}`, whose HTTP client talks to a local WebDriver endpoint. Server-side `fetch` on Node 22 uses the runtime's **built-in** undici, which is patched by Node releases and is unaffected by this package's version. Verify the same way before escalating the next one: `npm ls <pkg> --omit=dev` for provenance, then grep `src/` for a direct import.
+
+**Posture:** accepted risk, carried deliberately, re-audit when a root dependency is bumped for other reasons. Raising the gate to `high` would make CI permanently red on advisories no first-party change can fix — the same "a permanently-red gate trains everyone to ignore it" reasoning that keeps `lint:strict` out of CI. If a `critical` ever lands, or an advisory becomes reachable from first-party code, the gate fires and this section is wrong — re-derive it rather than trusting the counts above.
 
 ---
 

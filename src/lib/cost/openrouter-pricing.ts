@@ -191,6 +191,36 @@ export function isUsableMaxOutput(
   return true;
 }
 
+/** Share of the window we are willing to ask for when the reported ceiling is unusable. */
+const DERIVED_OUTPUT_WINDOW_FRACTION = 8;
+/** Upper bound on a derived ceiling — a 1M-context model still asks something sane. */
+const DERIVED_OUTPUT_CAP = 32_768;
+
+/**
+ * The usable output ceiling for a model, or `undefined` when nothing is known.
+ *
+ * When the reported ceiling is unusable (see `isUsableMaxOutput`) we still know
+ * the CONTEXT WINDOW, and that is real information. Falling all the way back to
+ * the static `DEFAULT_MAX_OUTPUT` (8192) would answer a 262144-window model as
+ * conservatively as a tiny one, so derive an eighth of the window instead,
+ * capped: 262144 -> 32768, 128000 -> 16000. Seven eighths left for input is far
+ * more headroom than any real prompt needs, so the provider's
+ * `input + output <= context` rule cannot be violated by the ceiling alone.
+ *
+ * A model with a GENUINE ceiling keeps it untouched — only the broken shape is
+ * replaced.
+ */
+export function deriveUsableMaxOutput(
+  maxOut: unknown,
+  contextLen: number | null | undefined
+): number | undefined {
+  if (isUsableMaxOutput(maxOut, contextLen)) return maxOut;
+  if (typeof contextLen === "number" && contextLen > 0) {
+    return Math.min(Math.floor(contextLen / DERIVED_OUTPUT_WINDOW_FRACTION), DERIVED_OUTPUT_CAP);
+  }
+  return undefined;
+}
+
 function parsePrice(raw: string | undefined): number | null {
   if (!raw) return null;
   const n = Number(raw);
@@ -247,8 +277,8 @@ export async function fetchOpenRouterPricing(options: {
     // provider's effective window if the top-level field is absent.
     const cl = entry.context_length ?? entry.top_provider?.context_length;
     if (typeof cl === "number" && cl > 0) ctxLen.set(id, cl);
-    const mo = entry.top_provider?.max_completion_tokens;
-    if (isUsableMaxOutput(mo, cl)) maxOut.set(id, mo);
+    const mo = deriveUsableMaxOutput(entry.top_provider?.max_completion_tokens, cl);
+    if (mo !== undefined) maxOut.set(id, mo);
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
@@ -323,7 +353,8 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     const mo = new Map<string, number>();
     for (const [id, v] of Object.entries(parsed.maxOutput)) {
       const key = id.toLowerCase();
-      if (isUsableMaxOutput(v, diskCtx.get(key))) mo.set(key, v);
+      const usable = deriveUsableMaxOutput(v, diskCtx.get(key));
+      if (usable !== undefined) mo.set(key, usable);
     }
     if (mo.size > 0) store().maxOutput = mo;
   }

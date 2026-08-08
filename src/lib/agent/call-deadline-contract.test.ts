@@ -23,7 +23,8 @@ const CALL_RE = /\b(generateText|generateObject|streamText)\s*\(\s*\{/g;
 
 /** Anything that proves the call cannot run forever. */
 const BOUND_MARKERS = [
-  "callDeadlineSignal", // the shared helper
+  "callDeadlineSignal", // the shared helper (utility calls)
+  "turnDeadlineSignal", // the same helper sized for a full agent turn
   "AbortSignal.timeout", // the original hand-rolled pattern
   "watchdog.signal", // the streaming watchdog
   "judgeSignal", // tournament-aggregator's pre-built bounded signal

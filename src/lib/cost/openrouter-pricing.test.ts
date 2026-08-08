@@ -32,6 +32,7 @@ import {
   getOpenRouterMaxOutput,
   getOpenRouterContextWindow,
   isUsableMaxOutput,
+  deriveUsableMaxOutput,
   ensureOpenRouterPricingRefreshScheduled,
   REFRESH_INTERVAL_MS,
   CACHE_TTL_MS,
@@ -633,4 +634,35 @@ describe("a max_completion_tokens equal to the context window is not an output c
       expect(isUsableMaxOutput(bad, 262144)).toBe(false);
     }
   );
+});
+
+describe("an unusable ceiling is DERIVED from the window, not dropped to the flat default", () => {
+  // Rejecting the bogus number is only half the job. The context window is real
+  // information, so answering a 262144-window model as conservatively as a tiny
+  // one (DEFAULT_MAX_OUTPUT = 8192) throws away what we know. An eighth of the
+  // window leaves seven eighths for input — far more headroom than any real
+  // prompt needs — so `input + output <= context` cannot be violated by the
+  // ceiling alone.
+
+  it("derives an eighth of the window when the reported ceiling equals it", () => {
+    expect(deriveUsableMaxOutput(262144, 262144)).toBe(32768);
+    expect(deriveUsableMaxOutput(128000, 128000)).toBe(16000);
+  });
+
+  it("caps the derived value so a 1M-context model still asks something sane", () => {
+    expect(deriveUsableMaxOutput(1_000_000, 1_000_000)).toBe(32768);
+  });
+
+  it("leaves a GENUINE ceiling untouched — only the broken shape is replaced", () => {
+    expect(deriveUsableMaxOutput(32768, 262144)).toBe(32768);
+    expect(deriveUsableMaxOutput(65536, 1_000_000)).toBe(65536);
+  });
+
+  it("returns undefined when neither the ceiling nor the window is usable", () => {
+    // Nothing known -> the caller falls through to the family limits, which is
+    // the correct answer; inventing a number here would be worse than silence.
+    expect(deriveUsableMaxOutput(undefined, undefined)).toBeUndefined();
+    expect(deriveUsableMaxOutput(0, undefined)).toBeUndefined();
+    expect(deriveUsableMaxOutput("x", null)).toBeUndefined();
+  });
 });

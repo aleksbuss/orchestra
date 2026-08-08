@@ -160,6 +160,37 @@ function cacheFilePath(): string {
   return path.join(dataDir(), "cache", CACHE_FILENAME);
 }
 
+/**
+ * Is `maxOut` a usable OUTPUT ceiling for a model whose window is `contextLen`?
+ *
+ * OpenRouter reports `top_provider.max_completion_tokens` per model, and for a
+ * meaningful minority it EQUALS the context window — 47 of ~400 models, and 2
+ * of the 14 `:free` ones. That number is technically true (the model can emit
+ * that many tokens given an empty prompt) and operationally useless: the
+ * provider enforces input + output <= context, so requesting it guarantees a
+ * 400 on any real prompt.
+ *
+ * Found by a LIVE run, not by this suite. Free Mode had selected
+ * `nvidia/nemotron-3-super-120b-a12b:free` (context 262144, max_completion
+ * 262144) as the brain, and every request died in under a second with
+ * "you requested about 278073 tokens (10536 of text input, 5393 of tool input,
+ * 262144 in the output)" — HTTP 500 on "what is 17 * 23".
+ *
+ * Treating such a value as UNKNOWN lets `resolveMaxOutputTokens` fall through
+ * to the family limits / `DEFAULT_MAX_OUTPUT`, which are real output ceilings.
+ * Only a KNOWN conflict disqualifies: when the window is unspecified the
+ * ceiling is kept, or we would discard good data for every model whose
+ * `context_length` OpenRouter omits.
+ */
+export function isUsableMaxOutput(
+  maxOut: unknown,
+  contextLen: number | null | undefined
+): maxOut is number {
+  if (typeof maxOut !== "number" || !(maxOut > 0)) return false;
+  if (typeof contextLen === "number" && contextLen > 0 && maxOut >= contextLen) return false;
+  return true;
+}
+
 function parsePrice(raw: string | undefined): number | null {
   if (!raw) return null;
   const n = Number(raw);
@@ -211,12 +242,13 @@ export async function fetchOpenRouterPricing(options: {
     );
     // Capture the output ceiling + context window BEFORE the pricing guard so
     // free models (no pricing) still contribute them.
-    const mo = entry.top_provider?.max_completion_tokens;
-    if (typeof mo === "number" && mo > 0) maxOut.set(id, mo);
+    // Context window FIRST — the max-output guard below needs it.
     // Prefer the canonical top-level context_length; fall back to the active
     // provider's effective window if the top-level field is absent.
     const cl = entry.context_length ?? entry.top_provider?.context_length;
     if (typeof cl === "number" && cl > 0) ctxLen.set(id, cl);
+    const mo = entry.top_provider?.max_completion_tokens;
+    if (isUsableMaxOutput(mo, cl)) maxOut.set(id, mo);
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
@@ -278,20 +310,22 @@ export async function loadCachedOpenRouterPricing(): Promise<{
   }
   // Warm the dynamic max-output source from disk so it survives a warm-cache
   // boot (no network fetch). Best-effort: absent on pre-feature caches.
+  // Per-model context window FIRST — the max-output guard below reads it, and
+  // a cache written before that guard existed still holds unusable ceilings.
+  const diskCtx = new Map<string, number>();
+  if (parsed.contextLength && typeof parsed.contextLength === "object") {
+    for (const [id, v] of Object.entries(parsed.contextLength)) {
+      if (typeof v === "number" && v > 0) diskCtx.set(id.toLowerCase(), v);
+    }
+    if (diskCtx.size > 0) store().contextLength = diskCtx;
+  }
   if (parsed.maxOutput && typeof parsed.maxOutput === "object") {
     const mo = new Map<string, number>();
     for (const [id, v] of Object.entries(parsed.maxOutput)) {
-      if (typeof v === "number" && v > 0) mo.set(id.toLowerCase(), v);
+      const key = id.toLowerCase();
+      if (isUsableMaxOutput(v, diskCtx.get(key))) mo.set(key, v);
     }
     if (mo.size > 0) store().maxOutput = mo;
-  }
-  // Same for the per-model context window.
-  if (parsed.contextLength && typeof parsed.contextLength === "object") {
-    const cl = new Map<string, number>();
-    for (const [id, v] of Object.entries(parsed.contextLength)) {
-      if (typeof v === "number" && v > 0) cl.set(id.toLowerCase(), v);
-    }
-    if (cl.size > 0) store().contextLength = cl;
   }
   // Same for the per-model capability list.
   if (parsed.supportedParameters && typeof parsed.supportedParameters === "object") {

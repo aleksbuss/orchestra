@@ -31,6 +31,7 @@ import {
   getCachedOpenRouterPricing,
   getOpenRouterMaxOutput,
   getOpenRouterContextWindow,
+  isUsableMaxOutput,
   ensureOpenRouterPricingRefreshScheduled,
   REFRESH_INTERVAL_MS,
   CACHE_TTL_MS,
@@ -593,4 +594,43 @@ describe("periodic refresh scheduler — ensureOpenRouterPricingRefreshScheduled
     );
     expect(tickFailures).toHaveLength(0);
   });
+});
+
+describe("a max_completion_tokens equal to the context window is not an output ceiling", () => {
+  // Found by a LIVE run, not by this suite. Free Mode had selected
+  // `nvidia/nemotron-3-super-120b-a12b:free` (context 262144, and OpenRouter
+  // reports max_completion_tokens 262144 for it) as the brain. Every request
+  // died in under a second with HTTP 500:
+  //   "you requested about 278073 tokens (10536 of text input,
+  //    5393 of tool input, 262144 in the output)"
+  // The field was read correctly; the number is just unusable, because the
+  // provider enforces input + output <= context. 47 of ~400 OpenRouter models
+  // report this shape, including 2 of the 14 `:free` ones.
+
+  it("rejects a ceiling equal to the context window", () => {
+    expect(isUsableMaxOutput(262144, 262144)).toBe(false);
+  });
+
+  it("rejects a ceiling that exceeds the context window", () => {
+    expect(isUsableMaxOutput(300000, 262144)).toBe(false);
+  });
+
+  it("accepts a genuine ceiling below the window", () => {
+    expect(isUsableMaxOutput(16384, 262144)).toBe(true);
+  });
+
+  it("accepts when the window is unknown — only a KNOWN conflict disqualifies", () => {
+    // Dropping the ceiling whenever the window is unspecified would throw away
+    // good data for every model whose context_length OpenRouter omits.
+    expect(isUsableMaxOutput(16384, undefined)).toBe(true);
+    expect(isUsableMaxOutput(16384, null)).toBe(true);
+    expect(isUsableMaxOutput(16384, 0)).toBe(true);
+  });
+
+  it.each([0, -1, NaN, "16384", null, undefined, {}])(
+    "rejects a non-positive or non-numeric ceiling (%p)",
+    (bad) => {
+      expect(isUsableMaxOutput(bad, 262144)).toBe(false);
+    }
+  );
 });

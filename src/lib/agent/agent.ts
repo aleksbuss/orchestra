@@ -28,6 +28,7 @@ import { assembleAgentToolSet, scopeSwarmRoleTools } from "@/lib/agent/agent-too
 import { agentSemaphore } from "./semaphore";
 import type { AgentContext } from "@/lib/agent/types";
 import { History, mergeConsecutiveSameRole } from "@/lib/agent/history";
+import { log } from "@/lib/observability/logger";
 import type { AppSettings } from "@/lib/types";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { createCallAgentTool } from "@/lib/swarm/tools";
@@ -109,6 +110,18 @@ export type { TurnContinuationResult };
 // emits a deterministic "reached step limit — press Continue" pause notice
 // instead of forcing a model-authored completion summary (which masqueraded as
 // "done"). See resolveTurnContinuation (agent-response.ts).
+/**
+ * What a non-streaming turn returns when neither the model nor the delivery
+ * ladder produced any text. An empty string would be reported as success by
+ * every caller (external API, cron, Telegram); this is deliberately a sentence
+ * a human reads as a failure.
+ */
+const EMPTY_TURN_NOTICE =
+  "⚠️ The model finished without producing an answer. Nothing was delivered. " +
+  "Orchestra did not retry — on this failure the model reproduces it, so a " +
+  "retry costs time without changing the outcome. Try again, or switch the " +
+  "chat model.";
+
 const MAX_TOOL_STEPS_PER_TURN = 50;
 const MAX_TOOL_STEPS_SUBORDINATE = 25;
 
@@ -1539,7 +1552,47 @@ export async function runAgentText(options: {
         : "";
     // PM #61 — runAgentText powers cron + the Telegram reply; unwrap a
     // serialized `response` call so those channels never ship a raw JSON blob.
-    const finalText = unwrapSerializedResponseCall(text.trim() ? text : fallbackReply);
+    let finalText = unwrapSerializedResponseCall(text.trim() ? text : fallbackReply);
+
+    // A turn that produced NO text must never ship as a success.
+    //
+    // The delivery ladder is wired only into the streaming path, so this one —
+    // cron, the external HTTP API and the Telegram relay — returned an empty
+    // string to its caller and called it done. Rule 18: the SYSTEM signals a
+    // system-level stop, deterministically; it never lets one look like an
+    // answer. Completing the process is not the same as answering.
+    //
+    // Deliberately NOT running `generateFinalAnswerWithFailover` here. That was
+    // tried and measured: the ladder turned a 152s turn into 414s and rescued
+    // nothing, because the failure is a property of the model, not a transient
+    // blip — a retry on the same brain reproduces it. On a path with no human
+    // watching, tripling a cron tick risks the next tick starting before this
+    // one finishes, which is a system-stability problem traded for a
+    // model-quality one. A council of three reviewers reached the same verdict
+    // independently. The caller decides whether to retry; it just has to be
+    // TOLD, which is what this does.
+    if (!finalText.trim()) {
+      // The token detail is the DIAGNOSTIC — it explains why the text is
+      // empty — while the empty-text check above is the trigger, because it is
+      // provider-agnostic and cannot break when a usage schema changes.
+      // Observed live: a free reasoning model spent its whole budget thinking
+      // (`textTokens: 0, reasoningTokens: 390`) and emitted nothing.
+      const details = (
+        generated as unknown as {
+          usage?: { outputTokenDetails?: { textTokens?: number; reasoningTokens?: number } };
+        }
+      ).usage?.outputTokenDetails;
+      log.warn("agent_empty_turn", {
+        module: "agent",
+        chatId: options.chatId,
+        model: settings.chatModel.model,
+        finishReason: (generated as unknown as { finishReason?: string }).finishReason,
+        textTokens: details?.textTokens,
+        reasoningTokens: details?.reasoningTokens,
+        reasoningOnly: details?.textTokens === 0 && (details?.reasoningTokens ?? 0) > 0,
+      });
+      finalText = EMPTY_TURN_NOTICE;
+    }
 
     try {
       await updateChat(options.chatId, (latest) => {

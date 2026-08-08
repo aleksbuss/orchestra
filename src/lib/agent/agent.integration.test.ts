@@ -454,25 +454,27 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
  * re-count at the end. A regression on either side is silent and denominated
  * in money.
  */
-// 30s, not the 15s default. ⚠️ This budget MASKS AN UNEXPLAINED SLOWDOWN —
-// it is not a justified cost, and the honest state of the investigation is:
+// 30s, not the 15s default — and the reason is the swarm Router, not cold start.
 //
-//   - in the full file, in fixed order, these tests take ~1.15s each
-//   - under `--sequence.shuffle`, one of them occasionally exceeded 15s
-//   - run in ISOLATION (`-t "tool loop"`, the other 10 skipped) they take
-//     16.8s / 8.0s / 8.0s — SEVEN TIMES slower with less work in the file
+// Phase timing (instrumented, then reverted) put ALL of it inside `runAgent`
+// BEFORE the stream: `runAgent=14802ms drain=32ms poll=0ms`. With
+// `swarmEnabled: false` the same helper runs in 13ms.
 //
-// The first measurement was originally explained as suite cold start. That is
-// refuted: cold start would penalise only the FIRST case, and removing the
-// preceding tests would help, not hurt. Leaked state from earlier tests is
-// refuted for the same reason — deleting the earlier tests made it worse.
+// Cause: a swarm turn calls the Router, which is a `generateObject` against the
+// SAME mock. The mock answers with plain text, so the Router gets
+// `AI_NoObjectGeneratedError` ("JSON parsing failed: Text: ."), and the AI SDK
+// retries with exponential backoff before `moa_router_fallback` fires — 15s on
+// the first turn, 8s on the second. The fallback works; this is latency, not
+// failure. In the FULL file the same tests cost ~1.1s because earlier turns
+// have already tripped the `model-health` breaker (3 consecutive failures),
+// which short-circuits later Router calls. That is also why the cost moves
+// around under `--sequence.shuffle`.
 //
-// So the cause is genuinely unknown. What IS established: the tests are
-// correct and deterministic (6/6 shuffled runs green by exit code), and CI
-// runs the full file where the real cost is ~1.15s. Raising the budget keeps
-// the suite honest about pass/fail while the slowdown is unexplained; it does
-// not explain it. Do not delete this comment when you find the cause — replace
-// it with the cause.
+// NOT fixed by teaching the mock to satisfy the Router's schema: that would
+// couple this file — which tests `onStepFinish` billing and telemetry — to the
+// DPG persona schema it does not test, so a Router schema change would break
+// billing tests. The Router's own behaviour is covered by `moa-router.test.ts`.
+// The budget absorbs the retry instead.
 const MULTI_STEP_TIMEOUT_MS = 30_000;
 
 describe("agent integration — onStepFinish contract (multi-step, mock model)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {

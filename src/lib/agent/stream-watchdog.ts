@@ -155,8 +155,29 @@ export function createStreamWatchdog(
   };
 }
 
-/** Default bound for a NON-streaming call (`generateText` / `generateObject`). */
+/** Default bound for a NON-streaming UTILITY call (Router, aggregator, compressor, …). */
 const DEFAULT_CALL_DEADLINE_MS = 120_000;
+
+/**
+ * Default bound for a non-streaming FULL AGENT TURN — `runAgentText`,
+ * `runSubordinateAgent`, `runSubAgent`. Ten minutes, the same duration
+ * `call-deadline-contract.test.ts` already names as legitimate for agentic
+ * work ("`install-orchestrator` alone permits ten minutes").
+ *
+ * Why this is separate from the utility budget. PM #98 rejected a wall-clock
+ * cap on the interactive stream because "it would kill legitimately long
+ * agentic work, which is worse than the hang" — and then the utility-sized
+ * 120s landed on the three callsites in `agent.ts`, every one of which is a
+ * complete turn with a tool loop, not a short call. The result was reproduced
+ * live: a ~2500-word answer over `/api/external/message` on a free model died
+ * with HTTP 500 at 122s and the message "The operation was aborted due to
+ * timeout". A ~1000-word answer took 99.9s, i.e. the cap was cutting into
+ * ordinary work, not catching a hang.
+ *
+ * The bound still exists — an unbounded call is the PM #98 bug — it is just
+ * sized for what it actually bounds.
+ */
+const DEFAULT_TURN_DEADLINE_MS = 600_000;
 
 /**
  * A time bound for a non-streaming call.
@@ -187,6 +208,25 @@ export function callDeadlineSignal(
   return typeof AbortSignal.any === "function"
     ? AbortSignal.any([abortSignal, deadline])
     : abortSignal;
+}
+
+/**
+ * The same bound as `callDeadlineSignal`, sized for a FULL AGENT TURN rather
+ * than a utility call. Override with `ORCHESTRA_TURN_DEADLINE_MS`; `0` is the
+ * documented opt-out, and a negative or non-numeric value is treated as a typo
+ * and ignored in favour of the default — the same asymmetry the stream budgets
+ * use, because a fat-fingered value silently disabling a bound is how the
+ * seven-minute hang comes back with nobody noticing.
+ */
+export function turnDeadlineSignal(
+  abortSignal: AbortSignal | undefined,
+  timeoutMs: number = Number(
+    process.env.ORCHESTRA_TURN_DEADLINE_MS ?? DEFAULT_TURN_DEADLINE_MS
+  )
+): AbortSignal | undefined {
+  const ms =
+    Number.isFinite(timeoutMs) && timeoutMs >= 0 ? timeoutMs : DEFAULT_TURN_DEADLINE_MS;
+  return callDeadlineSignal(abortSignal, ms);
 }
 
 /**

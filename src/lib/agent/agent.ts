@@ -14,7 +14,7 @@ import {
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { createModel } from "@/lib/providers/llm-provider";
 import { detectToolSupport } from "@/lib/agent/agent-tool-capability";
-import { createStreamWatchdog, callDeadlineSignal } from "@/lib/agent/stream-watchdog";
+import { createStreamWatchdog, turnDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { handleStreamAbort, createPartialTextBuffer } from "@/lib/agent/agent-abort";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
@@ -293,7 +293,7 @@ async function runSubAgent(
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       // PM #98 — sub-agent delegation: no human is watching this one.
-      abortSignal: callDeadlineSignal(abortSignal),
+      abortSignal: turnDeadlineSignal(abortSignal),
     });
     // PM #61 — unwrap a serialized `response` call if the model emitted it as
     // text (JSON/`<call:>`); no-op on clean text. Applies to the swarm-agent
@@ -1525,7 +1525,7 @@ export async function runAgentText(options: {
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       // PM #98 — cron + the unauthenticated Telegram webhook run here. A
       // hang has no user to notice it, so the bound matters MORE, not less.
-      abortSignal: callDeadlineSignal(options.abortSignal),
+      abortSignal: turnDeadlineSignal(options.abortSignal),
     });
 
     const responseMessages = (
@@ -1736,7 +1736,7 @@ export async function runSubordinateAgent(options: {
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),
       // PM #98 — delegated subordinate run; same no-observer argument.
-      abortSignal: callDeadlineSignal(options.abortSignal),
+      abortSignal: turnDeadlineSignal(options.abortSignal),
     });
     const responseMessages = (
       result as unknown as { response?: { messages?: ModelMessage[] } }

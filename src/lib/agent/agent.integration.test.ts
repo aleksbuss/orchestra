@@ -13,7 +13,7 @@
  *     assistant message to disk. This is the streamText variant the §10 plan
  *     named as the prerequisite for the `agent-stream` seam cut.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from "vitest";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
@@ -307,6 +307,26 @@ beforeAll(async () => {
   );
 });
 
+// EVERY test starts from the unscripted mock, regardless of order. The
+// scripted-step mode, the telemetry fault and the chat-store fault are all
+// module-level mutable state; without this the suite passes only because the
+// multi-step describes happen to run last. Verified with
+// `vitest --sequence.shuffle` — before this hook, shuffling broke two of the
+// ORIGINAL four tests by leaving the mock in scripted mode.
+// It also WAITS for the previous turn to go quiet first. Tests assert by
+// polling the store with a deadline and then return — they do not await the
+// agent's `onFinish`, which keeps running afterwards. A turn still in flight
+// keeps pulling from the shared `modelOut.steps` and corrupts the next test's
+// step cursor. That is order-dependent, so it only showed up under shuffle.
+beforeEach(async () => {
+  const { flushAllPendingChats } = await import("@/lib/storage/chat-store");
+  await flushAllPendingChats().catch(() => {});
+  // Two macrotask hops: enough for a settled onFinish chain to drain.
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  resetHarness();
+});
+
 afterAll(async () => {
   if (originalDataDir === undefined) delete process.env.ORCHESTRA_DATA_DIR;
   else process.env.ORCHESTRA_DATA_DIR = originalDataDir;
@@ -434,7 +454,14 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
  * re-count at the end. A regression on either side is silent and denominated
  * in money.
  */
-describe("agent integration — onStepFinish contract (multi-step, mock model)", () => {
+// 30s, not the 15s default: these drive a REAL multi-step tool loop, and
+// whichever of them runs first also pays the suite's cold start (tool
+// assembly, prompt build). Under `--sequence.shuffle` that lands on a
+// different test each run, so the budget belongs on the describe, not on the
+// one case that happened to time out.
+const MULTI_STEP_TIMEOUT_MS = 30_000;
+
+describe("agent integration — onStepFinish contract (multi-step, mock model)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {
   const STEP_USAGE = [
     { inputTokens: 11, outputTokens: 3 },
     { inputTokens: 22, outputTokens: 7 },
@@ -616,7 +643,7 @@ describe("agent integration — onStepFinish contract (multi-step, mock model)",
  * that does the actual work emitted nothing. The emit is gated to the swarm
  * path and fully try/caught — both halves are pinned here.
  */
-describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", () => {
+describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {
   async function runToolLoop(chatId: string, opts: { swarmEnabled?: boolean } = {}) {
     resetHarness();
     modelOut.steps = [

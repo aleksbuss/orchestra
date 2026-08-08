@@ -454,11 +454,25 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
  * re-count at the end. A regression on either side is silent and denominated
  * in money.
  */
-// 30s, not the 15s default: these drive a REAL multi-step tool loop, and
-// whichever of them runs first also pays the suite's cold start (tool
-// assembly, prompt build). Under `--sequence.shuffle` that lands on a
-// different test each run, so the budget belongs on the describe, not on the
-// one case that happened to time out.
+// 30s, not the 15s default. ⚠️ This budget MASKS AN UNEXPLAINED SLOWDOWN —
+// it is not a justified cost, and the honest state of the investigation is:
+//
+//   - in the full file, in fixed order, these tests take ~1.15s each
+//   - under `--sequence.shuffle`, one of them occasionally exceeded 15s
+//   - run in ISOLATION (`-t "tool loop"`, the other 10 skipped) they take
+//     16.8s / 8.0s / 8.0s — SEVEN TIMES slower with less work in the file
+//
+// The first measurement was originally explained as suite cold start. That is
+// refuted: cold start would penalise only the FIRST case, and removing the
+// preceding tests would help, not hurt. Leaked state from earlier tests is
+// refuted for the same reason — deleting the earlier tests made it worse.
+//
+// So the cause is genuinely unknown. What IS established: the tests are
+// correct and deterministic (6/6 shuffled runs green by exit code), and CI
+// runs the full file where the real cost is ~1.15s. Raising the budget keeps
+// the suite honest about pass/fail while the slowdown is unexplained; it does
+// not explain it. Do not delete this comment when you find the cause — replace
+// it with the cause.
 const MULTI_STEP_TIMEOUT_MS = 30_000;
 
 describe("agent integration — onStepFinish contract (multi-step, mock model)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {

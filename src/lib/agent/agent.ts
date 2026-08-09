@@ -1617,6 +1617,18 @@ export async function runAgentText(options: {
           });
         }
 
+        // PM #36 — this path never recorded spend at all, so every cron tick,
+        // Telegram reply and external-API turn was invisible in the cost
+        // banner while the streaming path was billed correctly. The banner
+        // therefore UNDER-reported by exactly the traffic nobody is watching.
+        // Same helper, same identity resolution as the streaming path.
+        latest.cumulativeUsage = foldTurnUsage(
+          latest.cumulativeUsage,
+          settings.chatModel.provider,
+          settings.chatModel.model,
+          { streamUsage: (generated as unknown as { usage?: import("@/lib/cost/accumulator").RawUsage }).usage }
+        );
+
         latest.updatedAt = now;
         return latest;
       });

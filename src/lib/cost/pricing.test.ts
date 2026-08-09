@@ -245,3 +245,69 @@ describe("getModelPricing — expensive -pro reasoning variants must NOT be shad
     expect(getModelPricing("openai", "o1")?.inputUsdPerMillion).toBe(15);
   });
 });
+
+describe("cached prompt tokens bill at the cache-read rate (the MoA over-report)", () => {
+  // The operator measured ~8x over-reporting on swarm turns. Mechanism: a
+  // swarm re-sends the same long prefix to the Router, every proposer, the
+  // Skeptic and the aggregator — exactly what prompt caching makes cheap —
+  // while every prompt token was charged at the full input rate. OpenRouter
+  // lists claude-sonnet-4 at 3.00/M prompt and 0.30/M cache read: 10x.
+  const priced = {
+    inputUsdPerMillion: 3,
+    outputUsdPerMillion: 15,
+    cacheReadUsdPerMillion: 0.3,
+  };
+
+  it("discounts the cached portion instead of charging it at full rate", () => {
+    // 1M prompt tokens, 900k of them cached, no output.
+    const cost = estimateCost(
+      { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 900_000 },
+      priced
+    );
+    // 100k at 3.00/M + 900k at 0.30/M = 0.30 + 0.27
+    expect(cost.inputUsd).toBeCloseTo(0.57, 6);
+    // Without the discount this was 3.00 — a 5.3x over-report on this shape.
+    expect(cost.inputUsd).toBeLessThan(3);
+  });
+
+  it("cached tokens are a SUBSET of the prompt total, never an addition", () => {
+    // Verified against a live response: inputTokens 15944 with
+    // noCacheTokens 15944 + cacheReadTokens 0. Adding instead of subtracting
+    // would double-count and make the over-report worse, not better.
+    const all = estimateCost(
+      { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 1_000_000 },
+      priced
+    );
+    expect(all.inputUsd).toBeCloseTo(0.3, 6);
+  });
+
+  it("charges the FULL rate when the provider publishes no cache price", () => {
+    // Absent must mean "no discount known", not "cache reads are free" —
+    // otherwise an unpriced model silently under-reports.
+    const cost = estimateCost(
+      { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 900_000 },
+      { inputUsdPerMillion: 3, outputUsdPerMillion: 15 }
+    );
+    expect(cost.inputUsd).toBeCloseTo(3, 6);
+  });
+
+  it("is unchanged for a turn with no cached tokens", () => {
+    const withField = estimateCost(
+      { promptTokens: 1_000_000, completionTokens: 0, cachedPromptTokens: 0 },
+      priced
+    );
+    const without = estimateCost({ promptTokens: 1_000_000, completionTokens: 0 }, priced);
+    expect(withField.totalUsd).toBeCloseTo(without.totalUsd, 9);
+    expect(without.inputUsd).toBeCloseTo(3, 6);
+  });
+
+  it("clamps a cached count that exceeds the prompt total", () => {
+    // Defensive: a provider reporting more cached than prompt must not produce
+    // a NEGATIVE full-rate charge and silently credit the operator.
+    const cost = estimateCost(
+      { promptTokens: 1000, completionTokens: 0, cachedPromptTokens: 999_999 },
+      priced
+    );
+    expect(cost.inputUsd).toBeGreaterThanOrEqual(0);
+  });
+});

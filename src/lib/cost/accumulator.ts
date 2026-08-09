@@ -25,13 +25,25 @@ export interface RawUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /**
+   * Prompt tokens served from the provider's cache — a SUBSET of the prompt
+   * total, priced at the cache-read rate. Three spellings because three layers
+   * report it: the AI SDK's flat `cachedInputTokens`, its nested
+   * `inputTokenDetails.cacheReadTokens`, and the raw provider block's
+   * `prompt_tokens_details.cached_tokens`. All three were present in one live
+   * response, so read whichever arrives.
+   */
+  cachedInputTokens?: number;
+  inputTokenDetails?: { cacheReadTokens?: number } | null;
 }
 
 export function normalizeUsage(raw: RawUsage | undefined | null): UsageRecord {
   if (!raw) return { promptTokens: 0, completionTokens: 0 };
+  const cached = raw.cachedInputTokens ?? raw.inputTokenDetails?.cacheReadTokens;
   return {
     promptTokens: raw.promptTokens ?? raw.inputTokens ?? 0,
     completionTokens: raw.completionTokens ?? raw.outputTokens ?? 0,
+    ...(typeof cached === "number" && cached > 0 ? { cachedPromptTokens: cached } : {}),
   };
 }
 

@@ -31,6 +31,8 @@ import {
   getCachedOpenRouterPricing,
   getOpenRouterMaxOutput,
   getOpenRouterContextWindow,
+  isUsableMaxOutput,
+  deriveUsableMaxOutput,
   ensureOpenRouterPricingRefreshScheduled,
   REFRESH_INTERVAL_MS,
   CACHE_TTL_MS,
@@ -592,5 +594,75 @@ describe("periodic refresh scheduler — ensureOpenRouterPricingRefreshScheduled
       String(args[0]).includes("periodic refresh failed")
     );
     expect(tickFailures).toHaveLength(0);
+  });
+});
+
+describe("a max_completion_tokens equal to the context window is not an output ceiling", () => {
+  // Found by a LIVE run, not by this suite. Free Mode had selected
+  // `nvidia/nemotron-3-super-120b-a12b:free` (context 262144, and OpenRouter
+  // reports max_completion_tokens 262144 for it) as the brain. Every request
+  // died in under a second with HTTP 500:
+  //   "you requested about 278073 tokens (10536 of text input,
+  //    5393 of tool input, 262144 in the output)"
+  // The field was read correctly; the number is just unusable, because the
+  // provider enforces input + output <= context. 47 of ~400 OpenRouter models
+  // report this shape, including 2 of the 14 `:free` ones.
+
+  it("rejects a ceiling equal to the context window", () => {
+    expect(isUsableMaxOutput(262144, 262144)).toBe(false);
+  });
+
+  it("rejects a ceiling that exceeds the context window", () => {
+    expect(isUsableMaxOutput(300000, 262144)).toBe(false);
+  });
+
+  it("accepts a genuine ceiling below the window", () => {
+    expect(isUsableMaxOutput(16384, 262144)).toBe(true);
+  });
+
+  it("accepts when the window is unknown — only a KNOWN conflict disqualifies", () => {
+    // Dropping the ceiling whenever the window is unspecified would throw away
+    // good data for every model whose context_length OpenRouter omits.
+    expect(isUsableMaxOutput(16384, undefined)).toBe(true);
+    expect(isUsableMaxOutput(16384, null)).toBe(true);
+    expect(isUsableMaxOutput(16384, 0)).toBe(true);
+  });
+
+  it.each([0, -1, NaN, "16384", null, undefined, {}])(
+    "rejects a non-positive or non-numeric ceiling (%p)",
+    (bad) => {
+      expect(isUsableMaxOutput(bad, 262144)).toBe(false);
+    }
+  );
+});
+
+describe("an unusable ceiling is DERIVED from the window, not dropped to the flat default", () => {
+  // Rejecting the bogus number is only half the job. The context window is real
+  // information, so answering a 262144-window model as conservatively as a tiny
+  // one (DEFAULT_MAX_OUTPUT = 8192) throws away what we know. An eighth of the
+  // window leaves seven eighths for input — far more headroom than any real
+  // prompt needs — so `input + output <= context` cannot be violated by the
+  // ceiling alone.
+
+  it("derives an eighth of the window when the reported ceiling equals it", () => {
+    expect(deriveUsableMaxOutput(262144, 262144)).toBe(32768);
+    expect(deriveUsableMaxOutput(128000, 128000)).toBe(16000);
+  });
+
+  it("caps the derived value so a 1M-context model still asks something sane", () => {
+    expect(deriveUsableMaxOutput(1_000_000, 1_000_000)).toBe(32768);
+  });
+
+  it("leaves a GENUINE ceiling untouched — only the broken shape is replaced", () => {
+    expect(deriveUsableMaxOutput(32768, 262144)).toBe(32768);
+    expect(deriveUsableMaxOutput(65536, 1_000_000)).toBe(65536);
+  });
+
+  it("returns undefined when neither the ceiling nor the window is usable", () => {
+    // Nothing known -> the caller falls through to the family limits, which is
+    // the correct answer; inventing a number here would be worse than silence.
+    expect(deriveUsableMaxOutput(undefined, undefined)).toBeUndefined();
+    expect(deriveUsableMaxOutput(0, undefined)).toBeUndefined();
+    expect(deriveUsableMaxOutput("x", null)).toBeUndefined();
   });
 });

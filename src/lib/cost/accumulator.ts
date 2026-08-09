@@ -27,11 +27,15 @@ export interface RawUsage {
   totalTokens?: number;
   /**
    * Prompt tokens served from the provider's cache — a SUBSET of the prompt
-   * total, priced at the cache-read rate. Three spellings because three layers
-   * report it: the AI SDK's flat `cachedInputTokens`, its nested
-   * `inputTokenDetails.cacheReadTokens`, and the raw provider block's
-   * `prompt_tokens_details.cached_tokens`. All three were present in one live
-   * response, so read whichever arrives.
+   * total, priced at the cache-read rate.
+   *
+   * Two spellings are READ, both at the AI SDK layer: the flat
+   * `cachedInputTokens` and the nested `inputTokenDetails.cacheReadTokens`.
+   * The raw provider block carries a third (`prompt_tokens_details.cached_
+   * tokens`) which is deliberately NOT read — the SDK maps it into the two
+   * above, and reaching into the raw block would couple this to one provider's
+   * wire format. If a future SDK stops mapping it, the reconciliation case in
+   * `pricing.test.ts` goes red rather than silently billing at full rate.
    */
   cachedInputTokens?: number;
   /** The provider sends the whole breakdown; only `cacheReadTokens` is priced. */

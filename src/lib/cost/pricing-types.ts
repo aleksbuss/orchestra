@@ -21,9 +21,14 @@ export interface ModelPricing {
    * price. Charging every prompt token at the full rate therefore OVERSTATES
    * the bill, and it overstates it WORST on a swarm turn, where the same long
    * prefix is re-sent to the Router, every proposer, the Skeptic and the
-   * aggregator — precisely the shape prompt caching exists to make cheap. The
-   * operator measured roughly 8x over-reporting on MoA runs, which is what a
-   * 10x mispricing of the cached majority of the input produces.
+   * aggregator — precisely the shape prompt caching exists to make cheap.
+   *
+   * Magnitude, MEASURED against a real provider charge (see the reconciliation
+   * case in `pricing.test.ts`): on a call with 99.5% of the prompt cached this
+   * mispricing over-reported by 1.99x. The operator separately reported ~8x on
+   * MoA runs — that is NOT explained by this defect alone; the remainder is
+   * most likely the swarm paying one prompt per participant, much of which is
+   * real spend. Unmeasured, so do not repeat it as if it were.
    */
   cacheReadUsdPerMillion?: number;
 }

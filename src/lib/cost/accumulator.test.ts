@@ -355,3 +355,60 @@ describe("foldTurnUsage — every billing surface is counted (PM #36 / bug_005)"
     expect(out.completionTokens).toBe(7);
   });
 });
+
+describe("extraction against the EXACT usage shape a live provider returned", () => {
+  // Captured verbatim from a real response during verification (values other
+  // than the cached count preserved). The point is the FIELD NAMES: the SDK
+  // exposes both a flat `cachedInputTokens` and a nested
+  // `inputTokenDetails.cacheReadTokens`, while the provider's own block uses
+  // `prompt_tokens_details.cached_tokens`. Reading the wrong one silently
+  // yields zero cached tokens — i.e. the old full-rate over-report, with every
+  // unit test still green because they would be asserting on a shape nothing
+  // produces.
+  //
+  // ⚠ NOT closed by this test: no live response with a NONZERO cached count
+  // has been observed. The free model in use reports `cached_tokens: 0` even
+  // for an identical 10,025-token prompt sent twice, so the discount branch
+  // has still never executed against a real cache hit.
+  const liveShape = {
+    inputTokens: 15944,
+    inputTokenDetails: { noCacheTokens: 3944, cacheReadTokens: 12000, cacheWriteTokens: 0 },
+    outputTokens: 390,
+    outputTokenDetails: { textTokens: 0, reasoningTokens: 390 },
+    totalTokens: 16334,
+    cachedInputTokens: 12000,
+  };
+
+  it("picks the cached count out of the real field layout", () => {
+    const n = normalizeUsage(liveShape);
+    expect(n.promptTokens).toBe(15944);
+    expect(n.completionTokens).toBe(390);
+    expect(n.cachedPromptTokens).toBe(12000);
+  });
+
+  it("falls back to the nested detail when the flat field is absent", () => {
+    const { cachedInputTokens: _drop, ...nested } = liveShape;
+    void _drop;
+    expect(normalizeUsage(nested).cachedPromptTokens).toBe(12000);
+  });
+
+  it("reports no cached tokens when the provider sends none", () => {
+    const n = normalizeUsage({
+      inputTokens: 100,
+      outputTokens: 10,
+      inputTokenDetails: { noCacheTokens: 100, cacheReadTokens: 0 },
+      cachedInputTokens: 0,
+    });
+    expect(n.cachedPromptTokens).toBeUndefined();
+  });
+
+  it("the live shape is INTERNALLY CONSISTENT — noCache + cacheRead === inputTokens", () => {
+    // The subtraction in estimateCost assumes cached tokens are a SUBSET of
+    // the prompt total. If a provider ever reports them as an ADDITION this
+    // identity breaks, and the discount would under-charge instead of
+    // correcting an over-charge. Pinning it here means such a provider shows
+    // up as a red test rather than as a quietly wrong invoice.
+    const d = liveShape.inputTokenDetails;
+    expect(d.noCacheTokens + d.cacheReadTokens).toBe(liveShape.inputTokens);
+  });
+});

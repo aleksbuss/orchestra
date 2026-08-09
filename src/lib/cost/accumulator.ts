@@ -34,7 +34,12 @@ export interface RawUsage {
    * response, so read whichever arrives.
    */
   cachedInputTokens?: number;
-  inputTokenDetails?: { cacheReadTokens?: number } | null;
+  /** The provider sends the whole breakdown; only `cacheReadTokens` is priced. */
+  inputTokenDetails?: {
+    cacheReadTokens?: number;
+    noCacheTokens?: number;
+    cacheWriteTokens?: number;
+  } | null;
 }
 
 export function normalizeUsage(raw: RawUsage | undefined | null): UsageRecord {

@@ -35,8 +35,18 @@ import type { ModelPricing } from "./pricing-types";
 export type { ModelPricing } from "./pricing-types";
 
 export interface UsageRecord {
+  /** TOTAL prompt tokens, INCLUSIVE of any served from cache. */
   promptTokens: number;
   completionTokens: number;
+  /**
+   * Subset of `promptTokens` served from the provider's prompt cache.
+   * Inclusive, so the full-rate portion is `promptTokens - cachedPromptTokens`.
+   * Verified against a live response: `inputTokens: 15944` with
+   * `inputTokenDetails: { noCacheTokens: 15944, cacheReadTokens: 0 }` — the
+   * total equals noCache + cacheRead, so cached tokens must be SUBTRACTED,
+   * never added, or the fix would double-count instead of discounting.
+   */
+  cachedPromptTokens?: number;
 }
 
 export interface CostEstimate {
@@ -165,7 +175,19 @@ export function estimateCost(
   if (!pricing) {
     return { inputUsd: 0, outputUsd: 0, totalUsd: 0, knownPricing: false };
   }
-  const inputUsd = (usage.promptTokens / 1_000_000) * pricing.inputUsdPerMillion;
+  // Cached prompt tokens bill at the provider's cache-read rate when it
+  // publishes one. Without a published rate they stay at the full input rate —
+  // a conservative fallback that changes nothing for models we have no
+  // discount data for, rather than inventing a discount.
+  const cached = Math.min(
+    Math.max(usage.cachedPromptTokens ?? 0, 0),
+    Math.max(usage.promptTokens, 0)
+  );
+  const cacheRate = pricing.cacheReadUsdPerMillion;
+  const fullRateTokens = cacheRate === undefined ? usage.promptTokens : usage.promptTokens - cached;
+  const inputUsd =
+    (fullRateTokens / 1_000_000) * pricing.inputUsdPerMillion +
+    (cacheRate === undefined ? 0 : (cached / 1_000_000) * cacheRate);
   const outputUsd = (usage.completionTokens / 1_000_000) * pricing.outputUsdPerMillion;
   return {
     inputUsd,

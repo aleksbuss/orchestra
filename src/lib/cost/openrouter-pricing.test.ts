@@ -666,3 +666,41 @@ describe("an unusable ceiling is DERIVED from the window, not dropped to the fla
     expect(deriveUsableMaxOutput("x", null)).toBeUndefined();
   });
 });
+
+describe("a pre-v2 cache file must not satisfy the freshness check", () => {
+  // Without this, deploying the cache-read pricing fix changes nothing for up
+  // to 24h: the TTL keeps serving a file whose entries have no cache price, so
+  // the operator still sees the ~8x over-report on swarm turns after
+  // installing the very fix for it.
+
+  it("a file with no schemaVersion is treated as epoch-old", async () => {
+    await saveCachedOpenRouterPricing(
+      new Map([["vendor/m", { inputUsdPerMillion: 1, outputUsdPerMillion: 2 }]]),
+      new Date()
+    );
+    // Strip the version the writer stamped, emulating a file written before it existed.
+    const file = path.join(tempDir, "cache", "openrouter-pricing.json");
+    const raw = JSON.parse(await fs.readFile(file, "utf8"));
+    expect(raw.schemaVersion).toBe(2); // the writer stamps it
+    delete raw.schemaVersion;
+    await fs.writeFile(file, JSON.stringify(raw));
+
+    const loaded = await loadCachedOpenRouterPricing();
+    expect(loaded).not.toBeNull();
+    // Content still usable as a warm fallback …
+    expect(loaded!.pricing.get("vendor/m")?.inputUsdPerMillion).toBe(1);
+    // … but reported as epoch-old so the staleness maths forces a refresh.
+    expect(loaded!.fetchedAt).toBe(0);
+  });
+
+  it("a current-version file keeps its real timestamp", async () => {
+    const when = new Date();
+    await saveCachedOpenRouterPricing(
+      new Map([["vendor/m", { inputUsdPerMillion: 1, outputUsdPerMillion: 2, cacheReadUsdPerMillion: 0.1 }]]),
+      when
+    );
+    const loaded = await loadCachedOpenRouterPricing();
+    expect(loaded!.fetchedAt).toBe(when.getTime());
+    expect(loaded!.pricing.get("vendor/m")?.cacheReadUsdPerMillion).toBe(0.1);
+  });
+})

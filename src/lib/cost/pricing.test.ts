@@ -311,3 +311,46 @@ describe("cached prompt tokens bill at the cache-read rate (the MoA over-report)
     expect(cost.inputUsd).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("reconciled against a REAL provider charge (openai/gpt-4o-mini, 2026-08-09)", () => {
+  // The only end-to-end check that exists: a live call whose prompt was served
+  // from the provider's cache, compared against what the provider itself said
+  // it charged. Captured by sending an identical ~9.5k-token prompt three
+  // times through OpenRouter; the third hit the cache.
+  //
+  //   prompt_tokens                9517
+  //   prompt_tokens_details.cached 9472      (99.5% of the prompt)
+  //   completion_tokens               8
+  //   provider-reported cost   $0.00071895   (uncached calls: $0.00142935)
+  //
+  // Two things this pins that nothing else did:
+  //   1. The discount branch executes against a real cache hit — before this,
+  //      every observed response had cached_tokens: 0, so the branch had never
+  //      run outside unit tests.
+  //   2. Cached tokens really are a SUBSET (9472 < 9517). A provider reporting
+  //      them as an ADDITION would make the subtraction under-charge.
+  const PRICING = {
+    inputUsdPerMillion: 0.15,
+    outputUsdPerMillion: 0.6,
+    cacheReadUsdPerMillion: 0.075,
+  };
+  const USAGE = { promptTokens: 9517, completionTokens: 8, cachedPromptTokens: 9472 };
+  const PROVIDER_ACTUAL_USD = 0.00071895;
+
+  it("matches what the provider actually charged, within rounding", () => {
+    const got = estimateCost(USAGE, PRICING).totalUsd;
+    // 0.4% apart — the residue is the provider's own rounding, not a modelling
+    // error. Tightening this further would pin their rounding, not our maths.
+    expect(Math.abs(got - PROVIDER_ACTUAL_USD) / PROVIDER_ACTUAL_USD).toBeLessThan(0.01);
+  });
+
+  it("the OLD full-rate maths over-reported this exact call by ~2x", () => {
+    const old = estimateCost(
+      { promptTokens: USAGE.promptTokens, completionTokens: USAGE.completionTokens },
+      { inputUsdPerMillion: PRICING.inputUsdPerMillion, outputUsdPerMillion: PRICING.outputUsdPerMillion }
+    ).totalUsd;
+    const ratio = old / PROVIDER_ACTUAL_USD;
+    expect(ratio).toBeGreaterThan(1.9);
+    expect(ratio).toBeLessThan(2.1);
+  });
+});

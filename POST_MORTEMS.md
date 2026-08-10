@@ -38,6 +38,24 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 100. The test suite wrote to the operator's live database, and three layers of "isolation" all failed silently
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1 — no data was lost, but every `npm test` mutated the real `data/`: chats created and swept into `.trash/`, `chat-index.json` REWRITTEN, real vectors inserted into `data/memory/`. A crash mid-run leaves the live index describing test fixtures. PM #62 is the same hazard with the loss actually realised.
+**Symptoms:** None. That is the entry. Every run was green; the directory mtimes were the only trace.
+**Detection:** Noticed `data/chat-index.json` and `data/chats/` mtimes moving during a `verify:strict` run. Confirmed by `touch marker && npx vitest run <file> && find data -newer marker`, per file. **Every grep-based estimate along the way was wrong in the passing direction** — see below.
+**Root Cause:** Three separate mechanisms, each of which reads as isolation:
+- **`chat-store.test.ts` isolated nothing.** Its header said "Isolate from real data dir by patching process.cwd()" and no cwd patch was ever written. It created a `tmpDir`, deleted it, and pointed nothing at it. An inline comment claimed "we can't easily override the DATA_DIR without modifying process.cwd" — untrue since `ORCHESTRA_DATA_DIR` was added (the PM #62 fix); the file was never updated.
+- **`goal-store.test.ts` had no isolation at all** and relied on `clearGoal` to tidy up after writing real goal files.
+- **Eager module-level capture defeats the documented hook.** 17 storage modules do `const DATA_DIR = getDataDir()` at import. ESM hoists static imports above every hook, so `chat-files-store.test.ts` — which DID mock `process.cwd()` — had already bound the live path before its spy existed. Same for `memory-integration.test.ts`. **Redirecting the data dir only works if it happens before the module is first evaluated.**
+**Resolution:** The two unisolated files now set `ORCHESTRA_DATA_DIR` to a `mkdtemp` dir and restore it; the two eager-capture victims import their store LAZILY, after the redirect. Each of the four carries a test asserting `getDataDir()` resolves to its temp dir — the isolation fails silently, so it must be asserted, not trusted.
+**Rejected:** setting `ORCHESTRA_DATA_DIR` globally in `vitest.setup.ts`. Measured: it broke 137 tests across 26 files, because those isolate via `vi.spyOn(process, "cwd")` and the env var takes PRECEDENCE over the `<cwd>/data` fallback. A "safety" change that disables 26 files' existing isolation is not a safety change.
+**Regression Coverage:** One assertion per fixed file (`chat-store`, `goal-store`, `chat-files-store`, `memory-integration`). Mutation-verified: removing the redirect fails the assertion AND re-touches live `data/` in the same run. The suite-wide proof is the `find data -newer marker` diff around a full run — green means zero live files touched.
+**Doc Updates:** `CLAUDE.md` § Non-negotiables (data & filesystem).
+**Rule:** A test that writes through a storage module must redirect `ORCHESTRA_DATA_DIR` **before that module is first imported** — a `beforeAll` is too late for a static import, because the module captures the root at load. Assert the redirect took effect; do not trust it. And **do not estimate this class by grepping**: three successive greps (for the env var, then for the cwd idiom, then for store imports) each undercounted the real writers, which were found only by diffing `data/` around a real run.
+
+---
+
 ## 99. A key stored in the API Keys Vault never reached the agent — a fresh install was unusable, and the guard that should have applied it was unreachable code
 **Date:** 2026-08
 **Status:** RESOLVED

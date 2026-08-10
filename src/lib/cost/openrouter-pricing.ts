@@ -63,6 +63,9 @@ interface OpenRouterModelEntry {
   pricing?: {
     prompt?: string;
     completion?: string;
+    /** Per-token price of a PROMPT-CACHE read. 235 models publish one; it runs
+     *  ~10x below `prompt`, and ignoring it overstates every cached token. */
+    input_cache_read?: string;
   };
   // Per-model context window. Top-level `context_length` is the canonical field;
   // `top_provider.context_length` is the active provider's effective window
@@ -90,8 +93,18 @@ interface OpenRouterListing {
 }
 
 interface CacheFileShape {
+  /** See PRICING_CACHE_SCHEMA. Absent means v1 — pre cache-read pricing. */
+  schemaVersion?: number;
   fetchedAt: string; // ISO8601
-  entries: Array<{ id: string; inputUsdPerMillion: number; outputUsdPerMillion: number }>;
+  // `cacheReadUsdPerMillion` is optional so a cache file written before the
+  // field existed still loads; without persisting it, a warm-cache boot (no
+  // network) would silently lose the discount and restore the over-report.
+  entries: Array<{
+    id: string;
+    inputUsdPerMillion: number;
+    outputUsdPerMillion: number;
+    cacheReadUsdPerMillion?: number;
+  }>;
   // Per-model max output tokens (`top_provider.max_completion_tokens`). Optional
   // so older cache files (pre-feature) load cleanly; persisting it means the
   // dynamic source survives a warm-cache boot (no network fetch).
@@ -113,6 +126,22 @@ const FETCH_TIMEOUT_MS = 8_000;
 // (PM #75 — the health warn and the refresh cadence must never drift apart).
 export const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const CACHE_FILENAME = "openrouter-pricing.json";
+
+/**
+ * Cache-file schema version.
+ *
+ * 2 — entries carry `cacheReadUsdPerMillion`.
+ * 1 (or absent) — written before cache-read pricing existed.
+ *
+ * A v1 file is structurally stale no matter how young it is: without the cache
+ * price every prompt token bills at the full input rate, which is the ~8x
+ * over-report on swarm turns this version exists to fix. Left to the 24h TTL,
+ * the operator would deploy the fix and keep seeing the old numbers for a day.
+ * An explicit version is used rather than inferring from the entries, because
+ * "no entry has the field" also describes a legitimately seeded in-memory
+ * cache and would force a pointless network fetch there.
+ */
+const PRICING_CACHE_SCHEMA = 2;
 
 /**
  * PM #71 — pricing state lives on `globalThis`, NOT module scope. Next.js
@@ -282,9 +311,15 @@ export async function fetchOpenRouterPricing(options: {
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
+    const cacheReadPerToken = parsePrice(entry.pricing?.input_cache_read);
     map.set(id, {
       inputUsdPerMillion: promptPerToken * 1_000_000,
       outputUsdPerMillion: completionPerToken * 1_000_000,
+      // Omitted (not zeroed) when unpublished: absent means "charge the full
+      // input rate", whereas 0 would mean "cache reads are free".
+      ...(cacheReadPerToken === null
+        ? {}
+        : { cacheReadUsdPerMillion: cacheReadPerToken * 1_000_000 }),
     });
   }
   store().maxOutput = maxOut;
@@ -324,6 +359,13 @@ export async function loadCachedOpenRouterPricing(): Promise<{
   if (!parsed?.entries || !Array.isArray(parsed.entries)) return null;
   const fetchedAt = Date.parse(parsed.fetchedAt);
   if (!Number.isFinite(fetchedAt)) return null;
+  // A pre-v2 file has no cache-read prices. Its CONTENT is still usable as a
+  // warm fallback (better than nothing before the first fetch lands), but it
+  // must not satisfy the freshness check, or the fix stays dormant behind the
+  // 24h TTL. Reporting it as epoch-old makes the existing staleness maths
+  // force a refresh without a second code path.
+  const versionedFetchedAt =
+    (parsed.schemaVersion ?? 1) < PRICING_CACHE_SCHEMA ? 0 : fetchedAt;
   const map = new Map<string, ModelPricing>();
   for (const e of parsed.entries) {
     if (typeof e?.id !== "string") continue;
@@ -336,6 +378,9 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     map.set(e.id.toLowerCase(), {
       inputUsdPerMillion: e.inputUsdPerMillion,
       outputUsdPerMillion: e.outputUsdPerMillion,
+      ...(typeof e.cacheReadUsdPerMillion === "number" && e.cacheReadUsdPerMillion >= 0
+        ? { cacheReadUsdPerMillion: e.cacheReadUsdPerMillion }
+        : {}),
     });
   }
   // Warm the dynamic max-output source from disk so it survives a warm-cache
@@ -368,7 +413,7 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     }
     if (sp.size > 0) store().supportedParameters = sp;
   }
-  return { pricing: map, fetchedAt };
+  return { pricing: map, fetchedAt: versionedFetchedAt };
 }
 
 /**
@@ -382,11 +427,15 @@ export async function saveCachedOpenRouterPricing(
   const cachePath = cacheFilePath();
   await fs.mkdir(path.dirname(cachePath), { recursive: true });
   const payload: CacheFileShape = {
+    schemaVersion: PRICING_CACHE_SCHEMA,
     fetchedAt: fetchedAt.toISOString(),
     entries: Array.from(pricing.entries()).map(([id, p]) => ({
       id,
       inputUsdPerMillion: p.inputUsdPerMillion,
       outputUsdPerMillion: p.outputUsdPerMillion,
+      ...(p.cacheReadUsdPerMillion === undefined
+        ? {}
+        : { cacheReadUsdPerMillion: p.cacheReadUsdPerMillion }),
     })),
     // Persist the per-model output ceilings so a warm-cache boot keeps the
     // dynamic source populated (free models too — they aren't in `pricing`).

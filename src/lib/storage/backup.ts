@@ -54,6 +54,36 @@ const DEFAULT_INTERVAL_HOURS = 24;
 /** Regenerable / ephemeral `data/` subdirs — excluded to keep backups lean. */
 const EXCLUDED_TOP_LEVEL = new Set(["npm-cache", "tmp", "cache"]);
 
+/**
+ * Dependency and build trees, excluded at ANY depth.
+ *
+ * `EXCLUDED_TOP_LEVEL` only ever looked at the first path segment, which was
+ * right for `data/`'s own scratch dirs and wrong for everything underneath:
+ * `data/projects/<id>/` holds complete user project trees, `node_modules` and
+ * all. Measured on this install — 728 MB of nested `node_modules` copied into
+ * every one of 7 daily snapshots, so the backup ring was 5.3 GB of which ~96%
+ * was reinstallable from a lockfile that IS backed up.
+ *
+ * The cost was never just disk: each snapshot walked hundreds of thousands of
+ * files, and `copyDataDirWithRetry` races the live tree the whole time.
+ *
+ * DELIBERATELY CONSERVATIVE. Only trees a package manager or build step
+ * reproduces from a manifest that is itself in the backup. Notably ABSENT:
+ * `.git` (a project's history is not regenerable — it is often the only copy),
+ * and `dist`/`build`, which are conventionally output but are hand-authored
+ * often enough that skipping them could silently lose work.
+ */
+const REGENERABLE_DIR_NAMES = new Set([
+  "node_modules",
+  ".venv",
+  "venv",
+  "__pycache__",
+  ".pytest_cache",
+  ".next",
+  ".turbo",
+  ".parcel-cache",
+]);
+
 const BACKUP_DIR_PREFIX = "data-";
 const TMP_DIR_PREFIX = ".tmp-";
 
@@ -129,8 +159,21 @@ async function copyDataDirWithRetry(dataDir: string, tmpDir: string): Promise<vo
           if (src.endsWith(".tmp")) return false;
           const rel = path.relative(dataDir, src);
           if (!rel) return true; // the data dir itself
-          const top = rel.split(path.sep)[0];
-          return !EXCLUDED_TOP_LEVEL.has(top);
+          const segments = rel.split(path.sep);
+          if (EXCLUDED_TOP_LEVEL.has(segments[0])) return false;
+          // Returning false for a directory prunes its whole subtree, so this
+          // costs one Set lookup per entry rather than a walk of the tree it
+          // skips. Checked at every depth, because the dependency trees live
+          // inside user projects, not at the top of `data/`.
+          //
+          // `projects/<id>` is exempt: a project the operator happened to name
+          // `node_modules` would otherwise be dropped whole, silently. Nobody
+          // is likely to do that — but the cost of the guard is one comparison
+          // and the cost of being wrong is losing a project from every backup.
+          return !segments.some(
+            (segment, i) =>
+              !(i === 1 && segments[0] === "projects") && REGENERABLE_DIR_NAMES.has(segment)
+          );
         },
       });
       return;

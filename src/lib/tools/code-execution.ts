@@ -4,6 +4,12 @@ import { execFileSync, spawn, type ChildProcess } from "child_process";
 import type { AppSettings } from "@/lib/types";
 import { inspectCommand } from "@/lib/security/dangerous-command-guard";
 import { scrubProcessEnv } from "@/lib/security/scrub-env";
+import {
+  describeSandboxSpawnFailure,
+  sandboxProjectCommand,
+  type SandboxDecision,
+} from "@/lib/tools/exec-sandbox";
+import { dataPath } from "@/lib/storage/data-dir";
 
 // PM #28/#70 — the env scrubber moved to scrub-env.ts so the install_packages
 // orchestrator shares it (a malicious package's post-install script runs
@@ -117,6 +123,13 @@ type PreparedExecution = {
   commandPreview: string;
   terminalMarker?: string;
   terminalState?: TerminalSessionState;
+  /**
+   * Which OS-level confinement actually wrapped this command. Carried on the
+   * prepared object rather than recomputed at the spawn sites, so the two of
+   * them cannot disagree, and so a caller can report "no confinement" instead
+   * of assuming there was some.
+   */
+  sandbox?: SandboxDecision;
 };
 
 const OUTPUT_TRUNCATED_MARKER = "[output truncated]";
@@ -403,6 +416,30 @@ export function cleanupSessions(): void {
   finishedProcessSessions.clear();
 }
 
+/**
+ * Confine a prepared command to its project. All three runtimes converge here,
+ * so neither spawn site can obtain an unconfined command — the same "one
+ * chokepoint, guard last" shape `assembleAgentToolSet` uses for the tool loop
+ * guard. The policy itself lives in `exec-sandbox.ts`.
+ *
+ * `commandPreview` is deliberately NOT rewritten: the user is shown the command
+ * they asked for, not a 2 KB Seatbelt profile.
+ *
+ * SCOPE: `code_execution` only. `install_packages` spawns package managers of
+ * its own and is deliberately unconfined — writing outside the project IS its
+ * job. See the `ORCHESTRA_EXEC_SANDBOX` entry in security-patterns.md.
+ */
+function withExecSandbox(prepared: PreparedExecution, projectRoot: string): PreparedExecution {
+  const wrapped = sandboxProjectCommand(prepared.command, prepared.args, projectRoot, {
+    // The agent's scratch space, and the package cache it is expected to fill.
+    writable: [dataPath("tmp"), dataPath("npm-cache")],
+    // The provider keys. Reading these is the whole point of a prompt-injected
+    // payload, and until this landed `cat data/settings/settings.json` worked.
+    secret: [dataPath("settings")],
+  });
+  return { ...prepared, command: wrapped.command, args: wrapped.args, sandbox: wrapped.sandbox };
+}
+
 async function prepareExecution(params: {
   runtime: ExecutionRuntime;
   code: string;
@@ -414,25 +451,25 @@ async function prepareExecution(params: {
   if (params.runtime === "python") {
     const pythonCommand = await resolvePythonCommand(params.cwd);
     const pythonLabel = path.basename(pythonCommand) === "python3" ? "python3" : pythonCommand;
-    return {
+    return withExecSandbox({
       runtime: "python",
       command: pythonCommand,
       args: ["-c", params.code],
       cwd: params.cwd,
       env: await buildPythonEnv(params.cwd),
       commandPreview: `${pythonLabel} -c ${previewText(params.code)}`,
-    };
+    }, params.cwd);
   }
 
   if (params.runtime === "nodejs") {
-    return {
+    return withExecSandbox({
       runtime: "nodejs",
       command: "node",
       args: ["-e", params.code],
       cwd: params.cwd,
       env: scrubProcessEnv({ PYTHONUNBUFFERED: "1" }),
       commandPreview: `node -e ${previewText(params.code)}`,
-    };
+    }, params.cwd);
   }
 
   const shell = process.env.SHELL?.trim() || "sh";
@@ -458,7 +495,7 @@ async function prepareExecution(params: {
     "exit $__orchestra_exit",
   ].join("\n");
 
-  return {
+  return withExecSandbox({
     runtime: "terminal",
     command: shell,
     args: ["-lc", wrapped],
@@ -467,7 +504,7 @@ async function prepareExecution(params: {
     commandPreview: previewText(params.code),
     terminalMarker: marker,
     terminalState,
-  };
+  }, params.cwd);
 }
 
 async function buildPythonEnv(cwd: string): Promise<NodeJS.ProcessEnv> {
@@ -772,13 +809,24 @@ function formatManagedSessionResult(session: ManagedProcessSession): string {
   const output = formatManagedSessionOutput(session);
   const parts: string[] = [output];
 
+  // Same translation as the one-shot path — see `formatCommandResult`.
+  const sandboxSpawnError = session.spawnError
+    ? null
+    : describeSandboxSpawnFailure(session.exitCode, session.stderr);
+  const spawnError = session.spawnError ?? sandboxSpawnError;
+
   if (session.timedOut) {
     parts.push("[Process killed after timeout]");
   }
-  if (session.spawnError) {
-    parts.push(`Process error: ${session.spawnError}`);
+  if (spawnError) {
+    parts.push(`Process error: ${spawnError}`);
   }
-  if (session.status !== "running" && session.exitCode !== null && session.exitCode !== 0) {
+  if (
+    session.status !== "running" &&
+    session.exitCode !== null &&
+    session.exitCode !== 0 &&
+    !sandboxSpawnError
+  ) {
     parts.push(`Exit code: ${session.exitCode}`);
   }
 
@@ -909,20 +957,29 @@ function terminateProcess(proc: ChildProcess): void {
 }
 
 function formatCommandResult(result: CommandResult): string {
+  // A sandbox wrapper that cannot exec its target is a SPAWN failure wearing an
+  // ordinary exit code. Restore the original shape so the agent still learns
+  // "the runtime is broken", not "the program exited 71".
+  const sandboxSpawnError = result.spawnError
+    ? null
+    : describeSandboxSpawnFailure(result.exitCode, result.stderr);
+  const spawnError = result.spawnError ?? sandboxSpawnError;
+
   const parts: string[] = [];
   if (result.stdout.trim()) {
     parts.push(`STDOUT:\n${result.stdout.trim()}`);
   }
-  if (result.stderr.trim()) {
+  // When the stderr IS the spawn failure, printing it twice only adds noise.
+  if (result.stderr.trim() && !sandboxSpawnError) {
     parts.push(`STDERR:\n${result.stderr.trim()}`);
   }
-  if (result.spawnError) {
-    parts.push(`Process error: ${result.spawnError}`);
+  if (spawnError) {
+    parts.push(`Process error: ${spawnError}`);
   }
   if (result.timedOut) {
     parts.push("[Process killed after timeout]");
   }
-  if (result.exitCode !== null && result.exitCode !== 0) {
+  if (result.exitCode !== null && result.exitCode !== 0 && !sandboxSpawnError) {
     parts.push(`Exit code: ${result.exitCode}`);
   }
   return parts.length > 0 ? parts.join("\n\n") : "(no output)";

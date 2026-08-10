@@ -33,6 +33,69 @@ import {
   type MoAProposer,
 } from "@/lib/agent/moa-personas";
 import { applyIdenticalPromptsArm } from "@/lib/agent/eval-arms";
+import { abortableSleep, isFreeTierModel } from "@/lib/agent/proposer-pacing";
+
+/**
+ * How many RETRIES (not attempts) the Router gets, by tier.
+ *
+ * Free endpoints get more, but not many more. The instinct is "it costs $0, so
+ * hammer it" — and the cost that actually binds is not money. OpenRouter's free
+ * tier is 20 requests/MINUTE and buying credit does not raise it; failed
+ * attempts still consume the daily quota. Within one turn, 3-5 proposers fire
+ * in PARALLEL against the same endpoint seconds after the Router finishes, so a
+ * Router that keeps retrying is spending the exact per-minute budget its own
+ * proposers are about to need.
+ *
+ * Two retries also matches `PROPOSER_EMPTY_RETRIES` (the free-tier retry
+ * constant already chosen elsewhere in this stack) and sits at the top of what
+ * the evidence supports: one retry catches the large majority of structured-
+ * output failures and the recommended ceiling is 2-3 attempts. Beyond that the
+ * curve flattens hard while runtime keeps growing.
+ */
+const PAID_ROUTER_RETRIES = 1;
+const FREE_ROUTER_RETRIES = 2;
+
+function routerRetryBudget(modelConfig: ModelConfig): number {
+  const override = Number(process.env.ORCHESTRA_ROUTER_RETRIES);
+  if (Number.isFinite(override) && override >= 0) return Math.floor(override);
+  return isFreeTierModel(modelConfig.model) ? FREE_ROUTER_RETRIES : PAID_ROUTER_RETRIES;
+}
+
+/** Same shape as the proposer empty-result backoff, and the same env knob. */
+function routerBackoffMs(attempt: number): number {
+  return Number(process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS ?? 2000) * (attempt + 1);
+}
+
+/**
+ * A throttled or overloaded free endpoint is the one failure a plain re-send
+ * genuinely fixes — waiting is the whole remedy. `classifyRouterError` buckets
+ * 429 as "other" (its "auth" branch matches the word `quota`, which is a
+ * different condition), so throttle is detected separately rather than by
+ * widening that classifier and disturbing the telemetry it already feeds.
+ */
+function isThrottleError(err: unknown): boolean {
+  const msg = describeRouterError(err).toLowerCase();
+  return /429|rate.?limit|too many requests|overloaded|capacity|try again/.test(msg);
+}
+
+/**
+ * Which failures are worth another call.
+ *
+ * - `schema` — always. A malformed draft is the defect this exists for, and the
+ *   retry carries the validation error back to the model (see `repairHint`).
+ * - throttle / `timeout` — FREE tier only. On a paid endpoint the same
+ *   condition means the operator is paying twice to wait; on a free one it is
+ *   the expected steady state the whole failover stack was built around.
+ * - `auth` (401/402/credit) and `not_found` (404) — NEVER. No number of
+ *   retries conjures credit, a key, or a model that is not deployed.
+ */
+function isRetryableRouterError(err: unknown, freeTier: boolean): boolean {
+  const kind = classifyRouterError(err);
+  if (kind === "auth" || kind === "not_found") return false;
+  if (kind === "schema") return true;
+  if (!freeTier) return false;
+  return kind === "timeout" || isThrottleError(err);
+}
 
 /**
  * DDD / PM #89 — classify a Router failure so the fallback telemetry says WHY
@@ -139,7 +202,7 @@ export async function generateDynamicSwarm(
     }).join("\n");
 
     const routerModel = createModel(modelConfig, {});
-    const runRouterCall = () => generateObject({
+    const runRouterCall = (repairHint: string = "") => generateObject({
       model: routerModel,
       // Every other LLM call in the agent/MoA path caps output via
       // resolveMaxOutputTokens(settings.<role>Model) (agent.ts, moa.ts). This
@@ -185,55 +248,86 @@ INSTRUCTIONS:
    - "balanced" for Analyst / Researcher / Domain-Expert / Tool-Operator personas — they need clarity, not maximum reasoning depth.
    - "frontier" for Coder / Architect / Implementation / Deep-Synthesis personas — output quality scales meaningfully with model size.
    This lets the operator route different personas to different models (e.g., Skeptic on cheap Haiku, Coder on premium Opus, with the Aggregator unchanged). If you can't decide, omit the field and Orchestra will pick from the role.${searchEnabled ? `
-7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}`,
+7. VERY IMPORTANT: You have access to the 'search_web' tool. If an expert requires real-time facts, news, documentation, or live data to solve the request, you MUST explicitly instruct them in their [RULES] to call the 'search_web' tool first before answering.` : ""}${fewShotsBlock}${repairHint}`,
       // PM #98 — the Router's generateObject had no time bound.
       abortSignal: callDeadlineSignal(abortSignal),
     });
 
-    // ONE retry, and ONLY on a schema failure.
+    // Retry budget by TIER, and only for failures another call can fix.
     //
     // Observed live on `google/gemma-4-26b-a4b-it:free` — the model Free Mode
     // picks as Router, because it is one of the few free ids advertising
-    // `structured_outputs`. It intermittently returns output that does not
-    // satisfy the schema (once `personas: []` against the `min(3)` constraint,
-    // once unparseable text). Present in one run, absent in the next. The
-    // fallback below is fail-safe, but the turn still LOOKS healthy: the user
-    // gets an answer while the swarm has quietly lost role specialisation and
-    // tournament judging — the two things that distinguish it from N-sampling.
+    // `structured_outputs`. It intermittently returns output the schema
+    // rejects (once `personas: []` against `min(3)`, once unparseable text).
+    // The fallback below is fail-safe, but the turn still LOOKS healthy: the
+    // user gets an answer while the swarm has quietly lost role specialisation
+    // and tournament judging.
     //
-    // Scoped to `schema` deliberately. Retrying a 402, a 429 or a timeout burns
-    // money and latency on a condition a second identical call cannot fix; a
-    // schema miss is a sampling artefact and a second draw genuinely can.
-    // A second failure falls through to the same static-persona fallback as
-    // before, so the worst case is one extra call on an already-degraded turn.
-    //
-    // Each attempt gets its own deadline (`callDeadlineSignal` runs per call),
-    // which is the PM #98 contract — a caller signal is not a time bound.
-    let routerResult: Awaited<ReturnType<typeof runRouterCall>>;
-    try {
-      routerResult = await runRouterCall();
-    } catch (firstErr) {
-      if (classifyRouterError(firstErr) !== "schema") throw firstErr;
-      // Logged whether or not the retry rescues it, so the rate is measurable
-      // from the logs alone — no separate instrumentation pass needed.
-      log.warn("moa_router_schema_retry", {
-        module: "moa-router",
-        provider: modelConfig.provider,
-        model: modelConfig.model,
-        error: describeRouterError(firstErr),
-      });
-      console.warn(
-        `[MoA] Router returned malformed structured output on ${modelConfig.provider}/${modelConfig.model} — retrying once before falling back to static personas.`
-      );
-      routerResult = await runRouterCall();
-      log.info("moa_router_schema_retry_rescued", {
-        module: "moa-router",
-        provider: modelConfig.provider,
-        model: modelConfig.model,
-      });
-      console.warn("[MoA] Router retry succeeded — DPG personas recovered.");
+    // THE RETRY CARRIES THE ERROR BACK. Re-sending an identical prompt draws
+    // from the same distribution that just failed, so a bare re-draw is close
+    // to worthless for a constrained-decoding failure — feeding the validation
+    // message in is what makes a second attempt worth its quota.
+    const freeTier = isFreeTierModel(modelConfig.model);
+    const maxRetries = routerRetryBudget(modelConfig);
+    let routerResult: Awaited<ReturnType<typeof runRouterCall>> | undefined;
+    let repairHint = "";
+
+    for (let attempt = 0; ; attempt++) {
+      try {
+        routerResult = await runRouterCall(repairHint);
+        if (attempt > 0) {
+          log.info("moa_router_retry_rescued", {
+            module: "moa-router",
+            provider: modelConfig.provider,
+            model: modelConfig.model,
+            attempt,
+          });
+          console.warn(`[MoA] Router retry #${attempt} succeeded — DPG personas recovered.`);
+        }
+        break;
+      } catch (err) {
+        if (attempt >= maxRetries || !isRetryableRouterError(err, freeTier)) throw err;
+
+        const kind = classifyRouterError(err);
+        // Logged on every retry whether or not it rescues the turn, so the real
+        // rate is readable from the logs alone — instrumenting and fixing are
+        // the same change here, so the measurement comes free with the fix.
+        log.warn("moa_router_retry", {
+          module: "moa-router",
+          provider: modelConfig.provider,
+          model: modelConfig.model,
+          attempt,
+          maxRetries,
+          freeTier,
+          reason: kind,
+          error: describeRouterError(err),
+        });
+
+        if (kind === "schema") {
+          // Truncated: the useful part is the constraint that was violated, and
+          // an unbounded error string would eat the Router's own token budget.
+          repairHint =
+            `\n\n[RETRY — YOUR PREVIOUS RESPONSE WAS REJECTED]\n` +
+            `The last attempt did not satisfy the required output schema: ` +
+            `${describeRouterError(err).slice(0, 500)}\n` +
+            `Return ONLY valid output matching the schema. You MUST provide at ` +
+            `least 3 personas.`;
+          console.warn(
+            `[MoA] Router returned malformed structured output on ${modelConfig.provider}/${modelConfig.model} — retrying with the validation error fed back (attempt ${attempt + 1}/${maxRetries}).`
+          );
+        } else {
+          // Throttle / timeout: waiting IS the remedy, so back off rather than
+          // re-sending immediately into the same closed window.
+          const backoff = routerBackoffMs(attempt);
+          console.warn(
+            `[MoA] Router hit ${kind} on a free endpoint — backing off ${backoff}ms before retry ${attempt + 1}/${maxRetries}.`
+          );
+          await abortableSleep(backoff, abortSignal);
+        }
+      }
     }
-    const { object, usage } = routerResult;
+
+    const { object, usage } = routerResult!;
 
     // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises
     // "one DPG role is ALWAYS forced to be a QA Auditor / Skeptic", but

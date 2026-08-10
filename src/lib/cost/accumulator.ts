@@ -25,13 +25,34 @@ export interface RawUsage {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  /**
+   * Prompt tokens served from the provider's cache — a SUBSET of the prompt
+   * total, priced at the cache-read rate.
+   *
+   * Two spellings are READ, both at the AI SDK layer: the flat
+   * `cachedInputTokens` and the nested `inputTokenDetails.cacheReadTokens`.
+   * The raw provider block carries a third (`prompt_tokens_details.cached_
+   * tokens`) which is deliberately NOT read — the SDK maps it into the two
+   * above, and reaching into the raw block would couple this to one provider's
+   * wire format. If a future SDK stops mapping it, the reconciliation case in
+   * `pricing.test.ts` goes red rather than silently billing at full rate.
+   */
+  cachedInputTokens?: number;
+  /** The provider sends the whole breakdown; only `cacheReadTokens` is priced. */
+  inputTokenDetails?: {
+    cacheReadTokens?: number;
+    noCacheTokens?: number;
+    cacheWriteTokens?: number;
+  } | null;
 }
 
 export function normalizeUsage(raw: RawUsage | undefined | null): UsageRecord {
   if (!raw) return { promptTokens: 0, completionTokens: 0 };
+  const cached = raw.cachedInputTokens ?? raw.inputTokenDetails?.cacheReadTokens;
   return {
     promptTokens: raw.promptTokens ?? raw.inputTokens ?? 0,
     completionTokens: raw.completionTokens ?? raw.outputTokens ?? 0,
+    ...(typeof cached === "number" && cached > 0 ? { cachedPromptTokens: cached } : {}),
   };
 }
 

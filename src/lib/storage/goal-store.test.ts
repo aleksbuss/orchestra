@@ -6,7 +6,10 @@
  *   - updateGoal concurrency: ensures no task overwrite under race
  *   - Error handling: no chatId, nonexistent goal
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import path from "path";
+import fs from "fs/promises";
+import os from "os";
 
 vi.mock("@/lib/realtime/event-bus", () => ({
   publishUiSyncEvent: vi.fn(),
@@ -34,12 +37,36 @@ function makeGoal(chatId: string): ProjectGoal {
 describe("Goal Store", () => {
   const chatIds: string[] = [];
 
+  // This file had NO isolation: every case wrote real goal files into the
+  // operator's live `data/goals/` and relied on `clearGoal` to tidy up. Found
+  // by running the file alone and diffing `data/` afterwards, not by reading.
+  // `data/` IS the database and there is no undo — see PM #62.
+  let tmpDir: string;
+  let previousDataDir: string | undefined;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-goal-"));
+    previousDataDir = process.env.ORCHESTRA_DATA_DIR;
+    process.env.ORCHESTRA_DATA_DIR = tmpDir;
+  });
+
   afterEach(async () => {
     const { clearGoal } = await import("@/lib/storage/goal-store");
     for (const id of chatIds) {
       await clearGoal(id).catch(() => {});
     }
     chatIds.length = 0;
+    if (previousDataDir === undefined) delete process.env.ORCHESTRA_DATA_DIR;
+    else process.env.ORCHESTRA_DATA_DIR = previousDataDir;
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  // The isolation fails SILENTLY — the suite passes either way, it just passes
+  // against real data. Assert it rather than trust it.
+  it("runs against an isolated data dir, not the operator's live one", async () => {
+    const { getDataDir } = await import("@/lib/storage/data-dir");
+    expect(getDataDir()).toBe(path.resolve(tmpDir));
+    expect(getDataDir()).not.toBe(path.join(process.cwd(), "data"));
   });
 
   function trackChat(id: string) {

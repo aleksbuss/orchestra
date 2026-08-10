@@ -71,17 +71,50 @@ const CREDENTIAL_SUBPATHS = [
   ".aws",
   ".gnupg",
   ".kube",
-  ".docker",
-  ".config/gcloud",
-  ".config/gh",
-  ".config/git",
   ".local/share/keyrings",
   "Library/Keychains",
-  "Library/Application Support/Google/Chrome/Default/Login Data",
 ];
 
-/** Individual credential files (not directories) denied for read. */
-const CREDENTIAL_FILES = [".netrc", ".npmrc", ".pypirc", ".git-credentials"];
+/**
+ * Individual credential FILES.
+ *
+ * The distinction from the list above is load-bearing and was learned the
+ * expensive way. An earlier version denied whole tool-config directories —
+ * `.config/gh`, `.config/git`, `.config/gcloud`, `.docker`. That broke the
+ * tools outright while protecting nothing: `gh` refused to even start
+ * ("failed to read configuration: .config/gh/config.yml: operation not
+ * permitted"), and its token was never in that directory at all — it lives in
+ * the macOS keyring. A sandbox rule that disables a tool the agent is
+ * supposed to use, in exchange for guarding a file that holds no secret, is
+ * pure cost.
+ *
+ * So: deny the file that holds credential MATERIAL, and leave the
+ * configuration the tool needs in order to run.
+ *
+ * NOT LISTED, DELIBERATELY — `.config/gh/hosts.yml`. Denying it also stops gh
+ * from starting (it treats an unreadable hosts file as fatal, not as "logged
+ * out"), and it buys nothing: `gh auth token` prints the credential from the
+ * keyring regardless of what any file on disk says. Which is the general
+ * limit worth stating plainly: **a filesystem sandbox cannot stop a CLI that
+ * will hand over its own credential on request.** Any tool with an
+ * `auth token`-shaped subcommand is outside what this defends. What it does
+ * defend is the much more common shape — code that reads key files directly.
+ *
+ * Note on SSH: `.ssh` stays denied (private keys are exactly the asset), and
+ * `git push` over SSH still works, because the agent socket lives in the temp
+ * root the profile allows — signing happens without the key ever being read.
+ */
+const CREDENTIAL_FILES = [
+  ".netrc",
+  ".npmrc",
+  ".pypirc",
+  ".git-credentials",
+  ".docker/config.json",
+  ".config/git/credentials",
+  ".config/gcloud/credentials.db",
+  ".config/gcloud/access_tokens.db",
+  ".config/gcloud/application_default_credentials.json",
+];
 
 /**
  * Writable cache roots. Package managers are useless without these, and a cache

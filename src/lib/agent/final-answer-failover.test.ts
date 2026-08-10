@@ -249,6 +249,37 @@ describe("buildFinalAnswerPool", () => {
     s.utilityModel = { provider: "openrouter", model: "" } as ModelConfig;
     expect(buildFinalAnswerPool(s)).toHaveLength(0);
   });
+
+  // The pool used to hand back the raw settings slots. Those are routinely
+  // stored as `{ provider, model }` with no key — Free Mode's overlay writes
+  // exactly that shape — so `createModel(substitute)` threw "API Key is
+  // missing" for anyone whose key lives in the vault instead of the
+  // environment. It is caught, so nothing crashed: the failover simply never
+  // substituted, which is the one thing it exists to do.
+  it("resolves each candidate's key from the vault, so a substitution can actually authenticate", () => {
+    const s = settings();
+    s.providerApiKeys = { openrouter: "vault-key-123" };
+    s.utilityModel = { provider: "openrouter", model: "util/model" };
+    s.proposerTiers = {
+      frontier: { provider: "openrouter", model: "tier/frontier" },
+      balanced: undefined,
+      fast: undefined,
+    };
+
+    expect(buildFinalAnswerPool(s).map((c) => c.apiKey)).toEqual([
+      "vault-key-123",
+      "vault-key-123",
+    ]);
+  });
+
+  it("does not overwrite a key a slot already carries", () => {
+    const s = settings();
+    s.providerApiKeys = { openrouter: "vault-key-123" };
+    s.utilityModel = { provider: "openrouter", model: "util/model", apiKey: "slot-key" };
+    s.proposerTiers = { frontier: undefined, balanced: undefined, fast: undefined };
+
+    expect(buildFinalAnswerPool(s)[0].apiKey).toBe("slot-key");
+  });
 });
 
 describe("degradation policy (Sprint 4)", () => {

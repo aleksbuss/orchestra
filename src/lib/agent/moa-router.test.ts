@@ -606,3 +606,72 @@ describe("Skeptic control arm (Step 2 — eval-only, PM #91 invariant untouched)
     expect(result.personas.some((p) => detectProposerRole(p) === "reviewer")).toBe(true);
   });
 });
+
+/**
+ * Sprint 2 — one retry on a SCHEMA failure, and only on a schema failure.
+ *
+ * `google/gemma-4-26b-a4b-it:free` is what Free Mode picks as Router (one of
+ * the few free ids advertising `structured_outputs`) and it intermittently
+ * returns output the schema rejects. The static-persona fallback is fail-safe
+ * but not visible to the user: they get an answer while the swarm has quietly
+ * lost role specialisation and tournament judging. A second draw genuinely can
+ * fix a sampling artefact, so it is worth one call — and ONLY for that class.
+ */
+function schemaError(): Error {
+  return Object.assign(
+    new Error("No object generated: response did not match schema."),
+    { name: "AI_NoObjectGeneratedError" }
+  );
+}
+
+describe("generateDynamicSwarm — schema retry (Sprint 2)", () => {
+  it("retries once and uses the recovered personas instead of the static fallback", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockResolvedValueOnce(
+        fakeObjectResult({
+          personas: [
+            { id: "recovered_analyst", role: "Analyst", systemPrompt: "a", color: "violet" },
+            { id: "recovered_coder", role: "Engineer", systemPrompt: "b", color: "blue" },
+            { id: "recovered_qa", role: "QA Auditor", systemPrompt: "c", color: "rose" },
+          ],
+        })
+      );
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.personas.map((p) => p.id)).toContain("recovered_analyst");
+    // Distinguishes "recovered" from "fell back and happened to look ok".
+    expect(result.degraded).toBeFalsy();
+    expect(result.usage).toBeDefined();
+  });
+
+  it("falls back to static personas when the retry ALSO fails, without a third call", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockRejectedValueOnce(schemaError());
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.requiresSwarm).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(result.personas.length).toBeGreaterThan(0);
+  });
+
+  it("does NOT retry a non-schema failure — a second identical call cannot fix a 402", async () => {
+    // The whole point of scoping the retry: retrying auth/quota/timeout burns
+    // money and latency on a condition that cannot resolve between two
+    // back-to-back calls. Without this case, widening the retry to `catch (err)`
+    // would still look correct.
+    mockedGenerateObject.mockRejectedValue(
+      new Error("402 credit limit reached for this account")
+    );
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
+    expect(result.degraded).toBe(true);
+  });
+});

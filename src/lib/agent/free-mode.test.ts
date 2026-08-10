@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   selectFreeModels,
+  isGeneralChatModel,
   applyFreeMode,
   isFreeModeEnabled,
   describeFreeModeSelection,
@@ -242,5 +243,119 @@ describe("Free Mode — applying the overlay", () => {
     );
     expect(out.settings.proposerTiers?.skeptic?.model).toBe("sonnet-pinned");
     expect(out.settings.proposerTiers?.fast?.model).toMatch(/:free$/);
+  });
+});
+
+describe("non-chat model exclusion (found by a live 0/5 swarm collapse)", () => {
+  it("rejects the two ids that actually broke a real run", () => {
+    // Not hypothetical. Free Mode handed both to proposers; both answered
+    // "Provider returned error" instantly and the ensemble reported
+    // "0/5 proposers produced a usable draft".
+    expect(isGeneralChatModel("nvidia/nemotron-3.5-content-safety:free")).toBe(false);
+    expect(isGeneralChatModel("nvidia/nemotron-nano-12b-v2-vl:free")).toBe(false);
+  });
+
+  it("keeps every OTHER id from the same live catalogue", () => {
+    // The whole 14-model free catalogue as observed on 2026-08-10, minus the
+    // two above. Over-matching would shrink the pool and push every slot onto
+    // one endpoint — the exact failure being fixed, in the other direction.
+    for (const id of [
+      "cohere/north-mini-code:free",
+      "google/gemma-4-26b-a4b-it:free",
+      "google/gemma-4-31b-it:free",
+      "inclusionai/ling-3.0-tiny:free",
+      "nvidia/nemotron-3-nano-30b-a3b:free",
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "nvidia/nemotron-nano-9b-v2:free",
+      "openai/gpt-oss-20b:free",
+      "poolside/laguna-s-2.1:free",
+      "poolside/laguna-xs-2.1:free",
+    ]) {
+      expect(isGeneralChatModel(id), `${id} must stay in the pool`).toBe(true);
+    }
+  });
+
+  it("matches -vl only as a SUFFIX, never inside a name", () => {
+    expect(isGeneralChatModel("vendor/model-vl:free")).toBe(false);
+    // A substring match here would wrongly drop an ordinary model.
+    expect(isGeneralChatModel("vendor/vlad-chat-7b:free")).toBe(true);
+    expect(isGeneralChatModel("vendor/model-vl-instruct:free")).toBe(true);
+  });
+
+  it("covers the adjacent non-chat classes", () => {
+    for (const id of [
+      "meta/llama-guard-3-8b:free",
+      "vendor/text-embedding-3:free",
+      "vendor/bge-rerank-v2:free",
+      "vendor/some-moderation-model:free",
+    ]) {
+      expect(isGeneralChatModel(id), `${id} must be excluded`).toBe(false);
+    }
+  });
+});
+
+describe("exclusion is a preference, not a hard filter (council review gaps)", () => {
+  beforeEach(() => __resetOpenRouterPricingForTests());
+
+  it("keeps the ROUTER out of the non-chat set too", () => {
+    // A moderation classifier can legitimately advertise `structured_outputs` —
+    // emitting a JSON verdict is its job — so the Router slot was reachable by
+    // exactly the class the proposer fix excludes. A dead proposer is dropped
+    // and the ensemble degrades; a Router that cannot write personas takes the
+    // swarm's role specialisation with it.
+    // The classifier is named so it sorts FIRST. Selection is
+    // alphabetical-stable, so with an unfiltered Router pool it WOULD be
+    // picked — which is what makes this test discriminate. An earlier draft
+    // named it "some-..." and passed whether or not the fix was present.
+    seedCatalogue([
+      ["vendor/aaa-content-safety:free", ["structured_outputs", "response_format"]],
+      ["vendor/zzz-good-chat:free", ["structured_outputs", "response_format", "tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.utilityModel.model).toBe("vendor/zzz-good-chat:free");
+    expect(s.chatModel.model).toBe("vendor/zzz-good-chat:free");
+  });
+
+  it("falls back to the raw catalogue when EVERY id looks non-chat, and says so", () => {
+    // Availability beats correctness here — Free Mode must not fail shut
+    // because a week's free list looks unusual. But the run is then back to the
+    // behaviour the filter exists to prevent, so it cannot be silent.
+    seedCatalogue([
+      ["vendor/a-content-safety:free", ["temperature"]],
+      ["vendor/b-rerank:free", ["temperature"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.exclusionEmptiedPool).toBe(true);
+    expect(s.chatModel.model).toContain("vendor/");
+    expect(describeFreeModeSelection(s)).toContain("ABANDONED");
+  });
+
+  it("does not claim an exclusion happened on the fallback-list path", () => {
+    const s = selectFreeModels();
+    expect(s.source).toBe("fallback-list");
+    expect(s.excludedNonChat).toBe(0);
+    expect(s.exclusionEmptiedPool).toBe(false);
+  });
+});
+
+describe("dropped ids are named, not just counted", () => {
+  beforeEach(() => __resetOpenRouterPricingForTests());
+
+  it("names the excluded ids in the selection and the log line", () => {
+    // A count tells you something shrank; it does not tell you whether the
+    // heuristic was right. Diagnosing that from a number means rebuilding the
+    // catalogue by hand.
+    seedCatalogue([
+      ["vendor/aaa-content-safety:free", ["temperature"]],
+      ["vendor/zzz-good-chat:free", ["temperature", "tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.excludedNonChatIds).toEqual(["vendor/aaa-content-safety:free"]);
+    expect(describeFreeModeSelection(s)).toContain("vendor/aaa-content-safety:free");
   });
 });

@@ -128,6 +128,12 @@ export interface FreeModeSelection {
    */
   excludedNonChat: number;
   /**
+   * WHICH ids were dropped. A count alone tells you something shrank but not
+   * whether the heuristic was right — and diagnosing that from a number means
+   * re-deriving the catalogue by hand.
+   */
+  excludedNonChatIds: string[];
+  /**
    * True when EVERY free id looked non-chat, so the exclusion was abandoned and
    * the raw catalogue used. That means the run is back to the behaviour this
    * filter exists to prevent — it must be visible, not inferred from a count.
@@ -285,6 +291,7 @@ export function selectFreeModels(): FreeModeSelection {
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
     excludedNonChat: live ? catalogue.length - chatCapable.length : 0,
+    excludedNonChatIds: live ? catalogue.filter((id) => !isGeneralChatModel(id)) : [],
     exclusionEmptiedPool,
   };
 }
@@ -347,7 +354,9 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
       `was available; add a key or turn Free Mode off to get tools back)`;
   return (
     `Free Mode [${s.source}, ${s.candidateCount} free models seen` +
-    (s.excludedNonChat > 0 ? `, ${s.excludedNonChat} dropped as non-chat` : "") +
+    (s.excludedNonChat > 0
+      ? `, ${s.excludedNonChat} dropped as non-chat (${s.excludedNonChatIds.join(", ")})`
+      : "") +
     (s.exclusionEmptiedPool ? ", ALL looked non-chat so the exclusion was ABANDONED" : "") + `]: ` +
     `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +

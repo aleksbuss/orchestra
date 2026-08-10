@@ -606,3 +606,182 @@ describe("Skeptic control arm (Step 2 — eval-only, PM #91 invariant untouched)
     expect(result.personas.some((p) => detectProposerRole(p) === "reviewer")).toBe(true);
   });
 });
+
+/**
+ * Sprint 2 — one retry on a SCHEMA failure, and only on a schema failure.
+ *
+ * `google/gemma-4-26b-a4b-it:free` is what Free Mode picks as Router (one of
+ * the few free ids advertising `structured_outputs`) and it intermittently
+ * returns output the schema rejects. The static-persona fallback is fail-safe
+ * but not visible to the user: they get an answer while the swarm has quietly
+ * lost role specialisation and tournament judging. A second draw genuinely can
+ * fix a sampling artefact, so it is worth one call — and ONLY for that class.
+ */
+function schemaError(): Error {
+  return Object.assign(
+    new Error("No object generated: response did not match schema."),
+    { name: "AI_NoObjectGeneratedError" }
+  );
+}
+
+describe("generateDynamicSwarm — schema retry (Sprint 2)", () => {
+  it("retries once and uses the recovered personas instead of the static fallback", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockResolvedValueOnce(
+        fakeObjectResult({
+          personas: [
+            { id: "recovered_analyst", role: "Analyst", systemPrompt: "a", color: "violet" },
+            { id: "recovered_coder", role: "Engineer", systemPrompt: "b", color: "blue" },
+            { id: "recovered_qa", role: "QA Auditor", systemPrompt: "c", color: "rose" },
+          ],
+        })
+      );
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.personas.map((p) => p.id)).toContain("recovered_analyst");
+    // Distinguishes "recovered" from "fell back and happened to look ok".
+    expect(result.degraded).toBeFalsy();
+    expect(result.usage).toBeDefined();
+  });
+
+  it("falls back to static personas when the retry ALSO fails, without a third call", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockRejectedValueOnce(schemaError());
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.requiresSwarm).toBe(true);
+    expect(result.degraded).toBe(true);
+    expect(result.personas.length).toBeGreaterThan(0);
+  });
+
+  it("does NOT retry a non-schema failure — a second identical call cannot fix a 402", async () => {
+    // The whole point of scoping the retry: retrying auth/quota/timeout burns
+    // money and latency on a condition that cannot resolve between two
+    // back-to-back calls. Without this case, widening the retry to `catch (err)`
+    // would still look correct.
+    mockedGenerateObject.mockRejectedValue(
+      new Error("402 credit limit reached for this account")
+    );
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
+    expect(result.degraded).toBe(true);
+  });
+});
+
+/**
+ * Sprint 2b — the retry budget is a function of TIER, and the retry carries
+ * the validation error back to the model.
+ *
+ * The instinct on a `:free` endpoint is "it costs nothing, so keep trying".
+ * The cost that binds is not money: OpenRouter free is 20 req/MINUTE (credit
+ * does not raise it), failed calls still consume the daily quota, and 3-5
+ * proposers fire in parallel against the same endpoint seconds later. So free
+ * gets MORE retries, not unlimited ones — and the thing that actually makes a
+ * second attempt worth its quota is feeding the schema error back in, because
+ * an identical re-send draws from the same distribution that just failed.
+ */
+const FREE_MODEL: ModelConfig = {
+  provider: "openrouter",
+  model: "google/gemma-4-26b-a4b-it:free",
+  apiKey: "sk-stub",
+};
+
+describe("generateDynamicSwarm — tier-aware retry budget (Sprint 2b)", () => {
+  const prevBackoff = process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS;
+  beforeEach(() => {
+    // `vi.clearAllMocks()` (the file-level hook) clears CALLS but NOT the
+    // `mockResolvedValueOnce` / `mockRejectedValueOnce` QUEUES. Leftover
+    // entries from a previous case resolve the first call here, the retry
+    // never happens, and the assertion fails for a reason that has nothing to
+    // do with the code under test. Reset the implementation, not just the log.
+    mockedGenerateObject.mockReset();
+    // Keep the throttle cases instant; the backoff VALUE is not what these pin.
+    process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS = "1";
+  });
+  afterEach(() => {
+    if (prevBackoff === undefined) delete process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS;
+    else process.env.ORCHESTRA_PROPOSER_EMPTY_BACKOFF_MS = prevBackoff;
+  });
+
+  it("a FREE model gets two retries — three attempts total", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockRejectedValueOnce(schemaError())
+      .mockResolvedValueOnce(fakeObjectResult());
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, FREE_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(3);
+    expect(result.degraded).toBeFalsy();
+  });
+
+  it("a PAID model gets one retry — the extra budget is a free-tier allowance, not a global one", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockRejectedValueOnce(schemaError())
+      .mockResolvedValueOnce(fakeObjectResult());
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.degraded).toBe(true);
+  });
+
+  it("feeds the validation error back into the retry prompt", async () => {
+    // The whole justification for retrying a constrained-decoding failure. A
+    // bare re-draw samples the same distribution that just failed, so without
+    // this the extra attempts are quota spent on the same dice.
+    mockedGenerateObject
+      .mockRejectedValueOnce(schemaError())
+      .mockResolvedValueOnce(fakeObjectResult());
+
+    await generateDynamicSwarm("x", STUB_HISTORY, FREE_MODEL, false);
+
+    const firstPrompt = String(mockedGenerateObject.mock.calls[0][0].prompt ?? "");
+    const retryPrompt = String(mockedGenerateObject.mock.calls[1][0].prompt ?? "");
+    expect(firstPrompt).not.toContain("YOUR PREVIOUS RESPONSE WAS REJECTED");
+    expect(retryPrompt).toContain("YOUR PREVIOUS RESPONSE WAS REJECTED");
+    expect(retryPrompt).toContain("did not match schema");
+  });
+
+  it("retries a 429 on a FREE endpoint — waiting is the actual remedy there", async () => {
+    mockedGenerateObject
+      .mockRejectedValueOnce(new Error("429 Too Many Requests"))
+      .mockResolvedValueOnce(fakeObjectResult());
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, FREE_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(2);
+    expect(result.degraded).toBeFalsy();
+  });
+
+  it("does NOT retry a 429 on a PAID endpoint — that is paying twice to wait", async () => {
+    mockedGenerateObject.mockRejectedValue(new Error("429 Too Many Requests"));
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, STUB_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
+    expect(result.degraded).toBe(true);
+  });
+
+  it("never retries auth/credit failures, even on a free endpoint", async () => {
+    // No number of retries conjures credit or a valid key, and every attempt
+    // still burns the daily free quota.
+    mockedGenerateObject.mockRejectedValue(
+      new Error("402 credit limit reached for this account")
+    );
+
+    const result = await generateDynamicSwarm("x", STUB_HISTORY, FREE_MODEL, false);
+
+    expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
+    expect(result.degraded).toBe(true);
+  });
+});

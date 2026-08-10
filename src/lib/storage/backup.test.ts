@@ -70,6 +70,58 @@ describe("createDataBackup", () => {
     expect(res!.path.startsWith(backupDir)).toBe(true);
   });
 
+  it("EXCLUDES nested dependency trees inside project dirs, but keeps the manifests", async () => {
+    // The exclusion list used to inspect only the FIRST path segment, which is
+    // right for data/'s own scratch dirs and wrong for user project trees that
+    // live under data/projects/<id>/. Measured on a real install: 728 MB of
+    // nested node_modules in every one of 7 daily snapshots, ~96% of a 5.3 GB
+    // ring — all reinstallable from a lockfile that is itself backed up.
+    await seedDataDir();
+    const proj = path.join(dataDir, "projects", "p1");
+    const nested = path.join(proj, "web");
+    await fs.mkdir(path.join(proj, "node_modules", "lodash"), { recursive: true });
+    await fs.mkdir(path.join(nested, "node_modules"), { recursive: true });
+    await fs.mkdir(path.join(proj, ".venv", "bin"), { recursive: true });
+    await fs.mkdir(path.join(proj, ".git"), { recursive: true });
+    await fs.writeFile(path.join(proj, "node_modules", "lodash", "index.js"), "x");
+    await fs.writeFile(path.join(nested, "node_modules", "dep.js"), "x");
+    await fs.writeFile(path.join(proj, ".venv", "bin", "python"), "x");
+    await fs.writeFile(path.join(proj, "package.json"), "{}");
+    await fs.writeFile(path.join(proj, "package-lock.json"), "{}");
+    await fs.writeFile(path.join(proj, "src.js"), "real work");
+    await fs.writeFile(path.join(proj, ".git", "HEAD"), "ref: refs/heads/main");
+
+    const res = await createDataBackup();
+    const at = (...p: string[]) => path.join(res!.path, "projects", "p1", ...p);
+
+    expect(await exists(at("node_modules"))).toBe(false);
+    expect(await exists(at("web", "node_modules"))).toBe(false);
+    expect(await exists(at(".venv"))).toBe(false);
+
+    // What makes the exclusion safe: everything needed to REBUILD the excluded
+    // trees survives, and so does anything that cannot be rebuilt.
+    expect(await exists(at("package.json"))).toBe(true);
+    expect(await exists(at("package-lock.json"))).toBe(true);
+    expect(await exists(at("src.js"))).toBe(true);
+    // .git is deliberately NOT regenerable — often the only copy of the history.
+    expect(await exists(at(".git", "HEAD"))).toBe(true);
+  });
+
+  it("does not skip a FILE that merely shares a regenerable dir's name", async () => {
+    // The check matches path segments, so a file called `node_modules` (or a
+    // note named `.next`) must still be backed up — over-eager matching here
+    // silently drops user data, which is the expensive direction to be wrong.
+    await seedDataDir();
+    const proj = path.join(dataDir, "projects", "p2");
+    await fs.mkdir(proj, { recursive: true });
+    await fs.writeFile(path.join(proj, "notes-about-node_modules.md"), "keep me");
+
+    const res = await createDataBackup();
+    expect(
+      await exists(path.join(res!.path, "projects", "p2", "notes-about-node_modules.md"))
+    ).toBe(true);
+  });
+
   it("EXCLUDES safeWriteFile *.tmp artifacts (PM #78 — the ENOENT race source)", async () => {
     await seedDataDir();
     // A transient temp artifact exactly as safeWriteFile names it

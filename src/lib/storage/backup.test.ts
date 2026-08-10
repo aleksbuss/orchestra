@@ -122,6 +122,24 @@ describe("createDataBackup", () => {
     ).toBe(true);
   });
 
+  it("keeps a PROJECT whose own name collides with a regenerable dir", async () => {
+    // `data/projects/node_modules/` is a project, not a dependency tree. Losing
+    // it would be silent and total. Unlikely to happen; cheap to make
+    // impossible, and silent whole-project loss is the expensive direction.
+    await seedDataDir();
+    const proj = path.join(dataDir, "projects", "node_modules");
+    await fs.mkdir(path.join(proj, "node_modules"), { recursive: true });
+    await fs.writeFile(path.join(proj, "real-work.txt"), "keep me");
+    await fs.writeFile(path.join(proj, "node_modules", "dep.js"), "drop me");
+
+    const res = await createDataBackup();
+    const at = (...p: string[]) => path.join(res!.path, "projects", "node_modules", ...p);
+    // The project survives...
+    expect(await exists(at("real-work.txt"))).toBe(true);
+    // ...while its OWN dependency tree, one level deeper, still does not.
+    expect(await exists(at("node_modules"))).toBe(false);
+  });
+
   it("EXCLUDES safeWriteFile *.tmp artifacts (PM #78 — the ENOENT race source)", async () => {
     await seedDataDir();
     // A transient temp artifact exactly as safeWriteFile names it

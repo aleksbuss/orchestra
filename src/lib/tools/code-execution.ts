@@ -5,8 +5,8 @@ import type { AppSettings } from "@/lib/types";
 import { inspectCommand } from "@/lib/security/dangerous-command-guard";
 import { scrubProcessEnv } from "@/lib/security/scrub-env";
 import {
-  applyExecSandbox,
   describeSandboxSpawnFailure,
+  sandboxProjectCommand,
   type SandboxDecision,
 } from "@/lib/tools/exec-sandbox";
 import { dataPath } from "@/lib/storage/data-dir";
@@ -417,23 +417,25 @@ export function cleanupSessions(): void {
 }
 
 /**
- * Wrap a prepared command in OS-level filesystem confinement.
- *
- * Applied at the single point where all three runtimes converge, so neither
- * spawn site can acquire an unconfined command — the same "guard last, one
- * chokepoint" shape `assembleAgentToolSet` uses for the tool loop guard.
+ * Confine a prepared command to its project. All three runtimes converge here,
+ * so neither spawn site can obtain an unconfined command — the same "one
+ * chokepoint, guard last" shape `assembleAgentToolSet` uses for the tool loop
+ * guard. The policy itself lives in `exec-sandbox.ts`.
  *
  * `commandPreview` is deliberately NOT rewritten: the user is shown the command
  * they asked for, not a 2 KB Seatbelt profile.
+ *
+ * SCOPE: `code_execution` only. `install_packages` spawns package managers of
+ * its own and is deliberately unconfined — writing outside the project IS its
+ * job. See the `ORCHESTRA_EXEC_SANDBOX` entry in security-patterns.md.
  */
-function withExecSandbox(prepared: PreparedExecution): PreparedExecution {
-  const wrapped = applyExecSandbox(prepared.command, prepared.args, {
-    workDir: prepared.cwd,
-    // The agent's own scratch space, and the package cache it is expected to fill.
-    extraWritePaths: [dataPath("tmp"), dataPath("npm-cache")],
+function withExecSandbox(prepared: PreparedExecution, projectRoot: string): PreparedExecution {
+  const wrapped = sandboxProjectCommand(prepared.command, prepared.args, projectRoot, {
+    // The agent's scratch space, and the package cache it is expected to fill.
+    writable: [dataPath("tmp"), dataPath("npm-cache")],
     // The provider keys. Reading these is the whole point of a prompt-injected
     // payload, and until this landed `cat data/settings/settings.json` worked.
-    extraDenyReadPaths: [dataPath("settings")],
+    secret: [dataPath("settings")],
   });
   return { ...prepared, command: wrapped.command, args: wrapped.args, sandbox: wrapped.sandbox };
 }
@@ -456,7 +458,7 @@ async function prepareExecution(params: {
       cwd: params.cwd,
       env: await buildPythonEnv(params.cwd),
       commandPreview: `${pythonLabel} -c ${previewText(params.code)}`,
-    });
+    }, params.cwd);
   }
 
   if (params.runtime === "nodejs") {
@@ -467,7 +469,7 @@ async function prepareExecution(params: {
       cwd: params.cwd,
       env: scrubProcessEnv({ PYTHONUNBUFFERED: "1" }),
       commandPreview: `node -e ${previewText(params.code)}`,
-    });
+    }, params.cwd);
   }
 
   const shell = process.env.SHELL?.trim() || "sh";
@@ -502,7 +504,7 @@ async function prepareExecution(params: {
     commandPreview: previewText(params.code),
     terminalMarker: marker,
     terminalState,
-  });
+  }, params.cwd);
 }
 
 async function buildPythonEnv(cwd: string): Promise<NodeJS.ProcessEnv> {

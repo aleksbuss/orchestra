@@ -295,3 +295,49 @@ describe("non-chat model exclusion (found by a live 0/5 swarm collapse)", () => 
     }
   });
 });
+
+describe("exclusion is a preference, not a hard filter (council review gaps)", () => {
+  beforeEach(() => __resetOpenRouterPricingForTests());
+
+  it("keeps the ROUTER out of the non-chat set too", () => {
+    // A moderation classifier can legitimately advertise `structured_outputs` —
+    // emitting a JSON verdict is its job — so the Router slot was reachable by
+    // exactly the class the proposer fix excludes. A dead proposer is dropped
+    // and the ensemble degrades; a Router that cannot write personas takes the
+    // swarm's role specialisation with it.
+    // The classifier is named so it sorts FIRST. Selection is
+    // alphabetical-stable, so with an unfiltered Router pool it WOULD be
+    // picked — which is what makes this test discriminate. An earlier draft
+    // named it "some-..." and passed whether or not the fix was present.
+    seedCatalogue([
+      ["vendor/aaa-content-safety:free", ["structured_outputs", "response_format"]],
+      ["vendor/zzz-good-chat:free", ["structured_outputs", "response_format", "tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.utilityModel.model).toBe("vendor/zzz-good-chat:free");
+    expect(s.chatModel.model).toBe("vendor/zzz-good-chat:free");
+  });
+
+  it("falls back to the raw catalogue when EVERY id looks non-chat, and says so", () => {
+    // Availability beats correctness here — Free Mode must not fail shut
+    // because a week's free list looks unusual. But the run is then back to the
+    // behaviour the filter exists to prevent, so it cannot be silent.
+    seedCatalogue([
+      ["vendor/a-content-safety:free", ["temperature"]],
+      ["vendor/b-rerank:free", ["temperature"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.exclusionEmptiedPool).toBe(true);
+    expect(s.chatModel.model).toContain("vendor/");
+    expect(describeFreeModeSelection(s)).toContain("ABANDONED");
+  });
+
+  it("does not claim an exclusion happened on the fallback-list path", () => {
+    const s = selectFreeModels();
+    expect(s.source).toBe("fallback-list");
+    expect(s.excludedNonChat).toBe(0);
+    expect(s.exclusionEmptiedPool).toBe(false);
+  });
+});

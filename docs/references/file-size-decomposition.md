@@ -43,7 +43,7 @@ Four files cross the §8 1500-line "MUST decompose next substantive PR" line (`t
   - **Meta/paths + files** (~130): `getWorkDir`, path helpers, `getProjectFiles`.
 - Regression net for the cuts: [`project-store.test.ts`](src/lib/storage/project-store.test.ts) (45) + [`project-skills-github.test.ts`](src/lib/storage/project-skills-github.test.ts) (16) + [`project-mcp.test.ts`](src/lib/storage/project-mcp.test.ts) (29), each moved with its code, drive them end-to-end.
 
-**`src/lib/tools/code-execution.ts` (1177 LOC, 3 hot edits in 90d)** — security-critical surface.
+**`src/lib/tools/code-execution.ts` (1234 LOC, 3 hot edits in 90d)** — security-critical surface. (2026-08: +57 for the OS-level sandbox wiring. The §8 zero-net-growth clause was paid down as far as the change allows — the confinement policy, the platform probe, the profile builder and the degradation report all live in [`exec-sandbox.ts`](src/lib/tools/exec-sandbox.ts), leaving this file a single `sandboxProjectCommand` call at the `prepareExecution` chokepoint. What remains here is genuinely local: which of `data/`'s dirs are writable and which hold secrets. Noted rather than hidden — the drift gate caught the growth, which is the gate working.)
 - Natural seams:
   - `scrubProcessEnv` + the PM #28 always-scrub list already extracted to [`src/lib/security/scrub-env.ts`](src/lib/security/scrub-env.ts) (DONE, PM #70). It's a zero-import leaf placed under `security/` for cohesion (sibling to `url-guard`) — NOT a cycle fix; there was no real import cycle (a leaf can't be in one). THIS IS THE FILE TO TEST HARDEST.
   - `code-execution/runners/{python,node,shell}.ts` (~200 each): per-runtime spawn logic + arg normalization.

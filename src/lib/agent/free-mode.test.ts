@@ -341,3 +341,21 @@ describe("exclusion is a preference, not a hard filter (council review gaps)", (
     expect(s.exclusionEmptiedPool).toBe(false);
   });
 });
+
+describe("dropped ids are named, not just counted", () => {
+  beforeEach(() => __resetOpenRouterPricingForTests());
+
+  it("names the excluded ids in the selection and the log line", () => {
+    // A count tells you something shrank; it does not tell you whether the
+    // heuristic was right. Diagnosing that from a number means rebuilding the
+    // catalogue by hand.
+    seedCatalogue([
+      ["vendor/aaa-content-safety:free", ["temperature"]],
+      ["vendor/zzz-good-chat:free", ["temperature", "tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    expect(s.excludedNonChatIds).toEqual(["vendor/aaa-content-safety:free"]);
+    expect(describeFreeModeSelection(s)).toContain("vendor/aaa-content-safety:free");
+  });
+});

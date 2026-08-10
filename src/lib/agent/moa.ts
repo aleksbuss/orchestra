@@ -318,7 +318,16 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     swarmNode: {
       nodeId: routerNodeId,
       role: "orchestrator",
-      taskSummary: dpgResult.requiresSwarm ? "Assembled Expert Team" : "Bypassed Swarm",
+      // Say it out loud when the Router degraded. Both fallbacks are fail-safe,
+      // and that is the trap: the turn still produces an answer, so a swarm
+      // running STATIC personas (no role specialisation, tournament judging
+      // gone) is indistinguishable from a healthy one unless someone reads
+      // stdout. This node is already on screen; naming the state costs nothing.
+      taskSummary: dpgResult.degraded
+        ? "Static roles — expert team could not be generated"
+        : dpgResult.requiresSwarm
+          ? "Assembled Expert Team"
+          : "Bypassed Swarm",
       status: "completed",
       completedAt: new Date().toISOString(),
     },

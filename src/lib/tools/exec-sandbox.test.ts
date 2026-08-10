@@ -23,7 +23,13 @@ describe("buildSeatbeltProfile", () => {
   it("makes the work dir writable", () => {
     const p = buildSeatbeltProfile({ workDir: "/tmp/proj", homeDir: HOME });
     expect(p).toContain("(deny file-write*)");
-    expect(p).toMatch(/\(allow file-write\*[^\n]*\(subpath "\/tmp\/proj"\)/);
+    // Expect the RESOLVED form: `/tmp` is a symlink on macOS, and the profile
+    // must carry what the kernel will match. Derived independently of the code
+    // under test so this cannot pass by agreeing with the same bug.
+    const resolved = path.join(fs.realpathSync("/tmp"), "proj");
+    expect(p).toMatch(
+      new RegExp(`\\(allow file-write\\*[^\\n]*\\(subpath "${resolved.replace(/\//g, "\\/")}"\\)`)
+    );
   });
 
   it("keeps package-manager caches writable — a deny-all profile breaks npm install", () => {
@@ -49,9 +55,41 @@ describe("buildSeatbeltProfile", () => {
     expect(denyRead).toBeGreaterThan(lastAllow);
   });
 
+  it("grants only THIS account's temp root, not the whole /private/var/folders tree", () => {
+    // The tree holds one per-user temp/cache root per account plus the
+    // system's. A review flagged the wide grant; narrowing costs nothing and
+    // does not break `npm install` (verified against the real profile).
+    const p = buildSeatbeltProfile({ workDir: "/tmp/proj", homeDir: HOME });
+    expect(p).not.toContain('(subpath "/private/var/folders")');
+    expect(p).toContain(`(subpath "${path.dirname(fs.realpathSync(os.tmpdir()))}")`);
+  });
+
+  it("does not hand out /dev/dtracehelper", () => {
+    // DTrace is a process- and memory-inspection interface. It was in the
+    // allow list defensively, which is the wrong reason to widen a sandbox.
+    const p = buildSeatbeltProfile({ workDir: "/tmp/proj", homeDir: HOME });
+    expect(p).not.toContain("dtracehelper");
+  });
+
+  it("resolves a symlinked ANCESTOR of a path that does not exist yet", () => {
+    // `/tmp` is a symlink to `/private/tmp`, so a work dir that has not been
+    // created yet must still enter the profile as `/private/tmp/...`. Baking
+    // the unresolved form in produces an allow rule the kernel never matches —
+    // which denies the write rather than permitting it, so the symptom is a
+    // broken workflow, not an escape.
+    const p = buildSeatbeltProfile({
+      workDir: "/tmp/not-created-yet/deeper",
+      homeDir: HOME,
+    });
+    expect(p).toContain('(subpath "/private/tmp/not-created-yet/deeper")');
+    expect(p).not.toContain('(subpath "/tmp/not-created-yet/deeper")');
+  });
+
   it("escapes quotes and backslashes in paths", () => {
+    // Assert on the basename only — the directory part is rewritten by symlink
+    // resolution, and this test is about quoting, not paths.
     const p = buildSeatbeltProfile({ workDir: '/tmp/we"ird\\dir', homeDir: HOME });
-    expect(p).toContain('"/tmp/we\\"ird\\\\dir"');
+    expect(p).toContain('we\\"ird\\\\dir"');
   });
 
   it("threads caller-supplied write and deny-read roots", () => {
@@ -172,6 +210,32 @@ onMac("Seatbelt actually enforces (real sandbox-exec, no mocks)", () => {
     const res = sandboxed(`cat ${secrets}/keys.json`);
     expect(res.code).not.toBe(0);
     expect(res.out).not.toContain("sk-REAL");
+  });
+
+  it("fails CLOSED on a symlink planted inside the writable work dir", () => {
+    // A review argued this was a TOCTOU escape: plant a link in an allowed
+    // directory, then reach a denied one through it. Measured, it is not —
+    // Seatbelt resolves the path AT ACCESS TIME, so the denied target is what
+    // gets matched and the allow on the work dir never applies. Pinned here
+    // because the claim is plausible enough to be re-raised, and because a
+    // future profile change could quietly make it true.
+    const readLink = path.join(work, "escape-read");
+    fs.symlinkSync(secrets, readLink);
+    expect(sandboxed(`cat ${readLink}/keys.json`).out).not.toContain("sk-REAL");
+
+    // The write half deliberately targets HOME, not the temp-backed secrets
+    // dir: temp is writable by design, so a denial there would prove only that
+    // the test picked an allowed destination. An earlier draft of this test did
+    // exactly that and passed for the wrong reason.
+    const writeLink = path.join(work, "escape-write");
+    fs.symlinkSync(os.homedir(), writeLink);
+    const landed = path.join(os.homedir(), `.orchestra-sbx-escape-${process.pid}`);
+    try {
+      expect(sandboxed(`echo pwned > ${writeLink}/${path.basename(landed)}`).code).not.toBe(0);
+      expect(fs.existsSync(landed)).toBe(false);
+    } finally {
+      fs.rmSync(landed, { force: true });
+    }
   });
 
   it("still lets the interpreters the agent depends on run", () => {

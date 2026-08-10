@@ -181,6 +181,7 @@ Violating any of these causes data loss, data egress, RCE, or a silent productio
 17. **`modelSupportsTools(provider, modelId)`** (`src/lib/providers/tool-support.ts`) is the ONLY tool-capability check. Never write `if (provider === "X") { supportsTools = ... }` inline. New non-tool model → add the *narrowest* substring to `NO_TOOL_PATTERNS` plus a positive case in the test.
 18. **A system-limit stop is signalled by the SYSTEM, deterministically** — never rely on the model to self-report hitting a limit; it will dress it up as success.
 19. **Loaders return UTF-8.** New loader tests must include a non-ASCII round-trip and assert no NULL byte / UTF-16 BOM.
+20. **`resolveWorkerKey(config, settings)` before any `createModel`.** `createModel` sees only `config.apiKey` and `process.env` — never the API Keys Vault. A raw `settings.chatModel` / `utilityModel` / `proposerTiers.*` handed to a factory works on YOUR machine (env key) and fails on every vault-only install (PM #99).
 
 ### Frontend
 20. **One shared `EventSource` via `useBackgroundSync`.** Never `new EventSource` in a component.
@@ -213,6 +214,7 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | [`untrusted-trigger-contract.test.ts`](src/lib/agent/untrusted-trigger-contract.test.ts) | `untrustedTrigger` forwarded at every delegation callsite, set at the untrusted entry, and read by both capability gates (rule 10) |
 | [`llm-provider.headers-timeout.test.ts`](src/lib/providers/llm-provider.headers-timeout.test.ts) | Every provider factory in `llm-provider.ts` passes a bounded `fetch` (PM #98) |
 | [`call-deadline-contract.test.ts`](src/lib/agent/call-deadline-contract.test.ts) | Every `generate*`/`stream*` call under `src/lib/agent` carries a TIME BOUND, not just an `abortSignal` (PM #98) |
+| [`key-resolution-contract.test.ts`](src/lib/agent/key-resolution-contract.test.ts) | No `createModel(settings.<slot>)` anywhere under `src/lib` + `src/app` — the vault-key defect class (PM #99) |
 
 ---
 

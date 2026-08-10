@@ -121,6 +121,24 @@ export interface FreeModeSelection {
   brainSupportsTools: boolean;
   /** Every free id considered, for diagnostics. */
   candidateCount: number;
+  /**
+   * How many free ids were dropped as non-chat (moderation classifiers,
+   * vision-only, embedders). Surfaced so a shrinking pool is never silent —
+   * the original defect was invisible until a live swarm collapsed.
+   */
+  excludedNonChat: number;
+  /**
+   * WHICH ids were dropped. A count alone tells you something shrank but not
+   * whether the heuristic was right — and diagnosing that from a number means
+   * re-deriving the catalogue by hand.
+   */
+  excludedNonChatIds: string[];
+  /**
+   * True when EVERY free id looked non-chat, so the exclusion was abandoned and
+   * the raw catalogue used. That means the run is back to the behaviour this
+   * filter exists to prevent — it must be visible, not inferred from a count.
+   */
+  exclusionEmptiedPool: boolean;
 }
 
 function cfg(model: string): ModelConfig {
@@ -174,20 +192,77 @@ function pickBrain(generalPool: readonly string[], structured: readonly string[]
  * Choose free models from the live OpenRouter catalogue, falling back to the
  * curated lists when it has not loaded. Pure apart from reading the cache.
  */
+/**
+ * Free ids that are NOT general text-generation models.
+ *
+ * Found by a live swarm run, not by review: Free Mode handed
+ * `nvidia/nemotron-3.5-content-safety:free` (a moderation classifier) and
+ * `nvidia/nemotron-nano-12b-v2-vl:free` (vision-language) to proposers as
+ * drafting models. Both answered "Provider returned error" instantly, the
+ * circuit breaker opened after three strikes, and the ensemble reported
+ * `0/5 proposers produced a usable draft` — a total swarm failure that looked
+ * like free-tier rate limiting and was not.
+ *
+ * Same discipline as `NO_TOOL_PATTERNS` in `providers/tool-support.ts`: match
+ * the NARROWEST substring that identifies the class, and pair every entry with
+ * a positive test case. A pattern that over-matches silently shrinks the pool
+ * and pushes every slot onto one endpoint — the failure this is fixing.
+ */
+const NON_CHAT_PATTERNS = [
+  "content-safety",
+  "guard", // llama-guard / nemoguard — moderation classifiers
+  "moderation",
+  "embed",
+  "rerank",
+  "-ocr",
+  "whisper",
+  "-tts",
+  "-stt",
+] as const;
+
+/**
+ * Is this id usable as a text proposer / brain?
+ *
+ * Vision-language models are excluded by SUFFIX rather than substring: `-vl`
+ * appears inside plenty of ordinary names, so only a trailing `-vl` (after the
+ * `:free` tag is stripped) counts.
+ */
+export function isGeneralChatModel(id: string): boolean {
+  const lower = id.toLowerCase();
+  const withoutTag = lower.split(":")[0];
+  if (withoutTag.endsWith("-vl")) return false;
+  return !NON_CHAT_PATTERNS.some((p) => lower.includes(p));
+}
+
 export function selectFreeModels(): FreeModeSelection {
   // Sorted so selection is stable across processes — catalogue order is not.
   const catalogue = listOpenRouterModelIds().filter(isFreeTierModel).sort();
 
-  const structured = catalogue.filter(
+  const live = catalogue.length > 0;
+  const chatCapable = catalogue.filter(isGeneralChatModel);
+
+  // The Router pool is drawn from the CHAT-capable set, not the raw catalogue.
+  // A moderation classifier can legitimately advertise `structured_outputs` —
+  // emitting a JSON verdict is its whole job — so without this it could be
+  // selected as Router. That failure is worse than a bad proposer: a dead
+  // proposer is dropped and the ensemble degrades, whereas a Router that
+  // cannot write personas takes the swarm's role specialisation with it.
+  const structured = (chatCapable.length > 0 ? chatCapable : catalogue).filter(
     (id) => modelSupportsStructuredOutputs(id) === true
   );
-
-  const live = catalogue.length > 0;
   const routerPool = structured.length > 0 ? structured : FREE_ROUTER_FALLBACKS;
-  // The whole catalogue is the general pool. `modelSupportsStructuredOutputs`
-  // returning `undefined` means "the catalogue does not know", which is NOT
-  // "incapable", so nothing is disqualified here on that basis.
-  const generalPool = live ? catalogue : FREE_GENERAL_FALLBACKS;
+  // `modelSupportsStructuredOutputs` returning `undefined` means "the catalogue
+  // does not know", which is NOT "incapable", so nothing is disqualified on
+  // that basis. Model CLASS is different: a moderation classifier or a
+  // vision-only model cannot draft text at all, and handing one to a proposer
+  // is not a degraded run, it is a guaranteed failure.
+  //
+  // Kept as a PREFERENCE, matching the tool-support policy directly above: if
+  // the exclusion would empty the pool, take the raw catalogue instead. Free
+  // Mode failing shut because this week's free list happens to look odd would
+  // be worse than the thing being fixed.
+  const exclusionEmptiedPool = live && chatCapable.length === 0;
+  const generalPool = live ? (exclusionEmptiedPool ? catalogue : chatCapable) : FREE_GENERAL_FALLBACKS;
 
   const brain = pickBrain(generalPool, structured);
 
@@ -215,6 +290,9 @@ export function selectFreeModels(): FreeModeSelection {
     routerSupportsStructuredOutputs: structured.length > 0,
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
+    excludedNonChat: live ? catalogue.length - chatCapable.length : 0,
+    excludedNonChatIds: live ? catalogue.filter((id) => !isGeneralChatModel(id)) : [],
+    exclusionEmptiedPool,
   };
 }
 
@@ -275,7 +353,11 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
       `knowledge only: no web search, no file access. No free tool-capable model ` +
       `was available; add a key or turn Free Mode off to get tools back)`;
   return (
-    `Free Mode [${s.source}, ${s.candidateCount} free models seen]: ` +
+    `Free Mode [${s.source}, ${s.candidateCount} free models seen` +
+    (s.excludedNonChat > 0
+      ? `, ${s.excludedNonChat} dropped as non-chat (${s.excludedNonChatIds.join(", ")})`
+      : "") +
+    (s.exclusionEmptiedPool ? ", ALL looked non-chat so the exclusion was ABANDONED" : "") + `]: ` +
     `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +
     `${s.proposerTiers.fast.model}, ${s.proposerTiers.balanced.model}, ${s.proposerTiers.frontier.model}`

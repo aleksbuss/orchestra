@@ -165,7 +165,15 @@ async function copyDataDirWithRetry(dataDir: string, tmpDir: string): Promise<vo
           // costs one Set lookup per entry rather than a walk of the tree it
           // skips. Checked at every depth, because the dependency trees live
           // inside user projects, not at the top of `data/`.
-          return !segments.some((segment) => REGENERABLE_DIR_NAMES.has(segment));
+          //
+          // `projects/<id>` is exempt: a project the operator happened to name
+          // `node_modules` would otherwise be dropped whole, silently. Nobody
+          // is likely to do that — but the cost of the guard is one comparison
+          // and the cost of being wrong is losing a project from every backup.
+          return !segments.some(
+            (segment, i) =>
+              !(i === 1 && segments[0] === "projects") && REGENERABLE_DIR_NAMES.has(segment)
+          );
         },
       });
       return;

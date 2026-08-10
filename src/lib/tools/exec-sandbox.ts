@@ -225,6 +225,21 @@ function resolveForProfile(p: string): string {
   }
 }
 
+/**
+ * The temp roots to make writable, given this process's resolved temp dir.
+ *
+ * Returns the parent as well ONLY for a Darwin per-user temp dir
+ * (`/private/var/folders/<x>/<y>/T`), where the parent is that account's own
+ * root and its sibling `C` holds the caches. Anywhere else the parent is a
+ * shared directory — `/` for Linux's `/tmp` — and granting it would be a
+ * filesystem-wide write hole dressed as a temp allowance.
+ */
+export function darwinTempRoots(resolvedTmp: string): string[] {
+  const parent = path.dirname(resolvedTmp);
+  const isDarwinUserDir = /\/var\/folders\/[^/]+\/[^/]+$/.test(parent);
+  return isDarwinUserDir ? [resolvedTmp, parent] : [resolvedTmp];
+}
+
 export interface SeatbeltProfileOptions {
   /** The project directory the run is allowed to write to. */
   workDir: string;
@@ -251,10 +266,17 @@ export function buildSeatbeltProfile(options: SeatbeltProfileOptions): string {
     // THIS process's own per-user temp/cache root, not the whole
     // `/private/var/folders` tree. The tree holds one such root per user plus
     // the system's, and nothing the agent runs needs another account's temp
-    // dir. The parent of `os.tmpdir()` is the Darwin user dir, which covers
-    // both `T` (temp) and `C` (cache) — so `getconf DARWIN_USER_CACHE_DIR`
-    // consumers keep working while the blast radius drops to one account.
-    path.dirname(resolveForProfile(os.tmpdir())),
+    // dir.
+    //
+    // The PARENT of `os.tmpdir()` is included only under `/var/folders`, where
+    // it is the Darwin user dir covering both `T` (temp) and `C` (cache), so
+    // `getconf DARWIN_USER_CACHE_DIR` consumers keep working. Taking the parent
+    // unconditionally is a landmine: on Linux `os.tmpdir()` is `/tmp` and its
+    // parent is `/`, which would grant write access to the entire filesystem.
+    // Unreachable today — `detectExecSandbox` finds no mechanism off macOS, so
+    // the profile is never applied there — but it would arrive silently the day
+    // a Linux backend lands, and CI on Linux was already asserting the `/`.
+    ...darwinTempRoots(resolveForProfile(os.tmpdir())),
     "/private/tmp",
     ...CACHE_SUBPATHS.map((p) => path.join(home, p)),
     ...(options.extraWritePaths ?? []),

@@ -6,6 +6,7 @@ import path from "path";
 import {
   applyExecSandbox,
   buildSeatbeltProfile,
+  darwinTempRoots,
   describeSandboxSpawnFailure,
   detectExecSandbox,
   resetExecSandboxDetection,
@@ -61,7 +62,30 @@ describe("buildSeatbeltProfile", () => {
     // does not break `npm install` (verified against the real profile).
     const p = buildSeatbeltProfile({ workDir: "/tmp/proj", homeDir: HOME });
     expect(p).not.toContain('(subpath "/private/var/folders")');
-    expect(p).toContain(`(subpath "${path.dirname(fs.realpathSync(os.tmpdir()))}")`);
+    for (const root of darwinTempRoots(fs.realpathSync(os.tmpdir()))) {
+      expect(p).toContain(`(subpath "${root}")`);
+    }
+  });
+
+  it("NEVER grants the filesystem root, on any platform", () => {
+    // `path.dirname(os.tmpdir())` is the Darwin user dir on macOS and `/` on
+    // Linux. Taking it unconditionally would hand out write access to the whole
+    // filesystem — and CI on Linux was asserting exactly that `/` as expected
+    // before this was caught. Unreachable today (no mechanism off macOS), which
+    // is precisely why it needed a test rather than a comment.
+    const p = buildSeatbeltProfile({ workDir: "/tmp/proj", homeDir: HOME });
+    expect(p).not.toContain('(subpath "/")');
+    expect(p).not.toContain('(subpath "/var")');
+    expect(p).not.toContain('(subpath "/private/var")');
+  });
+
+  it("darwinTempRoots keeps the parent only for a real Darwin user dir", () => {
+    expect(darwinTempRoots("/private/var/folders/y4/abc123/T")).toEqual([
+      "/private/var/folders/y4/abc123/T",
+      "/private/var/folders/y4/abc123",
+    ]);
+    expect(darwinTempRoots("/tmp")).toEqual(["/tmp"]);
+    expect(darwinTempRoots("/var/tmp")).toEqual(["/var/tmp"]);
   });
 
   it("does not hand out /dev/dtracehelper", () => {
@@ -72,17 +96,25 @@ describe("buildSeatbeltProfile", () => {
   });
 
   it("resolves a symlinked ANCESTOR of a path that does not exist yet", () => {
-    // `/tmp` is a symlink to `/private/tmp`, so a work dir that has not been
-    // created yet must still enter the profile as `/private/tmp/...`. Baking
-    // the unresolved form in produces an allow rule the kernel never matches —
-    // which denies the write rather than permitting it, so the symptom is a
-    // broken workflow, not an escape.
+    // A work dir that has not been created yet must still enter the profile in
+    // its RESOLVED form. Baking the unresolved form in produces an allow rule
+    // the kernel never matches — which denies the write rather than permitting
+    // it, so the symptom is a broken workflow, not an escape.
+    //
+    // The expectation is DERIVED, not hardcoded: on macOS `/tmp` is a symlink
+    // to `/private/tmp`, on Linux it is not. An earlier version asserted the
+    // macOS literal and passed locally while failing CI on Linux — the test was
+    // pinning this machine's filesystem layout, not the behaviour.
+    const resolvedTmp = fs.realpathSync("/tmp");
     const p = buildSeatbeltProfile({
       workDir: "/tmp/not-created-yet/deeper",
       homeDir: HOME,
     });
-    expect(p).toContain('(subpath "/private/tmp/not-created-yet/deeper")');
-    expect(p).not.toContain('(subpath "/tmp/not-created-yet/deeper")');
+    expect(p).toContain(`(subpath "${path.join(resolvedTmp, "not-created-yet", "deeper")}")`);
+    if (resolvedTmp !== "/tmp") {
+      // Only meaningful where the two forms actually differ.
+      expect(p).not.toContain('(subpath "/tmp/not-created-yet/deeper")');
+    }
   });
 
   it("escapes quotes and backslashes in paths", () => {

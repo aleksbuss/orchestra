@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   selectFreeModels,
+  isGeneralChatModel,
   applyFreeMode,
   isFreeModeEnabled,
   describeFreeModeSelection,
@@ -242,5 +243,55 @@ describe("Free Mode — applying the overlay", () => {
     );
     expect(out.settings.proposerTiers?.skeptic?.model).toBe("sonnet-pinned");
     expect(out.settings.proposerTiers?.fast?.model).toMatch(/:free$/);
+  });
+});
+
+describe("non-chat model exclusion (found by a live 0/5 swarm collapse)", () => {
+  it("rejects the two ids that actually broke a real run", () => {
+    // Not hypothetical. Free Mode handed both to proposers; both answered
+    // "Provider returned error" instantly and the ensemble reported
+    // "0/5 proposers produced a usable draft".
+    expect(isGeneralChatModel("nvidia/nemotron-3.5-content-safety:free")).toBe(false);
+    expect(isGeneralChatModel("nvidia/nemotron-nano-12b-v2-vl:free")).toBe(false);
+  });
+
+  it("keeps every OTHER id from the same live catalogue", () => {
+    // The whole 14-model free catalogue as observed on 2026-08-10, minus the
+    // two above. Over-matching would shrink the pool and push every slot onto
+    // one endpoint — the exact failure being fixed, in the other direction.
+    for (const id of [
+      "cohere/north-mini-code:free",
+      "google/gemma-4-26b-a4b-it:free",
+      "google/gemma-4-31b-it:free",
+      "inclusionai/ling-3.0-tiny:free",
+      "nvidia/nemotron-3-nano-30b-a3b:free",
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "nvidia/nemotron-nano-9b-v2:free",
+      "openai/gpt-oss-20b:free",
+      "poolside/laguna-s-2.1:free",
+      "poolside/laguna-xs-2.1:free",
+    ]) {
+      expect(isGeneralChatModel(id), `${id} must stay in the pool`).toBe(true);
+    }
+  });
+
+  it("matches -vl only as a SUFFIX, never inside a name", () => {
+    expect(isGeneralChatModel("vendor/model-vl:free")).toBe(false);
+    // A substring match here would wrongly drop an ordinary model.
+    expect(isGeneralChatModel("vendor/vlad-chat-7b:free")).toBe(true);
+    expect(isGeneralChatModel("vendor/model-vl-instruct:free")).toBe(true);
+  });
+
+  it("covers the adjacent non-chat classes", () => {
+    for (const id of [
+      "meta/llama-guard-3-8b:free",
+      "vendor/text-embedding-3:free",
+      "vendor/bge-rerank-v2:free",
+      "vendor/some-moderation-model:free",
+    ]) {
+      expect(isGeneralChatModel(id), `${id} must be excluded`).toBe(false);
+    }
   });
 });

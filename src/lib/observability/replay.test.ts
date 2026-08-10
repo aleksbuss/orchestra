@@ -192,6 +192,12 @@ describe("findSecretsInPostmortemString — defense-in-depth scanner", () => {
 // permanent regression case at zero authoring cost.
 // ────────────────────────────────────────────────────────────────────
 
+// DELIBERATELY the repo's real corpus, not `dataPath()`. This scan wants the
+// checked-out postmortems; `getDataDir()` is redirected to a throwaway dir for
+// every test worker (see `vitest.setup.ts`), so routing this through it would
+// find an EMPTY directory — and `readPostmortemCorpus` returns `[]` on a failed
+// readdir, so the whole live-corpus suite would degrade into a silent no-op
+// that still passes. Read-only: this scan never writes.
 const POSTMORTEM_DIR = path.join(process.cwd(), "data", "postmortems");
 
 async function readPostmortemCorpus(): Promise<

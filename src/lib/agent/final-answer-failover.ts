@@ -44,6 +44,7 @@ import {
   recordModelSuccess,
 } from "@/lib/agent/model-health";
 import { abortableSleep } from "@/lib/agent/proposer-pacing";
+import { resolveWorkerKey } from "@/lib/agent/moa-personas";
 import {
   allowsModelSubstitution,
   undeliverableNotice,
@@ -94,6 +95,14 @@ export interface FinalAnswerResult {
  * Drawn ONLY from the operator's own settings, which is what keeps Privacy Mode
  * intact: `assertPrivacyModeAllowsSettings` has already validated every one of
  * these, so a substitution can never route an air-gapped chat to a cloud model.
+ *
+ * Each candidate goes through `resolveWorkerKey`. These slots are routinely
+ * stored as `{ provider, model }` with no key — that is the shape Free Mode's
+ * overlay produces and the shape the model wizard writes — so without this the
+ * substitute `createModel` throws "API Key is missing" for any operator whose
+ * key lives in the vault rather than the environment. It is caught, so the
+ * symptom is not a crash: the failover simply never substitutes, which is the
+ * failure mode it exists to prevent.
  */
 export function buildFinalAnswerPool(settings: AppSettings): ModelConfig[] {
   return [
@@ -101,7 +110,9 @@ export function buildFinalAnswerPool(settings: AppSettings): ModelConfig[] {
     settings.proposerTiers?.frontier,
     settings.proposerTiers?.balanced,
     settings.proposerTiers?.fast,
-  ].filter((c): c is ModelConfig => Boolean(c?.model));
+  ]
+    .filter((c): c is ModelConfig => Boolean(c?.model))
+    .map((c) => resolveWorkerKey(c, settings));
 }
 
 function readUsage(result: unknown): RawUsage | undefined {

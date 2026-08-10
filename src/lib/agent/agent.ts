@@ -46,6 +46,7 @@ import {
 import { resolveContextWindow, compactionThresholdFor, effectiveContextWindow } from "@/lib/providers/context-window";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
+import { resolveWorkerKey } from "@/lib/agent/moa-personas";
 import {
   runMoAEnsemble,
   buildInlineSynthesisInjection,
@@ -418,30 +419,18 @@ export async function runAgent(options: RunAgentOptions) {
   // separately (route checks too — defense in depth, PM #58 posture).
   assertPrivacyModeAllowsSkepticOverride(settings, options.skepticModelOverride);
 
-  // Resolve model config: if a preset is active, use its brain config;
-  // otherwise fall back to the user's manual settings.
-  const resolvedModelConfig = options.preset
-    ? getBrainConfig(options.preset, settings.chatModel)
-    : settings.chatModel;
-
-  // Smart API key resolution for presets:
-  // 1. If the preset itself has a key → use it (shouldn't happen, presets don't store keys)
-  // 2. If there's a key in the provider-specific vault → use it
-  // 3. If the user's chatModel uses the SAME provider → inherit its key
-  // 4. Fall through to env vars (handled by createModel)
-  if (options.preset && options.preset !== "custom" && !resolvedModelConfig.apiKey) {
-    const provider = resolvedModelConfig.provider;
-    const vaultKey = settings.providerApiKeys?.[provider];
-    if (vaultKey) {
-      resolvedModelConfig.apiKey = vaultKey;
-      console.log(`[KeyResolver] ${provider}: using vault key`);
-    } else if (settings.chatModel.provider === provider && settings.chatModel.apiKey) {
-      resolvedModelConfig.apiKey = settings.chatModel.apiKey;
-      console.log(`[KeyResolver] ${provider}: inherited from chatModel`);
-    } else {
-      console.warn(`[KeyResolver] ${provider}: no key found in vault or chatModel`);
-    }
-  }
+  // Brain config, then its key: explicit `apiKey` → vault → same-provider
+  // chatModel → env (`createModel`'s own fallback). PM #99 — this resolution
+  // used to sit behind `options.preset !== "custom"`, and `PresetTier` has
+  // exactly one member, so it was unreachable and a vault-only key never
+  // reached the brain. Never gate it. `resolveWorkerKey` returns a NEW config,
+  // which also stops a key being written onto `settings.chatModel`.
+  const resolvedModelConfig = resolveWorkerKey(
+    options.preset
+      ? getBrainConfig(options.preset, settings.chatModel)
+      : settings.chatModel,
+    settings
+  );
 
   const providerOptions = resolveModelProviderOptions(resolvedModelConfig.provider);
   const model = createModel(resolvedModelConfig, {
@@ -1454,8 +1443,11 @@ export async function runAgentText(options: {
   // NOT ship user data to a cloud model with Privacy Mode ON. PM #58 was this
   // exact guard, forgotten here.
   const settings = await resolveGuardedAgentSettings();
-  const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
-  const model = createModel(settings.chatModel, {
+  // Same waterfall as `runAgent`. PM #99 — this path had NO vault lookup, so
+  // cron, the Telegram relay and external messages died on a vault-only key.
+  const chatModelConfig = resolveWorkerKey(settings.chatModel, settings);
+  const providerOptions = resolveModelProviderOptions(chatModelConfig.provider);
+  const model = createModel(chatModelConfig, {
     projectId: options.projectId,
     currentPath: options.currentPath,
   });
@@ -1725,8 +1717,10 @@ export async function runSubordinateAgent(options: {
   // (defense in depth: the recursive path and any future direct caller must
   // not reach a cloud provider with Privacy Mode ON). PM #58.
   const settings = await resolveGuardedAgentSettings();
-  const providerOptions = resolveModelProviderOptions(settings.chatModel.provider);
-  const model = createModel(settings.chatModel, {
+  // PM #99 — a subordinate must not lose the key its parent already resolved.
+  const subordinateModelConfig = resolveWorkerKey(settings.chatModel, settings);
+  const providerOptions = resolveModelProviderOptions(subordinateModelConfig.provider);
+  const model = createModel(subordinateModelConfig, {
     projectId: options.projectId,
   });
 

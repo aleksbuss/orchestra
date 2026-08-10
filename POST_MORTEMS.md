@@ -38,6 +38,25 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 99. A key stored in the API Keys Vault never reached the agent — a fresh install was unusable, and the guard that should have applied it was unreachable code
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P0 — a first-time install is 100% non-functional. Every turn dies before the first token. The one class of user who cannot work around it is the one who follows the UI.
+**Symptoms:** Operator installed Orchestra on a second machine, entered an OpenRouter key in Settings → API Keys Vault, and got `API Key is missing for OpenRouter (<model>). Please add your API key in Settings -> API Keys Vault.` on every turn — the error tells you to do the thing you already did. The Free Mode button "did nothing" and Swarm "always errored"; both were this, not two bugs. Swarm builds the brain first and threw before MoA ever started.
+**Detection:** Operator report from a machine with no `.env`. **It cannot be reproduced on a developer machine** — a dev has `OPENROUTER_API_KEY` in `.env.local`, and `createModel`'s env fallback then covers for the missing vault lookup. Reproducing it required deleting the env key and putting the key ONLY in the vault. That asymmetry is why 3875 green tests and months of daily use never surfaced it.
+**Root Cause:** `createModel` (`llm-provider.ts`) resolves a key from exactly two sources: an explicit `config.apiKey`, and `process.env[<PROVIDER>_API_KEY]`. It takes no settings argument, so it **cannot** see the vault. Every caller that builds a model from a settings slot must therefore run it through `resolveWorkerKey` first. Four did not:
+- **`runAgent`** — it *had* the lookup, gated on `options.preset && options.preset !== "custom"`. `PresetTier` has exactly ONE member — `"custom"` — so the second clause is a contradiction and the whole block was **unreachable code**. It logged `[KeyResolver] …` lines that have never once been printed.
+- **`runAgentText`** — no lookup at all. This is the cron / Telegram-relay / external-message path.
+- **`runSubordinate`** — no lookup at all. A delegated run lost the key its parent had resolved.
+- **`buildFinalAnswerPool`** (`final-answer-failover.ts`) — returned the raw `utilityModel` / `proposerTiers.*` slots. `createModel` throws there, but the throw is caught, so the symptom was not a crash: **the failover silently never substituted**, which is the single thing it exists to do.
+**Why the shape hid:** `resolveWorkerKey`'s own docstring says it *"mirrors the key resolution logic from runAgent"*. The mirror was correct and load-bearing (MoA proposers, Router, tournament judges all use it). The original it claimed to mirror was dead. A reader checking "is this handled?" finds a working implementation and stops.
+**Resolution:** All four callsites now route through `resolveWorkerKey` — the existing canonical waterfall (explicit key → vault → same-provider `chatModel` → env), which also returns a new object instead of mutating `settings.chatModel` the way the dead block did.
+**Regression Coverage:** `src/lib/agent/agent-vault-key.test.ts` (4 tests, both entry points; each fix mutation-verified to kill exactly one test — asserting through only one entry point left the other unpinned, which the mutation run caught). `final-answer-failover.test.ts` covers the pool. `src/lib/agent/key-resolution-contract.test.ts` is a structural gate over `src/lib` + `src/app` that fails on any `createModel(settings.<slot>)` call, and pins its own regex against the literal defect so it cannot pass by matching nothing.
+**Doc Updates:** `CLAUDE.md` § Non-negotiables (agent runtime) + the CI-gate table.
+**Rule:** `createModel` cannot see settings — it knows `config.apiKey` and `process.env`, nothing else. Any config built from a settings slot goes through `resolveWorkerKey` before it reaches a factory. And when a guard's condition references a union type, check the union: `x !== "custom"` where `"custom"` is the only member is not a guard, it is dead code. **Test the fresh-install path with the environment stripped** — an env var on the developer's machine is a confound that makes a broken configuration path look healthy.
+
+---
+
 ## 98. Free Mode picked a tool-incapable brain, and the interactive stream had NO time bound — a simple question hung for seven minutes with no answer and no error
 **Date:** 2026-08
 **Status:** RESOLVED

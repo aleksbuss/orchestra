@@ -96,6 +96,18 @@ export interface DPGResult {
   personas: MoAProposer[];
   /** Router LLM usage so the caller can fold it into the chat cumulative (PM #36). */
   usage?: import("@/lib/cost/accumulator").RawUsage;
+  /**
+   * True when the Router could not produce personas and the STATIC set was
+   * substituted. The fallback is fail-safe, which is exactly the problem: the
+   * user still gets an answer, so a swarm that has silently lost role
+   * specialisation and tournament judging looks identical to a healthy one.
+   * The caller surfaces this on the Router's UI node — the alternative is a
+   * degradation only visible by reading stdout.
+   *
+   * Callers must not infer this from `usage` being absent. That correlation
+   * holds today by accident of where the fallback returns, not by contract.
+   */
+  degraded?: boolean;
 }
 
 /**
@@ -127,7 +139,7 @@ export async function generateDynamicSwarm(
     }).join("\n");
 
     const routerModel = createModel(modelConfig, {});
-    const { object, usage } = await generateObject({
+    const runRouterCall = () => generateObject({
       model: routerModel,
       // Every other LLM call in the agent/MoA path caps output via
       // resolveMaxOutputTokens(settings.<role>Model) (agent.ts, moa.ts). This
@@ -177,6 +189,51 @@ INSTRUCTIONS:
       // PM #98 — the Router's generateObject had no time bound.
       abortSignal: callDeadlineSignal(abortSignal),
     });
+
+    // ONE retry, and ONLY on a schema failure.
+    //
+    // Observed live on `google/gemma-4-26b-a4b-it:free` — the model Free Mode
+    // picks as Router, because it is one of the few free ids advertising
+    // `structured_outputs`. It intermittently returns output that does not
+    // satisfy the schema (once `personas: []` against the `min(3)` constraint,
+    // once unparseable text). Present in one run, absent in the next. The
+    // fallback below is fail-safe, but the turn still LOOKS healthy: the user
+    // gets an answer while the swarm has quietly lost role specialisation and
+    // tournament judging — the two things that distinguish it from N-sampling.
+    //
+    // Scoped to `schema` deliberately. Retrying a 402, a 429 or a timeout burns
+    // money and latency on a condition a second identical call cannot fix; a
+    // schema miss is a sampling artefact and a second draw genuinely can.
+    // A second failure falls through to the same static-persona fallback as
+    // before, so the worst case is one extra call on an already-degraded turn.
+    //
+    // Each attempt gets its own deadline (`callDeadlineSignal` runs per call),
+    // which is the PM #98 contract — a caller signal is not a time bound.
+    let routerResult: Awaited<ReturnType<typeof runRouterCall>>;
+    try {
+      routerResult = await runRouterCall();
+    } catch (firstErr) {
+      if (classifyRouterError(firstErr) !== "schema") throw firstErr;
+      // Logged whether or not the retry rescues it, so the rate is measurable
+      // from the logs alone — no separate instrumentation pass needed.
+      log.warn("moa_router_schema_retry", {
+        module: "moa-router",
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+        error: describeRouterError(firstErr),
+      });
+      console.warn(
+        `[MoA] Router returned malformed structured output on ${modelConfig.provider}/${modelConfig.model} — retrying once before falling back to static personas.`
+      );
+      routerResult = await runRouterCall();
+      log.info("moa_router_schema_retry_rescued", {
+        module: "moa-router",
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+      });
+      console.warn("[MoA] Router retry succeeded — DPG personas recovered.");
+    }
+    const { object, usage } = routerResult;
 
     // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises
     // "one DPG role is ALWAYS forced to be a QA Auditor / Skeptic", but
@@ -267,6 +324,7 @@ INSTRUCTIONS:
 
     return {
       requiresSwarm: true,
+      degraded: true,
       personas: applyIdenticalPromptsArm(applySkepticControlArm(fallbackPersonas)),
       // Usage is unknown when the Router crashes; the chat banner just
       // misses the Router's tokens for this turn (a small undercount).

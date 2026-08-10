@@ -164,15 +164,31 @@ function sbQuote(p: string): string {
  * Found by the real-enforcement tests in this module's spec, which caught a
  * secrets read sailing through a profile that explicitly denied it.
  *
- * A path that does not exist yet cannot be resolved; the literal is the best
- * available answer and is still correct once the directory is created inside an
- * already-resolved parent.
+ * A path that does not exist yet still has to be resolved, because its ANCESTORS
+ * may be symlinks: `realpathSync` throws on `/tmp/proj` before that directory is
+ * created, and a bare `path.resolve` then bakes `/tmp/proj` into the profile
+ * while the kernel will match `/private/tmp/proj`. So resolve the deepest
+ * existing ancestor and re-append the rest.
+ *
+ * Note the direction of that failure, because a review got it backwards: an
+ * unmatched rule is an ALLOW that never fires, i.e. the write is DENIED. It
+ * breaks a legitimate workflow rather than opening a hole — still worth fixing,
+ * and worth fixing for the right reason.
  */
 function resolveForProfile(p: string): string {
-  try {
-    return fs.realpathSync(p);
-  } catch {
-    return path.resolve(p);
+  const absolute = path.resolve(p);
+  let head = absolute;
+  const tail: string[] = [];
+
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), ...tail);
+    } catch {
+      const parent = path.dirname(head);
+      if (parent === head) return absolute; // hit the root: nothing resolvable
+      tail.unshift(path.basename(head));
+      head = parent;
+    }
   }
 }
 
@@ -199,9 +215,14 @@ export function buildSeatbeltProfile(options: SeatbeltProfileOptions): string {
   const home = resolveForProfile(options.homeDir ?? os.homedir());
   const writable = [
     options.workDir,
-    os.tmpdir(),
+    // THIS process's own per-user temp/cache root, not the whole
+    // `/private/var/folders` tree. The tree holds one such root per user plus
+    // the system's, and nothing the agent runs needs another account's temp
+    // dir. The parent of `os.tmpdir()` is the Darwin user dir, which covers
+    // both `T` (temp) and `C` (cache) — so `getconf DARWIN_USER_CACHE_DIR`
+    // consumers keep working while the blast radius drops to one account.
+    path.dirname(resolveForProfile(os.tmpdir())),
     "/private/tmp",
-    "/private/var/folders",
     ...CACHE_SUBPATHS.map((p) => path.join(home, p)),
     ...(options.extraWritePaths ?? []),
   ].map(resolveForProfile);
@@ -219,9 +240,12 @@ export function buildSeatbeltProfile(options: SeatbeltProfileOptions): string {
     "; protecting; the home directory and the credential set are the targets.",
     "(deny file-write*)",
     `(allow file-write* ${writable.map((p) => `(subpath ${sbQuote(p)})`).join(" ")})`,
-    // Character devices a shell pipeline cannot run without.
+    // Character devices a shell pipeline cannot run without. `/dev/dtracehelper`
+    // was here defensively and is deliberately NOT: DTrace is a process- and
+    // memory-inspection interface, nothing the agent legitimately runs touches
+    // it, and "I added it just in case" is the wrong reason to widen a sandbox.
     '(allow file-write-data (literal "/dev/null") (literal "/dev/stdout")',
-    '  (literal "/dev/stderr") (literal "/dev/tty") (literal "/dev/dtracehelper"))',
+    '  (literal "/dev/stderr") (literal "/dev/tty"))',
     "",
     "; --- reads: the credential set, denied LAST so no allow above re-opens it ---",
   ];

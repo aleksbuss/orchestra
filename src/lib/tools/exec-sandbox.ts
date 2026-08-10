@@ -290,6 +290,67 @@ export interface SandboxedCommand {
   sandbox: SandboxDecision;
 }
 
+let sandboxDecisionReported = false;
+
+/** Test seam: allow the one-shot report to fire again. */
+export function resetSandboxDecisionReport(): void {
+  sandboxDecisionReported = false;
+}
+
+/**
+ * Say once, out loud, whether confinement is actually in force.
+ *
+ * The decision was being threaded onto the prepared command and read by nobody,
+ * which is the precise shape of failure this module claims to avoid: an
+ * operator on a platform with no mechanism would have believed the feature was
+ * protecting them. Console, not the structured logger, for the same reason
+ * `schema-version.ts` uses it — a solo local operator reads their own dev
+ * terminal, and this must not depend on a log sink being wired.
+ *
+ * A UI surface is NOT built; this is the whole of the reporting.
+ */
+function reportSandboxDecisionOnce(decision: SandboxDecision): void {
+  if (sandboxDecisionReported) return;
+  sandboxDecisionReported = true;
+  if (decision.kind === "none") {
+    console.warn(
+      `[code-execution] NO filesystem confinement (${decision.reason}). ` +
+        `Model-authored code runs with your user's full write access. ` +
+        `For isolation, run Orchestra via 'npm run setup:docker'.`
+    );
+  }
+}
+
+/**
+ * The one call the executor makes: confine a command to a project, and report
+ * what actually happened.
+ *
+ * `projectRoot` MUST be the project the run belongs to, never the executor's
+ * current working directory. The terminal runtime persists each run's `pwd`
+ * into its session state, so a cwd-anchored profile is self-widening: `cd ~`
+ * is permitted (read and execute only), and the next command in that session
+ * inherits write access to the whole home directory. Verified end-to-end, then
+ * pinned by a test in `code-execution.runtimes.spawn.test.ts`.
+ *
+ * Lives here rather than in the executor so the sandbox's own knowledge — which
+ * roots are writable, which are secret, how degradation is reported — stays in
+ * one module, and so wiring it costs the executor a single call.
+ */
+export function sandboxProjectCommand(
+  command: string,
+  args: string[],
+  projectRoot: string,
+  paths: { writable: string[]; secret: string[] }
+): SandboxedCommand {
+  const wrapped = applyExecSandbox(command, args, {
+    workDir: projectRoot,
+    extraWritePaths: paths.writable,
+    extraDenyReadPaths: paths.secret,
+  });
+  reportSandboxDecisionOnce(wrapped.sandbox);
+  return wrapped;
+}
+
 /**
  * Wrap a prepared command in the available confinement mechanism.
  *

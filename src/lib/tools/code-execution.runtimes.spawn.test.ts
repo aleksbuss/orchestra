@@ -313,3 +313,42 @@ describe("proposer-scoped code_execution tool — preflight limits", () => {
     expect(out).toContain("PROPOSER_OK");
   });
 });
+
+const onMac = process.platform === "darwin" ? describe : describe.skip;
+
+onMac("sandbox anchoring — a session `cd` must not widen what may be written", () => {
+  // A real two-step escape, found by line-by-line review AFTER a model council
+  // reviewed the same code and missed it. The terminal runtime persists each
+  // run's `pwd` into the session state, so `prepared.cwd` DRIFTS. Anchoring the
+  // Seatbelt profile on it made the sandbox self-widening: `cd ~` is permitted
+  // (it needs only read and execute), and the next command in the same session
+  // inherited write access to the entire home directory.
+  //
+  // Driven through `executeCode` on purpose. A profile-shaped assertion cannot
+  // see this bug at all — the profile was always internally consistent; the
+  // defect was in which directory it was handed.
+  const probe = path.join(os.homedir(), `.orchestra-anchor-probe-${process.pid}`);
+
+  afterEach(async () => {
+    await fs.rm(probe, { force: true });
+  });
+
+  it("still refuses a HOME write after the session has cd'd to HOME", async () => {
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-anchor-"));
+    const session = 4901;
+
+    // Control: the write is refused before any `cd`, so step 3 is comparable.
+    await executeCode("terminal", `echo a > ${probe}`, session, cfg(), workDir);
+    expect(await fs.access(probe).then(() => true, () => false)).toBe(false);
+
+    // The drift itself must keep working — `cd` is legitimate.
+    const moved = await executeCode("terminal", `cd ${os.homedir()} && pwd`, session, cfg(), workDir);
+    expect(moved).toContain(os.homedir());
+
+    // Same session, post-drift: still refused.
+    await executeCode("terminal", `echo pwned > ${probe}`, session, cfg(), workDir);
+    expect(await fs.access(probe).then(() => true, () => false)).toBe(false);
+
+    await fs.rm(workDir, { recursive: true, force: true });
+  });
+});

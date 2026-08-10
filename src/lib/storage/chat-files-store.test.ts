@@ -11,10 +11,22 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 
-import { deleteChatFile, getChatFilesDir } from "./chat-files-store";
+// LAZY on purpose. `chat-files-store.ts` captures `getDataDir()` in a
+// module-level const at import time, and ESM hoists static imports above every
+// hook — so a static import bound the OPERATOR'S LIVE `data/chat-files/` before
+// the cwd spy below could take effect, and this file created `chat-foo` there
+// on every run. The spy alone was never enough; the data dir must be redirected
+// BEFORE the module is first evaluated.
+type ChatFilesStore = typeof import("./chat-files-store");
+let mod: ChatFilesStore;
+const deleteChatFile: ChatFilesStore["deleteChatFile"] = (...args) =>
+  mod.deleteChatFile(...args);
+const getChatFilesDir: ChatFilesStore["getChatFilesDir"] = (...args) =>
+  mod.getChatFilesDir(...args);
 
 let tmpRoot: string;
 let cwdSpy: any;
+let previousDataDir: string | undefined;
 
 beforeEach(async () => {
   tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-chatfiles-test-"));
@@ -22,6 +34,12 @@ beforeEach(async () => {
   // We override cwd so the helper's DATA_DIR points into our tmp tree and
   // we can plant a sibling "evil" directory next to a chat dir.
   cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpRoot);
+  // Redirect the data root BEFORE the module is first evaluated, then import.
+  // The spy covers the `<cwd>/data` fallback; the env var covers the case where
+  // an outer runner already set one. Both must be in place before this line.
+  previousDataDir = process.env.ORCHESTRA_DATA_DIR;
+  process.env.ORCHESTRA_DATA_DIR = path.join(tmpRoot, "data");
+  mod = await import("./chat-files-store");
 
   await fs.mkdir(getChatFilesDir("chat-foo"), { recursive: true });
   await fs.mkdir(path.join(tmpRoot, "data", "chat-files", "chat-foo-evil"), {
@@ -38,6 +56,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   cwdSpy?.mockRestore();
+  if (previousDataDir === undefined) delete process.env.ORCHESTRA_DATA_DIR;
+  else process.env.ORCHESTRA_DATA_DIR = previousDataDir;
 });
 
 describe("deleteChatFile — PM #6 regression", () => {

@@ -12,26 +12,47 @@ import path from "path";
 import fs from "fs/promises";
 import os from "os";
 
-// ── Isolate from real data dir by patching process.cwd() ──────────────────────
+// ── Isolate from the real data dir via ORCHESTRA_DATA_DIR ────────────────────
+//
+// This block used to create `tmpDir`, delete it again, and point NOTHING at it.
+// The header claimed isolation "by patching process.cwd()" and no cwd patch was
+// ever written; the body said "we can't easily override the DATA_DIR without
+// modifying process.cwd". That stopped being true when `ORCHESTRA_DATA_DIR` was
+// added (the PM #62 fix), but this file was never updated — so every case here
+// ran against the operator's LIVE database: real chats written into
+// `data/chats/`, the real `data/chat-index.json` REWRITTEN, and the fixtures
+// swept into `data/.trash/chats/`. Measured, not inferred: running this one
+// file and diffing `data/` afterwards is what found it.
+//
+// Nothing was lost, because the cases clean up after themselves. A crash
+// halfway through is the version where the live index survives describing
+// test chats.
 let tmpDir: string;
+let previousDataDir: string | undefined;
 
 vi.mock("@/lib/realtime/event-bus", () => ({
   publishUiSyncEvent: vi.fn(),
 }));
 
-// We need to rewrite the DATA_DIR to our temp dir.
-// The cleanest way is to use a dynamic import after setting cwd.
-// Instead, we write the chats directory directly and import the module.
-
 describe("Chat Store", () => {
-  // We can't easily override the DATA_DIR without modifying process.cwd.
-  // Use a real temp filesystem approach:
   beforeEach(async () => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-chat-"));
+    previousDataDir = process.env.ORCHESTRA_DATA_DIR;
+    process.env.ORCHESTRA_DATA_DIR = tmpDir;
   });
 
   afterEach(async () => {
+    if (previousDataDir === undefined) delete process.env.ORCHESTRA_DATA_DIR;
+    else process.env.ORCHESTRA_DATA_DIR = previousDataDir;
     await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  // The isolation above is load-bearing, and its failure mode is SILENT — the
+  // suite passes either way, it just passes against real data. Assert it.
+  it("runs against an isolated data dir, not the operator's live one", async () => {
+    const { getDataDir } = await import("@/lib/storage/data-dir");
+    expect(getDataDir()).toBe(path.resolve(tmpDir));
+    expect(getDataDir()).not.toBe(path.join(process.cwd(), "data"));
   });
 
   it("createChat should persist a chat with correct fields", async () => {

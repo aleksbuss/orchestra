@@ -352,3 +352,23 @@ onMac("sandbox anchoring — a session `cd` must not widen what may be written",
     await fs.rm(workDir, { recursive: true, force: true });
   });
 });
+
+onMac("sandbox denies SECRETS, not tool CONFIG", () => {
+  // An earlier profile denied whole tool-config directories (`.config/gh`,
+  // `.config/git`, `.config/gcloud`, `.docker`). That broke the tools outright
+  // while protecting nothing: `gh` refused to start at all —
+  //   "failed to read configuration: .config/gh/config.yml: operation not permitted"
+  // — and its token was never in that directory; it lives in the keyring.
+  //
+  // The rule this pins: a config file a tool needs in order to RUN stays
+  // readable. Credential MATERIAL does not. Asserting only that `gh` starts,
+  // never that it authenticates — the keychain is deliberately denied, so
+  // authentication failing inside the sandbox is correct behaviour.
+  it("lets gh start (config readable) even though its credential store is not", async () => {
+    const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "orch-ghcfg-"));
+    const out = await executeCode("terminal", "gh --version 2>&1 | head -2", 4902, cfg(), workDir);
+    expect(out).not.toContain("failed to read configuration");
+    expect(out).toMatch(/gh version/i);
+    await fs.rm(workDir, { recursive: true, force: true });
+  });
+});

@@ -127,6 +127,12 @@ export interface FreeModeSelection {
    * the original defect was invisible until a live swarm collapsed.
    */
   excludedNonChat: number;
+  /**
+   * True when EVERY free id looked non-chat, so the exclusion was abandoned and
+   * the raw catalogue used. That means the run is back to the behaviour this
+   * filter exists to prevent — it must be visible, not inferred from a count.
+   */
+  exclusionEmptiedPool: boolean;
 }
 
 function cfg(model: string): ModelConfig {
@@ -226,11 +232,18 @@ export function selectFreeModels(): FreeModeSelection {
   // Sorted so selection is stable across processes — catalogue order is not.
   const catalogue = listOpenRouterModelIds().filter(isFreeTierModel).sort();
 
-  const structured = catalogue.filter(
+  const live = catalogue.length > 0;
+  const chatCapable = catalogue.filter(isGeneralChatModel);
+
+  // The Router pool is drawn from the CHAT-capable set, not the raw catalogue.
+  // A moderation classifier can legitimately advertise `structured_outputs` —
+  // emitting a JSON verdict is its whole job — so without this it could be
+  // selected as Router. That failure is worse than a bad proposer: a dead
+  // proposer is dropped and the ensemble degrades, whereas a Router that
+  // cannot write personas takes the swarm's role specialisation with it.
+  const structured = (chatCapable.length > 0 ? chatCapable : catalogue).filter(
     (id) => modelSupportsStructuredOutputs(id) === true
   );
-
-  const live = catalogue.length > 0;
   const routerPool = structured.length > 0 ? structured : FREE_ROUTER_FALLBACKS;
   // `modelSupportsStructuredOutputs` returning `undefined` means "the catalogue
   // does not know", which is NOT "incapable", so nothing is disqualified on
@@ -242,8 +255,8 @@ export function selectFreeModels(): FreeModeSelection {
   // the exclusion would empty the pool, take the raw catalogue instead. Free
   // Mode failing shut because this week's free list happens to look odd would
   // be worse than the thing being fixed.
-  const chatCapable = catalogue.filter(isGeneralChatModel);
-  const generalPool = live ? (chatCapable.length > 0 ? chatCapable : catalogue) : FREE_GENERAL_FALLBACKS;
+  const exclusionEmptiedPool = live && chatCapable.length === 0;
+  const generalPool = live ? (exclusionEmptiedPool ? catalogue : chatCapable) : FREE_GENERAL_FALLBACKS;
 
   const brain = pickBrain(generalPool, structured);
 
@@ -272,6 +285,7 @@ export function selectFreeModels(): FreeModeSelection {
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
     excludedNonChat: live ? catalogue.length - chatCapable.length : 0,
+    exclusionEmptiedPool,
   };
 }
 
@@ -333,7 +347,8 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
       `was available; add a key or turn Free Mode off to get tools back)`;
   return (
     `Free Mode [${s.source}, ${s.candidateCount} free models seen` +
-    (s.excludedNonChat > 0 ? `, ${s.excludedNonChat} dropped as non-chat` : "") + `]: ` +
+    (s.excludedNonChat > 0 ? `, ${s.excludedNonChat} dropped as non-chat` : "") +
+    (s.exclusionEmptiedPool ? ", ALL looked non-chat so the exclusion was ABANDONED" : "") + `]: ` +
     `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +
     `${s.proposerTiers.fast.model}, ${s.proposerTiers.balanced.model}, ${s.proposerTiers.frontier.model}`

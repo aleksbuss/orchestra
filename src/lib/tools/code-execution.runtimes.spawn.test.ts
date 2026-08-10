@@ -153,13 +153,31 @@ describe("managed sessions — yield_ms", () => {
     expect(out).toContain("[Execution yielded to background]");
     const id = sessionIdFrom(out);
 
-    // Blocking poll: waits on the session until it finishes (or 10s cap).
-    const poll = await pollManagedProcessSession(id, 10_000);
+    // Poll until TERMINAL, not once.
+    //
+    // A single `pollManagedProcessSession(id, 10_000)` here was flaky — it
+    // failed 2 of 4 full-suite runs with `status: "running"`. The cause is not
+    // machine load and not a too-short cap: the helper's wait loop exits as
+    // soon as the session's VERSION changes, i.e. the moment new output lands,
+    // and `SLOW_DONE` is printed a few milliseconds BEFORE the process exits.
+    // So the poll returned while the status was still `running` whenever the
+    // output bump was observed first — a coin flip, not a timeout.
+    //
+    // Early-return-on-new-output is deliberate: it is what lets the agent
+    // stream a long-running command instead of blocking for the whole
+    // timeout. The helper is right; the one-shot expectation was wrong. Poll
+    // the way a real caller does — until the status stops being `running`.
+    let poll = await pollManagedProcessSession(id, 10_000);
+    const deadline = Date.now() + 10_000;
+    while (poll.status === "running" && Date.now() < deadline) {
+      poll = await pollManagedProcessSession(id, 1_000);
+    }
+
     expect(poll.success).toBe(true);
     expect(poll.status).toBe("completed");
     expect(poll.output).toContain("SLOW_DONE");
     expect(poll.exitCode).toBe(0);
-  }, 15000);
+  }, 30000);
 });
 
 describe("managed sessions — poll error branches", () => {

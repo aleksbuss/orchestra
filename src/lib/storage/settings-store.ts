@@ -8,6 +8,7 @@ import {
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
 import { stampSchemaVersion, warnIfFutureSchema } from "@/lib/storage/schema-version";
+import { applyCredentialAwareModelDefaults } from "@/lib/storage/fresh-install-defaults";
 
 const DATA_DIR = getDataDir();
 const SETTINGS_DIR = path.join(DATA_DIR, "settings");
@@ -84,6 +85,17 @@ export const DEFAULT_SETTINGS: AppSettings = {
   degradationPolicy: "speed",
 };
 
+/**
+ * PM #101 — every path out of `getSettings` goes through here, so a fresh
+ * install (no file), a corrupt file, and a partial file all get the same
+ * credential-aware model slots. Applying it at the READ chokepoint rather than
+ * at install time is what makes it cover both orderings: a key pasted into the
+ * vault after first boot, and a key that only ever existed in `.env.local`.
+ */
+function withResolvedDefaults(settings: AppSettings): AppSettings {
+  return applyCredentialAwareModelDefaults(settings, DEFAULT_SETTINGS, process.env);
+}
+
 export async function getSettings(): Promise<AppSettings> {
   await ensureDir(SETTINGS_DIR);
   try {
@@ -102,19 +114,21 @@ export async function getSettings(): Promise<AppSettings> {
     
     const saved = JSON.parse(content) as unknown;
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) {
-      return structuredClone(DEFAULT_SETTINGS);
+      return withResolvedDefaults(structuredClone(DEFAULT_SETTINGS));
     }
     // Defensive load — warn if written by a newer build, then strip the
     // schemaVersion envelope so it never enters the domain settings object.
     warnIfFutureSchema(saved, "settings.json");
     delete (saved as Record<string, unknown>).schemaVersion;
     // Deep merge with defaults to handle new nested fields.
-    return deepMerge(
-      structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>,
-      saved as Record<string, unknown>
-    ) as unknown as AppSettings;
+    return withResolvedDefaults(
+      deepMerge(
+        structuredClone(DEFAULT_SETTINGS) as unknown as Record<string, unknown>,
+        saved as Record<string, unknown>
+      ) as unknown as AppSettings
+    );
   } catch {
-    return structuredClone(DEFAULT_SETTINGS);
+    return withResolvedDefaults(structuredClone(DEFAULT_SETTINGS));
   }
 }
 

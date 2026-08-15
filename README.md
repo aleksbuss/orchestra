@@ -6,8 +6,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-3895%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-100%20documented-purple)](./POST_MORTEMS.md)
+[![Tests](https://img.shields.io/badge/tests-3930%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-102%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -149,6 +149,8 @@ GOOGLE_API_KEY=...
 # Production: set a strong session secret
 ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ```
+
+**"The first key it finds" is literal.** On a fresh install the chat and utility model slots are pointed at whichever provider you actually have a credential for — checked in the API Keys Vault first, then the env vars above, in the order OpenRouter → Anthropic → Google. Nothing to configure. Two things this deliberately does *not* do: it never overrides a model you picked yourself (Settings wins, always), and it leaves embeddings on OpenAI, because OpenRouter has no embeddings API — semantic memory needs an OpenAI key or a local Ollama embedding model. See PM #101.
 
 ### Full env reference
 

@@ -111,6 +111,66 @@ describe("replayPostmortem — classifier regression check", () => {
     expect(result.consistent).toBe(true);
   });
 
+  // PM #102 — the harness could not round-trip the one kind PM #98 added.
+  // A stall borrows the `AbortError` name on purpose, so a reconstruction
+  // built from `name` + `message` reads as a user cancellation and the scan
+  // reported drift that did not exist in the classifier.
+  it("stream_stalled round-trips when the structural marker was persisted", () => {
+    for (const stall of ["ttft", "idle"] as const) {
+      const pm = fixturePm({
+        errorClassification: {
+          traceId: "T-fixture",
+          kind: "stream_stalled",
+          message: "provider/model sent no response within 90s.",
+          recoverable: true,
+        },
+        rawError: {
+          name: "AbortError",
+          message: "provider/model sent no response within 90s.",
+          orchestraStreamStall: stall,
+        },
+      });
+      const result = replayPostmortem(pm);
+      expect(result.consistent, `${stall}: ${result.drift.join("; ")}`).toBe(true);
+      expect(result.reclassified.kind).toBe("stream_stalled");
+      expect(result.reclassified.recoverable).toBe(true);
+    }
+  });
+
+  it("stream_stalled round-trips for legacy files dumped BEFORE the marker was persisted", () => {
+    // The eight real postmortems on the operator's disk that exposed this.
+    // `kind` + `recoverable` are what the gate compares, and both stall
+    // variants agree on those, so the "ttft" fallback is sound here.
+    const pm = fixturePm({
+      errorClassification: {
+        traceId: "T-fixture",
+        kind: "stream_stalled",
+        message: "provider/model sent no response within 90s.",
+        recoverable: true,
+      },
+      rawError: { name: "AbortError", message: "provider/model sent no response within 90s." },
+    });
+    const result = replayPostmortem(pm);
+    expect(result.consistent, result.drift.join("; ")).toBe(true);
+  });
+
+  it("a REAL cancellation is still an abort — the stall branch did not swallow it", () => {
+    // The negative control that makes the two tests above mean something: the
+    // fix must not turn every AbortError into a stall.
+    const pm = fixturePm({
+      errorClassification: {
+        traceId: "T-fixture",
+        kind: "abort",
+        message: "Request was cancelled.",
+        recoverable: false,
+      },
+      rawError: { name: "AbortError", message: "aborted" },
+    });
+    const result = replayPostmortem(pm);
+    expect(result.consistent).toBe(true);
+    expect(result.reclassified.kind).toBe("abort");
+  });
+
   it("internal kind is reproducible — generic error -> internal", () => {
     const pm = fixturePm({
       errorClassification: {

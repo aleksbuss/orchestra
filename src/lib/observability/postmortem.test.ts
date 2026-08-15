@@ -30,6 +30,7 @@ import {
   prunePostmortems,
   sanitizeSettingsForPostmortem,
 } from "./postmortem";
+import { StreamStalledError } from "@/lib/observability/stream-stall";
 
 let tmpRoot: string;
 let cwdSpy: any;
@@ -161,6 +162,39 @@ describe("dumpPostmortem — happy path", () => {
     expect(pm?.errorClassification.kind).toBe("upstream_no_tools");
     expect(pm?.rawError.message).toBe("boom");
     expect(typeof pm?.rawError.stack).toBe("string");
+  });
+
+  // PM #102 — the dump end of the same defect. Detection of a stall is
+  // STRUCTURAL; `name` is deliberately `AbortError`, so a summary that keeps
+  // only name + message + stack is indistinguishable from a user cancellation
+  // once the process that raised it is gone.
+  it("preserves the stream-stall marker so the postmortem can be replayed", async () => {
+    await dumpPostmortem({
+      traceId: "T-stall",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: new StreamStalledError("idle", 90_000, 91_204, "openrouter/some-model"),
+    });
+
+    const pm = await loadPostmortem("T-stall");
+    expect(pm?.rawError.name).toBe("AbortError");
+    expect(pm?.rawError.orchestraStreamStall).toBe("idle");
+  });
+
+  it("does NOT invent a stall marker for an ordinary error", async () => {
+    await dumpPostmortem({
+      traceId: "T-plain",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: new Error("boom"),
+    });
+
+    const pm = await loadPostmortem("T-plain");
+    expect(pm?.rawError.orchestraStreamStall).toBeUndefined();
   });
 
   it("dumps even when the chat file is missing — chatSnapshotOmittedReason='missing'", async () => {

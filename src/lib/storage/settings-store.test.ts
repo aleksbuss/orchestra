@@ -23,6 +23,13 @@
  *   - saveSettings round-trip: write then read returns the same shape.
  *   - The known PM #1 flake — atomic-rename ENOENT race — is forgiven by a
  *     retry inside getSettings.
+ *   - PM #101 — the credential-aware model defaults are applied on EVERY read
+ *     path (fresh, merged, corrupt), and never over an explicit choice.
+ *
+ * ⚠️ Every test here stubs the provider env vars. `getSettings` now consults
+ * `process.env` for provider credentials, and a developer machine carries
+ * `.env.local` keys; without the stub these assertions would pass or fail
+ * depending on whose machine ran them.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
@@ -37,6 +44,21 @@ import {
 let tmpRoot: string;
 let cwdSpy: any;
 
+/** Every provider env var `getSettings` can read (MODEL_PROVIDERS[*].envKey). */
+const PROVIDER_ENV_KEYS = [
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GOOGLE_API_KEY",
+  "OPENROUTER_API_KEY",
+] as const;
+
+/** Pin the ambient credential picture so the PM #101 overlay is deterministic. */
+function stubProviderEnv(present: Partial<Record<string, string>> = {}) {
+  for (const key of PROVIDER_ENV_KEYS) {
+    vi.stubEnv(key, present[key] ?? "");
+  }
+}
+
 beforeEach(async () => {
   tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-settings-test-"));
   // settings-store derives its DATA_DIR from `process.cwd()` at import time.
@@ -44,12 +66,20 @@ beforeEach(async () => {
   // from our tmp tree. We achieve that with a per-test dynamic import +
   // `vi.resetModules()` so each test gets a fresh closure.
   cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(tmpRoot);
+  stubProviderEnv();
   vi.resetModules();
 });
 
 afterEach(() => {
   cwdSpy?.mockRestore();
+  vi.unstubAllEnvs();
 });
+
+async function writeSettingsFile(contents: string) {
+  const settingsDir = path.join(tmpRoot, "data", "settings");
+  await fs.mkdir(settingsDir, { recursive: true });
+  await fs.writeFile(path.join(settingsDir, "settings.json"), contents, "utf-8");
+}
 
 async function loadModule() {
   return await import("./settings-store");
@@ -142,6 +172,87 @@ describe("getSettings — with on-disk JSON", () => {
     const { getSettings, DEFAULT_SETTINGS } = await loadModule();
     const out = await getSettings();
     expect(out).toEqual(DEFAULT_SETTINGS);
+  });
+});
+
+describe("getSettings — credential-aware model defaults (PM #101)", () => {
+  // The defect: a user who installs Orchestra and supplies only an OpenRouter
+  // key gets `openai/gpt-4o` in every slot and a chat that cannot answer.
+  it("no settings file + OpenRouter key in env → model slots point at OpenRouter", async () => {
+    stubProviderEnv({ OPENROUTER_API_KEY: "sk-or-fresh-install" });
+    const { getSettings } = await loadModule();
+    const out = await getSettings();
+
+    expect(out.chatModel.provider).toBe("openrouter");
+    expect(out.utilityModel.provider).toBe("openrouter");
+    // Not the shipped OpenAI ids.
+    expect(out.chatModel.model).not.toBe("gpt-4o");
+  });
+
+  it("key pasted into the vault AFTER first boot is honoured on the next read", async () => {
+    // The common install order: boot → login → Settings → paste key. The file
+    // now exists and still carries the shipped model slots, so the merge path
+    // (not the no-file path) has to apply the overlay too.
+    await writeSettingsFile(
+      JSON.stringify({ providerApiKeys: { openrouter: "sk-or-pasted" } })
+    );
+    const { getSettings } = await loadModule();
+    const out = await getSettings();
+
+    expect(out.chatModel.provider).toBe("openrouter");
+    expect(out.utilityModel.provider).toBe("openrouter");
+  });
+
+  it("an OpenAI key anywhere leaves the shipped defaults exactly as they are", async () => {
+    stubProviderEnv({ OPENAI_API_KEY: "sk-openai", OPENROUTER_API_KEY: "sk-or" });
+    const { getSettings, DEFAULT_SETTINGS } = await loadModule();
+    const out = await getSettings();
+
+    expect(out.chatModel).toEqual(DEFAULT_SETTINGS.chatModel);
+    expect(out.utilityModel).toEqual(DEFAULT_SETTINGS.utilityModel);
+  });
+
+  it("an explicitly chosen chat model survives the overlay", async () => {
+    await writeSettingsFile(
+      JSON.stringify({
+        chatModel: { provider: "openai", model: "gpt-5.4" },
+        providerApiKeys: { openrouter: "sk-or" },
+      })
+    );
+    const { getSettings } = await loadModule();
+    const out = await getSettings();
+
+    expect(out.chatModel.provider).toBe("openai");
+    expect(out.chatModel.model).toBe("gpt-5.4");
+    expect(out.utilityModel.provider).toBe("openai");
+  });
+
+  it("a corrupt settings.json still yields a USABLE config, not just defaults", async () => {
+    // The fallback path used to hand back `openai/gpt-4o` verbatim — i.e. the
+    // recovery from a corrupt file was itself unusable for a non-OpenAI user.
+    stubProviderEnv({ ANTHROPIC_API_KEY: "sk-ant" });
+    await writeSettingsFile("}{ not json");
+    const { getSettings } = await loadModule();
+    const out = await getSettings();
+
+    expect(out.chatModel.provider).toBe("anthropic");
+  });
+
+  it("the overlay becomes the persisted choice on the first save, and stays put", async () => {
+    stubProviderEnv({ OPENROUTER_API_KEY: "sk-or" });
+    const { getSettings, saveSettings } = await loadModule();
+
+    await saveSettings({ general: { darkMode: true, language: "en" } });
+    const raw = JSON.parse(
+      await fs.readFile(path.join(tmpRoot, "data", "settings", "settings.json"), "utf-8")
+    );
+    expect(raw.chatModel.provider).toBe("openrouter");
+
+    // And once persisted it is an explicit choice: removing the credential
+    // does not drag it back to the OpenAI defaults.
+    stubProviderEnv();
+    const after = await getSettings();
+    expect(after.chatModel.provider).toBe("openrouter");
   });
 });
 

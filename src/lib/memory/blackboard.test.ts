@@ -24,7 +24,7 @@ vi.mock("ai", async () => {
 });
 
 vi.mock("@/lib/storage/project-store", () => ({
-  getWorkDir: vi.fn(),
+  getProjectMetaRoot: vi.fn(),
 }));
 
 vi.mock("@/lib/providers/llm-provider", () => ({
@@ -43,11 +43,11 @@ import {
   type BlackboardFact,
 } from "./blackboard";
 import { embed } from "ai";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectMetaRoot } from "@/lib/storage/project-store";
 import { getSettings } from "@/lib/storage/settings-store";
 
 const mockedEmbed = vi.mocked(embed);
-const mockedWorkDir = vi.mocked(getWorkDir);
+const mockedMetaRoot = vi.mocked(getProjectMetaRoot);
 const mockedSettings = vi.mocked(getSettings);
 
 let tmpRoot: string;
@@ -65,13 +65,13 @@ function fakeFact(overrides: Partial<BlackboardFact> = {}): BlackboardFact {
 
 beforeEach(async () => {
   tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "orchestra-bb-"));
-  mockedWorkDir.mockReturnValue(tmpRoot);
+  mockedMetaRoot.mockReturnValue(tmpRoot);
   mockedSettings.mockResolvedValue({
     embeddingsModel: { provider: "openai", model: "text-embedding-3-small" },
   } as any);
   vi.clearAllMocks();
   // Re-establish mock returns after clearAllMocks.
-  mockedWorkDir.mockReturnValue(tmpRoot);
+  mockedMetaRoot.mockReturnValue(tmpRoot);
   mockedSettings.mockResolvedValue({
     embeddingsModel: { provider: "openai", model: "text-embedding-3-small" },
   } as any);

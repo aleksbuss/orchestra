@@ -3,13 +3,13 @@
  * Orchestra. The full file is 1500+ lines; this suite covers four
  * tightly-scoped layers:
  *
- *   1. Path helpers (sync, pure-ish — `getWorkDir`, `getProjectSkillsDir`,
- *      `getProjectMcpDir`, etc.)
+ *   1. Path helpers (sync, pure-ish — `getProjectMetaRoot`,
+ *      `getProjectSkillsDir`, `getProjectMcpDir`, etc.)
  *   2. Skill-name validation (pure function, security-relevant)
  *   3. Project CRUD (`getAllProjects`, `getProject`, `createProject`,
  *      `updateProject`, `deleteProject`)
  *   4. File-tree readout (`getProjectFiles`) and the work-dir resolver
- *      (`resolveWorkDirForProject`).
+ *      (`getProjectContentRoot`).
  *
  * Skill mutations + MCP server config + GitHub install — these are
  * 600+ lines of separate logic and need their own follow-up suite.
@@ -101,35 +101,38 @@ function failMkdirAt(pathSuffix: string): () => void {
 // TIER 1 — path helpers
 // ────────────────────────────────────────────────────────────
 
-describe("getWorkDir — sync sandbox / global / linked-root resolver", () => {
+describe("getProjectMetaRoot — sync, Orchestra-owned root", () => {
   it("returns PROJECTS_DIR for null/undefined projectId (global)", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir(null)).toBe(projectsDir());
-    expect(m.getWorkDir(undefined)).toBe(projectsDir());
+    expect(m.getProjectMetaRoot(null)).toBe(projectsDir());
+    expect(m.getProjectMetaRoot(undefined)).toBe(projectsDir());
   });
 
   it("returns PROJECTS_DIR for the literal GLOBAL_PROJECT_ID 'none'", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("none")).toBe(projectsDir());
+    expect(m.getProjectMetaRoot("none")).toBe(projectsDir());
     expect(m.GLOBAL_PROJECT_ID).toBe("none");
   });
 
-  it("returns sandbox path for a real project id", async () => {
+  it("returns the sandbox path for a real project id", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("proj-1")).toBe(path.join(projectsDir(), "proj-1"));
-  });
-
-  it("absoluteRoot wins — returns it verbatim when provided (linked project)", async () => {
-    const m = await loadModule();
-    expect(m.getWorkDir("proj-1", "/Users/me/repos/foo")).toBe(
-      "/Users/me/repos/foo"
+    expect(m.getProjectMetaRoot("proj-1")).toBe(
+      path.join(projectsDir(), "proj-1")
     );
   });
 
-  it("ignores empty/whitespace absoluteRoot (falls back to sandbox)", async () => {
+  it("NEVER honors absoluteRoot — a linked project's meta stays in the sandbox", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("proj-1", "")).toBe(path.join(projectsDir(), "proj-1"));
-    expect(m.getWorkDir("proj-1", "   ")).toBe(path.join(projectsDir(), "proj-1"));
+    const linkedRoot = await realDir("meta-stays-put");
+    await m.createProject(
+      sampleProject("proj-linked", { absoluteRoot: linkedRoot })
+    );
+    // The whole point of the second name: Orchestra's own state must not be
+    // written into the user's repository.
+    expect(m.getProjectMetaRoot("proj-linked")).toBe(
+      path.join(projectsDir(), "proj-linked")
+    );
+    expect(await m.getProjectContentRoot("proj-linked")).toBe(linkedRoot);
   });
 });
 
@@ -158,11 +161,6 @@ describe("path helpers — derived per-project paths", () => {
     expect(m.getProjectMcpServersPath("p-1")).toBe(
       path.join(projectsDir(), "p-1", ".meta", "mcp", "servers.json")
     );
-  });
-
-  it("getProjectWorkDir is the sandbox path (NEVER honors absoluteRoot — that's getWorkDir's job)", async () => {
-    const m = await loadModule();
-    expect(m.getProjectWorkDir("p-1")).toBe(path.join(projectsDir(), "p-1"));
   });
 });
 
@@ -666,21 +664,21 @@ describe("getProjectFiles", () => {
 });
 
 // ────────────────────────────────────────────────────────────
-// TIER 4 — resolveWorkDirForProject
+// TIER 4 — getProjectContentRoot
 // ────────────────────────────────────────────────────────────
 
-describe("resolveWorkDirForProject — async sandbox/linked resolver", () => {
+describe("getProjectContentRoot — async sandbox/linked resolver", () => {
   it("returns PROJECTS_DIR for null/undefined/'none'", async () => {
     const m = await loadModule();
-    expect(await m.resolveWorkDirForProject(null)).toBe(projectsDir());
-    expect(await m.resolveWorkDirForProject(undefined)).toBe(projectsDir());
-    expect(await m.resolveWorkDirForProject("none")).toBe(projectsDir());
+    expect(await m.getProjectContentRoot(null)).toBe(projectsDir());
+    expect(await m.getProjectContentRoot(undefined)).toBe(projectsDir());
+    expect(await m.getProjectContentRoot("none")).toBe(projectsDir());
   });
 
   it("returns the SANDBOX path for a project without absoluteRoot", async () => {
     const m = await loadModule();
     await m.createProject(sampleProject("p-sand"));
-    expect(await m.resolveWorkDirForProject("p-sand")).toBe(
+    expect(await m.getProjectContentRoot("p-sand")).toBe(
       path.join(projectsDir(), "p-sand")
     );
   });
@@ -691,13 +689,13 @@ describe("resolveWorkDirForProject — async sandbox/linked resolver", () => {
     await m.createProject(
       sampleProject("p-linked", { absoluteRoot: linkedRoot })
     );
-    expect(await m.resolveWorkDirForProject("p-linked")).toBe(linkedRoot);
+    expect(await m.getProjectContentRoot("p-linked")).toBe(linkedRoot);
   });
 
   it("falls back to sandbox when getProject lookup fails (never throws)", async () => {
     const m = await loadModule();
     // Project does not exist — getProject returns null, fallback path used.
-    expect(await m.resolveWorkDirForProject("p-missing")).toBe(
+    expect(await m.getProjectContentRoot("p-missing")).toBe(
       path.join(projectsDir(), "p-missing")
     );
   });
@@ -808,7 +806,7 @@ describe("absoluteRoot is validated on every write path", () => {
 
     const updated = await m.updateProject("p-1", { absoluteRoot: linkedRoot });
     expect(updated?.absoluteRoot).toBe(linkedRoot);
-    expect(await m.resolveWorkDirForProject("p-1")).toBe(linkedRoot);
+    expect(await m.getProjectContentRoot("p-1")).toBe(linkedRoot);
   });
 
   it("an explicitly empty absoluteRoot UNLINKS the project back to its sandbox", async () => {
@@ -819,7 +817,7 @@ describe("absoluteRoot is validated on every write path", () => {
     await m.updateProject("p-1", { absoluteRoot: "" });
 
     expect((await m.getProject("p-1"))?.absoluteRoot).toBeUndefined();
-    expect(await m.resolveWorkDirForProject("p-1")).toBe(
+    expect(await m.getProjectContentRoot("p-1")).toBe(
       path.join(projectsDir(), "p-1")
     );
   });

@@ -33,7 +33,7 @@ import { NextRequest } from "next/server";
 import path from "path";
 import fs from "fs/promises";
 import archiver from "archiver";
-import { getProject, resolveWorkDirForProject } from "@/lib/storage/project-store";
+import { getProject, getProjectContentRoot } from "@/lib/storage/project-store";
 import { getAllChats, getChat } from "@/lib/storage/chat-store";
 import { assertPathInside } from "@/lib/storage/fs-utils";
 
@@ -91,7 +91,7 @@ export async function GET(
     return Response.json({ error: "Project not found." }, { status: 404 });
   }
 
-  const workDir = await resolveWorkDirForProject(projectId);
+  const workDir = await getProjectContentRoot(projectId);
 
   // Verify the work directory actually exists on disk before attempting to
   // stream it — surfaces a clean 404 instead of a half-empty ZIP.

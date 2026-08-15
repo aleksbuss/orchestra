@@ -23,12 +23,12 @@ vi.mock("@/lib/storage/project-store", async () => {
   );
   return {
     ...actual,
-    getWorkDir: vi.fn(),
+    getProjectContentRoot: vi.fn(),
   };
 });
 
 import { GET } from "./route";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 
 let tmpRoot: string;
 let workDir: string;
@@ -46,7 +46,7 @@ beforeEach(async () => {
 
   await fs.writeFile(path.join(workDir, "readme.txt"), "ok-to-download", "utf-8");
 
-  vi.mocked(getWorkDir).mockReturnValue(workDir);
+  vi.mocked(getProjectContentRoot).mockResolvedValue(workDir);
 });
 
 function downloadRequest(filePath: string): NextRequest {

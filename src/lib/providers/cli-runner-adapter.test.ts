@@ -16,7 +16,7 @@ import type { ModelConfig } from "@/lib/types";
 // see a mocked child_process.
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
 vi.mock("@/lib/storage/project-store", () => ({
-  getWorkDir: vi.fn(() => process.cwd()),
+  getProjectContentRoot: vi.fn(async () => process.cwd()),
   loadProjectMcpServers: vi.fn(async () => []),
 }));
 

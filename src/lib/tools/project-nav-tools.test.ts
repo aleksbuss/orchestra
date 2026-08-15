@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { AgentContext } from "@/lib/agent/types";
+import { resolveContextBaseDir, resolveContextCwd } from "@/lib/tools/tool-paths";
 
 /**
  * PM #105 — `get_current_project` is the agent's FIRST orientation step, and
@@ -12,17 +13,18 @@ import type { AgentContext } from "@/lib/agent/types";
  * data dir is touched (PM #100).
  */
 const getProjectMock = vi.fn();
-const getWorkDirMock = vi.fn();
+const getProjectMetaRootMock = vi.fn();
 
 vi.mock("@/lib/storage/project-store", () => ({
   getAllProjects: vi.fn(async () => []),
   createProject: vi.fn(),
   getProject: (...args: unknown[]) => getProjectMock(...args),
-  getWorkDir: (...args: unknown[]) => getWorkDirMock(...args),
+  getProjectMetaRoot: (...args: unknown[]) => getProjectMetaRootMock(...args),
 }));
 
 const SANDBOX_DIR = "/repo/data/projects/linked-proj";
 const LINKED_ROOT = "/Users/dev/real-repo";
+const GLOBAL_DIR = "/repo/data/projects";
 
 function ctx(over: Partial<AgentContext> = {}): AgentContext {
   return {
@@ -47,9 +49,9 @@ async function currentProject(context: AgentContext) {
 
 beforeEach(() => {
   getProjectMock.mockReset();
-  getWorkDirMock.mockReset();
+  getProjectMetaRootMock.mockReset();
   getProjectMock.mockResolvedValue({ id: "linked-proj", name: "Linked" });
-  getWorkDirMock.mockReturnValue(SANDBOX_DIR);
+  getProjectMetaRootMock.mockReturnValue(SANDBOX_DIR);
 });
 
 describe("get_current_project workDir reporting", () => {
@@ -59,14 +61,35 @@ describe("get_current_project workDir reporting", () => {
     expect(result.workDir).not.toBe(SANDBOX_DIR);
   });
 
-  it("falls back to getWorkDir(projectId) for sandbox projects with no resolved workDir", async () => {
+  it("falls back to the project META root for sandbox projects with no resolved workDir", async () => {
     const result = await currentProject(ctx({ workDir: undefined }));
     expect(result.workDir).toBe(SANDBOX_DIR);
-    expect(getWorkDirMock).toHaveBeenCalledWith("linked-proj");
+    expect(getProjectMetaRootMock).toHaveBeenCalledWith("linked-proj");
   });
 
   it("ignores a blank workDir rather than reporting an empty path", async () => {
     const result = await currentProject(ctx({ workDir: "   " }));
     expect(result.workDir).toBe(SANDBOX_DIR);
+  });
+
+  // The actual PM #105 defect was not a wrong constant — it was TWO resolvers.
+  // Pin that the reported path is byte-identical to the one the acting tools
+  // compute, in both the linked and the sandbox case.
+  it("reports exactly what resolveContextCwd would use as its base", async () => {
+    for (const workDir of [LINKED_ROOT, undefined, "   "]) {
+      const context = ctx({ workDir });
+      const result = await currentProject(context);
+      expect(result.workDir).toBe(resolveContextBaseDir(context));
+      expect(result.workDir).toBe(resolveContextCwd(context));
+    }
+  });
+
+  it("reports the GLOBAL sandbox root, not a bare undefined, with no project", async () => {
+    getProjectMetaRootMock.mockReturnValue(GLOBAL_DIR);
+    const result = await currentProject(
+      ctx({ projectId: undefined, workDir: undefined })
+    );
+    expect(result.isGlobal).toBe(true);
+    expect(result.workDir).toBe(GLOBAL_DIR);
   });
 });

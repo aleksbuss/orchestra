@@ -18,46 +18,63 @@ const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 /** ID used for "No Project (Global)" — work dir is data/projects */
 export const GLOBAL_PROJECT_ID = "none";
 
-/**
- * Resolve work directory for a project or global context.
+/*
+ * ─── Project roots: there are TWO, and they are deliberately two names ───
  *
- * - When `absoluteRoot` is provided (linked-project case): returns it as-is.
- *   This is how the Open Folder feature wires user-real-world repos through
- *   `getWorkDir` without changing every caller.
- * - When `projectId` is null/undefined or GLOBAL_PROJECT_ID ("none"): returns
- *   `data/projects/` (the global sandbox).
- * - Otherwise (sandbox project): returns `data/projects/<projectId>/`.
+ *   getProjectContentRoot(id)   async   Where the project's FILES live.
+ *                                       Linked project → its `absoluteRoot`.
+ *                                       Sandbox project → data/projects/<id>/.
  *
- * The function stays synchronous because most callers are sync. Async callers
- * that have only `projectId` and need to honor `absoluteRoot` should use
- * `resolveWorkDirForProject(projectId)` (below) which does the project lookup.
+ *   getProjectMetaRoot(id)      sync    Where ORCHESTRA's own per-project
+ *                                       state lives (.meta/, blackboard).
+ *                                       ALWAYS data/projects/<id>/ — never
+ *                                       the user's repository.
+ *
+ * PM #105 came from one name serving both meanings: `getWorkDir(projectId)`
+ * returned the sandbox, `getWorkDir(projectId, absoluteRoot)` returned the
+ * linked repo, and which one you got depended on whether the caller happened
+ * to have looked the project up. The tool that REPORTED the working directory
+ * got the sandbox while every tool that ACTED got the repo; the agent believed
+ * the report and answered from the wrong codebase.
+ *
+ * So: no single-name resolver, and no sync content root. Resolving content
+ * means reading project.json, and a cached sync accessor would hand out a
+ * stale root intermittently — a worse failure than the one being fixed
+ * (silent, non-reproducible, and it looks like a model error).
+ *
+ * A caller that cannot say which of the two it wants is the bug.
+ * `workdir-resolution-contract.test.ts` fails the build on new bare uses.
  */
-export function getWorkDir(
-  projectId?: string | null,
-  absoluteRoot?: string | null
-): string {
-  if (absoluteRoot && absoluteRoot.trim() !== "") return absoluteRoot;
+
+/**
+ * Orchestra-owned directory for a project: `data/projects/<id>/`, or
+ * `data/projects/` for the global context. Never honors `absoluteRoot` —
+ * Orchestra's internals do not get written into the user's repository.
+ */
+export function getProjectMetaRoot(projectId?: string | null): string {
   if (!projectId || projectId === GLOBAL_PROJECT_ID) return PROJECTS_DIR;
   return path.join(PROJECTS_DIR, projectId);
 }
 
 /**
- * Async helper: look up a project and return its effective work directory.
- * Used by the agent context builder when constructing `AgentContext.workDir`
- * so all downstream sync helpers (`resolveContextCwd` etc.) can read the
- * resolved path without re-doing the lookup per tool call.
+ * The project's content root — the directory whose FILES the project is
+ * about. For a linked project (Open Folder) that is the validated
+ * `absoluteRoot`; for a sandbox project it coincides with the meta root.
  *
- * Falls back to the sandbox path on any lookup failure — never throws.
+ * Async because it reads `project.json`. Falls back to the sandbox on any
+ * lookup failure — never throws, because every caller is on a request path
+ * where a thrown resolver would take down the turn.
  */
-export async function resolveWorkDirForProject(
+export async function getProjectContentRoot(
   projectId?: string | null
 ): Promise<string> {
   if (!projectId || projectId === GLOBAL_PROJECT_ID) return PROJECTS_DIR;
   try {
     const project = await getProject(projectId);
-    return getWorkDir(projectId, project?.absoluteRoot);
+    const linked = project?.absoluteRoot?.trim();
+    return linked || getProjectMetaRoot(projectId);
   } catch {
-    return getWorkDir(projectId);
+    return getProjectMetaRoot(projectId);
   }
 }
 
@@ -840,7 +857,7 @@ export async function getProjectFiles(
   projectId: string,
   subPath: string = ""
 ): Promise<{ name: string; type: "file" | "directory"; size: number }[]> {
-  const baseDir = getWorkDir(projectId);
+  const baseDir = await getProjectContentRoot(projectId);
   // PM #16 defense-in-depth — `path.join` normalizes `../` silently, so a
   // caller that forgot to validate `subPath` could escape the project
   // sandbox. Guard here too; route-layer validation is not assumed.
@@ -877,10 +894,6 @@ export async function getProjectFiles(
   } catch {
     return [];
   }
-}
-
-export function getProjectWorkDir(projectId: string): string {
-  return path.join(PROJECTS_DIR, projectId);
 }
 
 export { PROJECTS_DIR };

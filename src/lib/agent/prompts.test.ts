@@ -41,7 +41,7 @@ const {
   getProjectMock,
   loadProjectSkillsMetadataMock,
   getProjectFilesMock,
-  getWorkDirMock,
+  getProjectContentRootMock,
   getChatFilesMock,
   getActiveGoalMock,
   readFileMock,
@@ -49,7 +49,7 @@ const {
   getProjectMock: vi.fn(),
   loadProjectSkillsMetadataMock: vi.fn(),
   getProjectFilesMock: vi.fn(),
-  getWorkDirMock: vi.fn(),
+  getProjectContentRootMock: vi.fn(),
   getChatFilesMock: vi.fn(),
   getActiveGoalMock: vi.fn(),
   readFileMock: vi.fn(),
@@ -60,7 +60,8 @@ vi.mock("@/lib/storage/project-store", () => ({
   loadProjectSkillsMetadata: (...args: unknown[]) =>
     loadProjectSkillsMetadataMock(...args),
   getProjectFiles: (...args: unknown[]) => getProjectFilesMock(...args),
-  getWorkDir: (...args: unknown[]) => getWorkDirMock(...args),
+  getProjectContentRoot: (...args: unknown[]) =>
+    getProjectContentRootMock(...args),
 }));
 
 vi.mock("@/lib/storage/chat-files-store", () => ({
@@ -92,7 +93,7 @@ beforeEach(() => {
   getProjectMock.mockReset();
   loadProjectSkillsMetadataMock.mockReset();
   getProjectFilesMock.mockReset();
-  getWorkDirMock.mockReset().mockReturnValue("/tmp/proj");
+  getProjectContentRootMock.mockReset().mockResolvedValue("/tmp/proj");
   getChatFilesMock.mockReset();
   getActiveGoalMock.mockReset();
   readFileMock.mockReset();

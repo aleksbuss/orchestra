@@ -30,21 +30,21 @@ vi.mock("@/lib/realtime/event-bus", () => ({
   publishUiSyncEvent: vi.fn(),
 }));
 
-// `getWorkDir` is sync and returns a path under cwd. We override it per test
-// so we can plant the workdir + the sibling "evil" dir under a tmp root.
+// `getProjectContentRoot` reads project.json. We override it per test so we
+// can plant the workdir + the sibling "evil" dir under a tmp root.
 vi.mock("@/lib/storage/project-store", async () => {
   const actual = await vi.importActual<typeof import("@/lib/storage/project-store")>(
     "@/lib/storage/project-store"
   );
   return {
     ...actual,
-    getWorkDir: vi.fn(),
+    getProjectContentRoot: vi.fn(),
     getProjectFiles: vi.fn(async () => []),
   };
 });
 
 import { DELETE, GET } from "./route";
-import { getWorkDir, getProjectFiles } from "@/lib/storage/project-store";
+import { getProjectContentRoot, getProjectFiles } from "@/lib/storage/project-store";
 
 let tmpRoot: string;
 let workDir: string;
@@ -63,7 +63,7 @@ beforeEach(async () => {
   // Plant a benign file inside workDir so legit deletes still work.
   await fs.writeFile(path.join(workDir, "readme.txt"), "hello", "utf-8");
 
-  vi.mocked(getWorkDir).mockReturnValue(workDir);
+  vi.mocked(getProjectContentRoot).mockResolvedValue(workDir);
 });
 
 function deleteRequest(filePath: string): NextRequest {

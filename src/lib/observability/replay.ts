@@ -29,6 +29,7 @@
 import { classifyChatError } from "@/lib/observability/classify-error";
 import type { PostmortemFile } from "@/lib/observability/postmortem";
 import type { ChatErrorPayload } from "@/lib/realtime/types";
+import type { StreamStallKind } from "@/lib/observability/stream-stall";
 
 export interface ReplayResult {
   /** True iff the classifier today produces the same `kind` and
@@ -86,6 +87,23 @@ function reconstructErrorForReplay(pm: PostmortemFile): unknown {
       message: rawError.message,
     };
   }
+  // MUST precede the abort branch, mirroring `classifyChatError` (PM #98) —
+  // and for the same reason. A stall deliberately borrows the `AbortError`
+  // name, so reconstructing it from `name` + `message` alone produces something
+  // the classifier can only read as a user cancellation. Detection is
+  // STRUCTURAL: restore the marker or the round-trip cannot succeed (PM #102).
+  if (errorClassification.kind === "stream_stalled") {
+    const e = new Error(rawError.message) as Error & {
+      orchestraStreamStall: StreamStallKind;
+    };
+    e.name = rawError.name ?? "AbortError";
+    // Files dumped before the marker was persisted fall back to "ttft". Safe
+    // for this gate specifically: it compares `kind` + `recoverable`, and both
+    // stall variants agree on those two — only the user-facing hint differs.
+    e.orchestraStreamStall = rawError.orchestraStreamStall ?? "ttft";
+    return e;
+  }
+
   if (errorClassification.kind === "abort") {
     const e = new Error(rawError.message);
     e.name = "AbortError";

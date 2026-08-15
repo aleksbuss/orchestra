@@ -60,10 +60,30 @@ beforeEach(async () => {
 
 afterEach(async () => {
   cwdSpy?.mockRestore();
+  // Belt and braces for the shared-module spies above: any spy this file
+  // installed is undone even if a test bailed before its own restore.
+  vi.restoreAllMocks();
   await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
 const projectsDir = () => path.join(tmpRoot, "data", "projects");
+
+/**
+ * Make `fs.mkdir` throw for one path suffix, and hand back the restore.
+ *
+ * `fs` here is the SHARED `node:fs/promises` binding that every other module —
+ * and every other test file in this worker — calls through. A spy leaked by a
+ * failing assertion would break things far from this file and look like
+ * flakiness somewhere else entirely, so callers MUST restore in a `finally`.
+ */
+function failMkdirAt(pathSuffix: string): () => void {
+  const realMkdir = fs.mkdir.bind(fs);
+  const spy = vi.spyOn(fs, "mkdir").mockImplementation(async (target: any, opts: any) => {
+    if (String(target).endsWith(pathSuffix)) throw new Error("disk full");
+    return realMkdir(target, opts);
+  });
+  return () => spy.mockRestore();
+}
 
 // ────────────────────────────────────────────────────────────
 // TIER 1 — path helpers
@@ -230,6 +250,52 @@ describe("createProject", () => {
     ).toBe(true);
   });
 
+  // PM #104 — `project.json` is written LAST, so a create that throws part-way
+  // used to leave a directory `getAllProjects` skips forever: on disk, but not
+  // in the app. Six of those accumulated for real.
+  it("rolls back a directory IT created when the create fails part-way", async () => {
+    const m = await loadModule();
+    const projectDir = path.join(projectsDir(), "doomed");
+
+    // Fail after the project dir exists but before project.json is written.
+    const restore = failMkdirAt("knowledge");
+    try {
+      await expect(m.createProject(sampleProject("doomed"))).rejects.toThrow("disk full");
+    } finally {
+      restore();
+    }
+
+    await expect(
+      fs.stat(projectDir),
+      "the half-created directory must not survive as an invisible orphan"
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    // And the app agrees it does not exist.
+    m.__resetSkippedProjectDirReportForTests();
+    expect((await m.getAllProjects()).map((p) => p.id)).not.toContain("doomed");
+  });
+
+  it("does NOT delete a PRE-EXISTING directory when the create fails", async () => {
+    // The guard that keeps the rollback from turning a failed create into data
+    // loss: those files belong to someone else.
+    const m = await loadModule();
+    const projectDir = path.join(projectsDir(), "occupied");
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(path.join(projectDir, "precious.txt"), "do not delete me", "utf-8");
+
+    const restore = failMkdirAt("knowledge");
+    try {
+      await expect(m.createProject(sampleProject("occupied"))).rejects.toThrow("disk full");
+    } finally {
+      restore();
+    }
+
+    expect(
+      await fs.readFile(path.join(projectDir, "precious.txt"), "utf-8"),
+      "a pre-existing directory's contents must survive a failed create"
+    ).toBe("do not delete me");
+  });
+
   it("writes project.json with createdAt + updatedAt = now", async () => {
     const m = await loadModule();
     const before = Date.now();
@@ -335,8 +401,63 @@ describe("getProject / getAllProjects — read", () => {
     // Plant an orphan dir without metadata.
     await fs.mkdir(path.join(projectsDir(), "orphan"), { recursive: true });
 
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const list = await m.getAllProjects();
     expect(list.map((p) => p.id)).toEqual(["real"]);
+    warn.mockRestore();
+  });
+
+  // PM #104 — skipping is correct; skipping SILENTLY is how six orphaned
+  // directories accumulated unnoticed, one of them a real project.
+  it("getAllProjects NAMES the directories it skipped", async () => {
+    const m = await loadModule();
+    m.__resetSkippedProjectDirReportForTests();
+    await m.createProject(sampleProject("real"));
+    await fs.mkdir(path.join(projectsDir(), "ghost-a"), { recursive: true });
+    await fs.mkdir(path.join(projectsDir(), "ghost-b"), { recursive: true });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await m.getAllProjects();
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const message = String(warn.mock.calls[0][0]);
+    expect(message).toContain("ghost-a");
+    expect(message).toContain("ghost-b");
+    // The operator needs to know the files still exist — "skipped" alone reads
+    // like "ignored something empty".
+    expect(message).toMatch(/still on disk/i);
+    warn.mockRestore();
+  });
+
+  it("getAllProjects stays quiet on an unchanged skip set, and speaks up for a NEW one", async () => {
+    // Called on most dashboard interactions: warning every time would bury the
+    // message in its own noise. Warning on CHANGE keeps a new orphan loud.
+    const m = await loadModule();
+    m.__resetSkippedProjectDirReportForTests();
+    await fs.mkdir(path.join(projectsDir(), "ghost-a"), { recursive: true });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await m.getAllProjects();
+    await m.getAllProjects();
+    await m.getAllProjects();
+    expect(warn, "an unchanged skip set must not re-warn").toHaveBeenCalledTimes(1);
+
+    await fs.mkdir(path.join(projectsDir(), "ghost-b"), { recursive: true });
+    await m.getAllProjects();
+    expect(warn, "a newly orphaned directory must warn").toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[1][0])).toContain("ghost-b");
+    warn.mockRestore();
+  });
+
+  it("getAllProjects says nothing when there is nothing to skip", async () => {
+    const m = await loadModule();
+    m.__resetSkippedProjectDirReportForTests();
+    await m.createProject(sampleProject("real"));
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await m.getAllProjects();
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("getAllProjects skips schema-invalid metadata without crashing the whole list", async () => {

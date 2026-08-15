@@ -510,10 +510,44 @@ export async function loadProjectSkills(
   return skills;
 }
 
+/**
+ * The last set of skipped directory names we logged about.
+ *
+ * `getAllProjects` runs on most dashboard interactions, so warning on every
+ * call would bury the message in its own noise and train the operator to scroll
+ * past it. Warning only when the SET CHANGES keeps a newly-orphaned directory
+ * loud — which is the case that matters — while a known steady state stays
+ * quiet. Deliberately per-process and not persisted: a restart re-announcing
+ * the current state is a feature, not a bug.
+ */
+let lastReportedSkips = "";
+
+function reportSkippedProjectDirs(skipped: string[]): void {
+  const fingerprint = skipped.slice().sort().join(",");
+  if (fingerprint === lastReportedSkips) return;
+  lastReportedSkips = fingerprint;
+  if (skipped.length === 0) return;
+
+  console.warn(
+    `[project-store] ${skipped.length} director${skipped.length === 1 ? "y" : "ies"} under ` +
+      `data/projects/ ${skipped.length === 1 ? "has" : "have"} no readable .meta/project.json ` +
+      `and ${skipped.length === 1 ? "is" : "are"} invisible in the app: ${skipped.join(", ")}. ` +
+      `Their files are still on disk. Give one a .meta/project.json to bring it back, ` +
+      `or move it out of data/projects/.`
+  );
+}
+
+/** Test seam — the report is deduplicated per process, which a test must reset. */
+export function __resetSkippedProjectDirReportForTests(): void {
+  lastReportedSkips = "";
+}
+
 export async function getAllProjects(): Promise<Project[]> {
   await ensureDir(PROJECTS_DIR);
   const entries = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
   const projects: Project[] = [];
+
+  const skipped: string[] = [];
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -528,9 +562,16 @@ export async function getAllProjects(): Promise<Project[]> {
         console.warn(`[project-store] Project ${entry.name} metadata is corrupted:`, parseResult.error.message);
       }
     } catch {
-      // skip projects without metadata
+      // PM #104 — a directory without readable `.meta/project.json` is skipped,
+      // and skipping it SILENTLY is how six of them accumulated on disk while
+      // the app reported they did not exist. One of the six was a real project.
+      // The skip itself is right (there is nothing to show); saying nothing
+      // about it is not.
+      skipped.push(entry.name);
     }
   }
+
+  reportSkippedProjectDirs(skipped);
 
   return projects.sort(
     (a, b) =>
@@ -564,59 +605,82 @@ export async function createProject(
   };
 
   const projectDir = path.join(PROJECTS_DIR, project.id);
-  await ensureDir(projectDir);
-  await ensureDir(projectMetaDir(project.id));
-  await ensureDir(getProjectSkillsDir(project.id));
-  await ensureDir(path.join(projectMetaDir(project.id), "knowledge"));
-  await ensureDir(getProjectMcpDir(project.id));
 
-  const defaultMcpServers = {
-    mcpServers: {
-      "firecrawl-mcp": {
-        command: "npx",
-        args: ["-y", "firecrawl-mcp"],
-        env: {
-          FIRECRAWL_API_KEY: "",
-        },
-      },
-      "sendforsign-mcp": {
-        command: "npx",
-        args: ["-y", "@sendforsign/mcp"],
-        env: {
-          ORCHESTRA_API_KEY: "",
-          ORCHESTRA_CLIENT_KEY: "",
-        },
-      },
-      "sequential-thinking": {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
-      },
-      "sqlite-mcp": {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-sqlite"],
-        env: {
-          SQLITE_DB_PATH: path.join(projectMetaDir(project.id), "mcp", "project.db"),
-        },
-      },
-      "github-mcp": {
-        command: "npx",
-        args: ["-y", "@modelcontextprotocol/server-github"],
-        env: {
-          GITHUB_PERSONAL_ACCESS_TOKEN: "",
-        },
-      },
-    },
-  };
+  // PM #104 — `project.json` is written LAST, after all the scaffolding below,
+  // so anything that throws in between used to leave a directory that
+  // `getAllProjects` then skips forever: a project that exists on disk and not
+  // in the app. Roll the partial creation back instead.
+  //
+  // The rollback removes the directory ONLY if this call created it. If it was
+  // already there, it holds someone else's files and deleting it would turn a
+  // failed create into data loss — the opposite of the point.
+  const dirExistedBefore = await fs
+    .access(projectDir)
+    .then(() => true)
+    .catch(() => false);
 
-  await safeWriteFile(
-    getProjectMcpServersPath(project.id),
-    JSON.stringify(defaultMcpServers, null, 2)
-  );
+  try {
+    await ensureDir(projectDir);
+    await ensureDir(projectMetaDir(project.id));
+    await ensureDir(getProjectSkillsDir(project.id));
+    await ensureDir(path.join(projectMetaDir(project.id), "knowledge"));
+    await ensureDir(getProjectMcpDir(project.id));
 
-  await safeWriteFile(
-    projectMetaFile(project.id),
-    JSON.stringify(fullProject, null, 2)
-  );
+    const defaultMcpServers = {
+      mcpServers: {
+        "firecrawl-mcp": {
+          command: "npx",
+          args: ["-y", "firecrawl-mcp"],
+          env: {
+            FIRECRAWL_API_KEY: "",
+          },
+        },
+        "sendforsign-mcp": {
+          command: "npx",
+          args: ["-y", "@sendforsign/mcp"],
+          env: {
+            ORCHESTRA_API_KEY: "",
+            ORCHESTRA_CLIENT_KEY: "",
+          },
+        },
+        "sequential-thinking": {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        },
+        "sqlite-mcp": {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-sqlite"],
+          env: {
+            SQLITE_DB_PATH: path.join(projectMetaDir(project.id), "mcp", "project.db"),
+          },
+        },
+        "github-mcp": {
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-github"],
+          env: {
+            GITHUB_PERSONAL_ACCESS_TOKEN: "",
+          },
+        },
+      },
+    };
+
+    await safeWriteFile(
+      getProjectMcpServersPath(project.id),
+      JSON.stringify(defaultMcpServers, null, 2)
+    );
+
+    await safeWriteFile(
+      projectMetaFile(project.id),
+      JSON.stringify(fullProject, null, 2)
+    );
+  } catch (err) {
+    if (!dirExistedBefore) {
+      // Best-effort: a failed rollback must not replace the real error with its
+      // own. Worst case we are back to the old behaviour for this one call.
+      await fs.rm(projectDir, { recursive: true, force: true }).catch(() => {});
+    }
+    throw err;
+  }
 
   publishUiSyncEvent({
     topic: "projects",

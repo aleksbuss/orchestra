@@ -38,6 +38,19 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 102. The postmortem replay harness reported classifier drift that did not exist — it could not reconstruct the one error kind PM #98 had added
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P2 — an observability instrument, not a user path. It matters because the instrument's whole job is to be believed: eight false drifts is enough noise to hide a real one, and this gate is the only thing watching `classifyChatError` for regressions.
+**Symptoms:** `npm test` red on the operator's machine, one failure: *"every postmortem reclassifies to the same kind today (no classifier drift)"*, with 8 entries all reading `kind drift: original=stream_stalled, today=abort; recoverable drift: original=true, today=false`. Nothing about the classifier had changed.
+**Detection:** A full-suite run during unrelated work. Two properties made it invisible until then: the scan reads the LIVE `data/postmortems/` directory, which is gitignored, so **CI has an empty corpus and skips the test entirely** — this gate can only ever fail on a machine that has actually had incidents. And the eight files only exist because PM #98's watchdog started producing stalls.
+**Root Cause:** Stall detection is deliberately **structural** — `isStreamStall` duck-types on an `orchestraStreamStall` marker, precisely because `StreamStalledError` borrows the `AbortError` name so the AI SDK will not retry it. Both halves of the round-trip dropped that marker: `summarizeError` (`postmortem.ts`) serialized only `name` / `message` / `stack`, and `reconstructErrorForReplay` (`replay.ts`) had no `stream_stalled` branch at all, so it fell through to the generic path and rebuilt a bare `Error` named `AbortError`. `classifyChatError` then did exactly what it is supposed to do with that value and returned `abort`. **The classifier was right every time; the harness was lying.**
+**Resolution:** Persist the marker (`summarizeError` keeps `orchestraStreamStall` when `isStreamStall(err)`; the field is now part of the `rawError` type) and restore it on replay, in a `stream_stalled` branch placed **before** the abort branch — mirroring the ordering `classifyChatError` itself documents, for the same reason. Legacy files dumped before the marker existed fall back to `"ttft"`; sound for this gate specifically because it compares only `kind` + `recoverable`, and both stall variants agree on both.
+**Regression Coverage:** Three deterministic cases in [`replay.test.ts`](src/lib/observability/replay.test.ts) — marker persisted (both variants), legacy file without it, and a REAL cancellation that must still classify as `abort` (the negative control that keeps the other two honest) — plus two in [`postmortem.test.ts`](src/lib/observability/postmortem.test.ts) proving the dump preserves the marker and does not invent one for an ordinary error. Deterministic on purpose: the corpus scan cannot cover this in CI, where the corpus is empty. Mutation-verified: dropping the marker restoration fails all three replay cases.
+**Rule:** When a class is detected **structurally** rather than by `name`/`message`, every serialization boundary it crosses must carry the structural field — and a replay harness needs a branch per classifier branch, or it silently tests the fallback path instead. **And: a gate whose fixture is gitignored runtime data is green in CI for the wrong reason.** Before trusting one, ask what it does on an empty corpus.
+
+---
+
 ## 101. A fresh install shipped OpenAI model defaults, so an OpenRouter-only user got a working key and a chat that could not answer
 **Date:** 2026-08
 **Status:** RESOLVED

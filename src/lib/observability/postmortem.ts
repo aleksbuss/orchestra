@@ -27,6 +27,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppSettings } from "@/lib/types";
 import type { ChatErrorPayload } from "@/lib/realtime/types";
+import { isStreamStall, type StreamStallKind } from "@/lib/observability/stream-stall";
 import { assertPathInside, safeWriteFile } from "@/lib/storage/fs-utils";
 import { dataPath } from "@/lib/storage/data-dir";
 import {
@@ -107,7 +108,18 @@ export interface PostmortemFile {
   /** The raw error message + stack — these may contain secrets in cause
    *  chains, but they live behind the same gitignore that protects every
    *  user prompt; trade-off documented in the JSDoc above. */
-  rawError: { message: string; stack?: string; name?: string };
+  rawError: {
+    message: string;
+    stack?: string;
+    name?: string;
+    /**
+     * PM #98's stall marker, preserved because detection is STRUCTURAL: a stall
+     * borrows the `AbortError` name on purpose, so `name` + `message` cannot
+     * reconstruct it. Dropping it here made `replayPostmortem` reclassify every
+     * stall as a user cancellation and report false drift (PM #102).
+     */
+    orchestraStreamStall?: StreamStallKind;
+  };
   /** Up to MAX_LOG_ENTRIES recent log entries scoped to this trace id. */
   logs: LogEntry[];
   /** Snapshot of `data/chats/<chatId>.json` at failure time, or null if
@@ -206,11 +218,16 @@ async function readTraceLogs(
 
 function summarizeError(err: unknown): PostmortemFile["rawError"] {
   if (err instanceof Error) {
-    return {
+    const summary: PostmortemFile["rawError"] = {
       name: err.name,
       message: err.message,
       stack: err.stack,
     };
+    // Structural markers must survive serialization — see the field's JSDoc.
+    if (isStreamStall(err)) {
+      summary.orchestraStreamStall = err.orchestraStreamStall;
+    }
+    return summary;
   }
   return { message: typeof err === "string" ? err : JSON.stringify(err) };
 }

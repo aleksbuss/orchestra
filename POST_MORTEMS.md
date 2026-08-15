@@ -38,6 +38,20 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 105. The agent's own orientation tool told it the wrong working directory, so on a linked project it answered from a different repository
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1 — every "Open Folder" (linked) project was affected on the very first tool call of every turn, and the failure produces a confident, well-formatted answer about the wrong source tree.
+**Symptoms:** A linked project pointing at a real repo on disk (`absoluteRoot`). The agent opens the turn with `get_current_project`, is told `workDir: data/projects/<id>/`, runs `cd <that path>`, finds an empty scaffold (`.meta/` and nothing else), and improvises. In the run that surfaced this it walked UP out of the scaffold into Orchestra's own checkout and answered the user's question about a **different repository** — with correct `file:line` citations, which is what makes it dangerous.
+**Detection:** A live A/B run (`scripts/run-real-task.ts`) comparing the `graphify` skill against a grep baseline on a linked project. The skill probe reported the binary present and the index missing; the index was missing because the agent was standing in the wrong directory. The proof is in the chat's stored `toolCalls`: `cd /Users/…/data/projects/graphify-eval && pwd && ls -la`, a path the agent could only have taken from the tool's own output. **No test could have found it** — the reported value was internally consistent, just not the one the other tools use.
+**Root Cause:** Two resolvers for one concept. `agent.ts` builds `AgentContext.workDir` via `resolveWorkDirForProject`, which honors `absoluteRoot`; every tool that ACTS on the filesystem goes through `resolveContextCwd`, which prefers that pre-resolved value. The tool that REPORTS the working directory — `get_current_project` in `src/lib/tools/project-nav-tools.ts` — called the sync `getWorkDir(context.projectId)` with no `absoluteRoot` argument, so it returned the sandbox path. Reporting and acting disagreed, and the model believes the report.
+**Resolution:** `get_current_project` now uses the same precedence as `resolveContextCwd` — `context.workDir?.trim() || getWorkDir(context.projectId)` — so a linked project reports its real root and a sandbox project is unchanged.
+**Regression Coverage:** Three cases in [`project-nav-tools.test.ts`](src/lib/tools/project-nav-tools.test.ts) (linked root reported, sandbox fallback, blank-`workDir` fallback), mutation-verified: restoring the old expression turns the first one red and leaves the other two green.
+**Doc Updates:** [`docs/references/tools-and-skills.md`](docs/references/tools-and-skills.md) — a reporting tool must resolve through the same helper as the tools that act.
+**Rule:** When a tool's job is to TELL the model where it is, it must compute that answer with the exact resolver the acting tools use. A second code path that "does the same thing" for a report is a divergence waiting for a special case — here, one optional argument — and the model has no way to notice the report is wrong.
+
+---
+
 ## 104. Six project directories existed on disk and not in the app, because a create writes its metadata last and the reader skips what it cannot parse — both silently
 **Date:** 2026-08
 **Status:** RESOLVED (code); the six directories themselves were quarantined by hand, see below

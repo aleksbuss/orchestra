@@ -49,6 +49,7 @@ Full contract text, per-PM rationale, historical decisions, shipped-track narrat
 | Changing `moa.ts`, proposers, Router/DPG, aggregator, Skeptic, deep-memory recall, free-tier failover | [`docs/references/moa-swarm-contracts.md`](docs/references/moa-swarm-contracts.md) | Every MoA contract: DPG, `forceSwarm`, inline-synthesis collapse, proposer grounding/pacing/breaker, degradation policy, PM #77/#85/#90/#91/#94 |
 | Tool loop guard, a model that 404s on tools, a RAG loader, `computeNextRunAtMs` | [`docs/references/agent-runtime-contracts.md`](docs/references/agent-runtime-contracts.md) | Loop-guard contract, `NO_TOOL_PATTERNS`, UTF-8 loader invariant, cron `every` tick semantics |
 | Adding a capability, touching a write tool, MCP, completion-honesty or hallucinated-tool-call recovery | [`docs/references/tools-and-skills.md`](docs/references/tools-and-skills.md) | Tool-vs-Skill decision tree, write-grounding (PM #80/#83), completion honesty (PM #84), printed-markup recovery (PM #81), MCP untrusted boundary (PM #27) |
+| Wrapping an external CLI for the agent, or reaching for `child_process.exec` in a tool | [`docs/references/graphify-integration-adr.md`](docs/references/graphify-integration-adr.md) | Tool-vs-skill-vs-MCP decision + the 7 defects of the naive `exec` sketch + the safe `execFile` shape |
 | SSE, `useBackgroundSync`, any `generate*`/`stream*`/`embed*` callsite | [`docs/references/realtime-and-abort-contracts.md`](docs/references/realtime-and-abort-contracts.md) | Frontend resilience contract (PM #5), full AbortSignal propagation contract (PM #1/#23) |
 | A chat is stuck, a chat vanished from the sidebar, reconstructing a run | [`docs/references/observability-runbook.md`](docs/references/observability-runbook.md) | `/api/_debug/chat/<id>` one-shot, manual fallback steps, chat-index integrity |
 | New API route, user-supplied path or URL, Privacy Mode, auth, escape hatches | [`docs/references/security-patterns.md`](docs/references/security-patterns.md) | Path guard, SSRF policy, SSR leak (PM #15), Privacy-Mode air-gap (PM #47/#58), audited-route checklist, every env escape hatch |
@@ -242,6 +243,7 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | MoA / swarm / proposers / Skeptic / failover | `docs/references/moa-swarm-contracts.md` |
 | Loop guard / tool capability / loaders / cron | `docs/references/agent-runtime-contracts.md` |
 | Tools vs Skills / write grounding / MCP | `docs/references/tools-and-skills.md` |
+| Wrapping an external CLI / `exec` in a tool | `docs/references/graphify-integration-adr.md` |
 | SSE / AbortSignal | `docs/references/realtime-and-abort-contracts.md` |
 | Stuck chat / missing chat / forensics | `docs/references/observability-runbook.md` |
 | Paths / SSRF / Privacy Mode / auth / env hatches | `docs/references/security-patterns.md` |

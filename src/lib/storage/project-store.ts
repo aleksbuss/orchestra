@@ -9,7 +9,7 @@ import {
 import { deleteChatsByProjectId } from "@/lib/storage/chat-store";
 import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { assertPathInside, safeWriteFile, withFileLock } from "./fs-utils";
+import { assertPathInsideRealpath, safeWriteFile, withFileLock } from "./fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
 
 const DATA_DIR = getDataDir();
@@ -63,6 +63,80 @@ export async function resolveWorkDirForProject(
 
 export async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
+}
+
+/**
+ * Thrown when an operator-supplied `absoluteRoot` is not a linkable directory.
+ * Routes map it to a 400; every other failure keeps its existing status.
+ */
+export class InvalidProjectRootError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidProjectRootError";
+  }
+}
+
+/**
+ * Validate and canonicalize an operator-supplied `absoluteRoot` before it is
+ * persisted. Until this existed, `PUT /api/projects/<id>` spread the request
+ * body straight into `updateProject`, so ANY string became a project's
+ * filesystem root — including one that does not exist, a regular file, or the
+ * data directory itself.
+ *
+ * Rejects:
+ *   - relative paths (a relative root resolves against `process.cwd()`, which
+ *     differs between `next dev`, a cron tick and a test run);
+ *   - paths that don't exist or aren't directories (the agent would `cd` into
+ *     nothing and improvise — that is PM #105's failure shape);
+ *   - the data directory or any ancestor of it. `data/settings/*.json` holds
+ *     provider API keys, and the Files API lists + downloads anything under a
+ *     project's content root — a root of `/` would publish the vault.
+ *
+ * Returns the REALPATH, not the input. Every guard on the linked surface
+ * (`assertPathInsideRealpath`) compares against the realpath'd root, so
+ * storing the realpath keeps the value the operator sees, the value we store,
+ * and the guard's baseline the same string. On macOS this means a link to
+ * `/tmp/x` is stored as `/private/tmp/x`.
+ */
+export async function validateAbsoluteRoot(raw: string): Promise<string> {
+  const candidate = raw.trim();
+  if (!candidate) {
+    throw new InvalidProjectRootError("absoluteRoot must not be empty");
+  }
+  if (!path.isAbsolute(candidate)) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot must be an absolute path (got "${candidate}")`
+    );
+  }
+
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(path.resolve(candidate));
+  } catch {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" does not exist`
+    );
+  }
+
+  const stat = await fs.stat(realRoot);
+  if (!stat.isDirectory()) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" is not a directory`
+    );
+  }
+
+  // The data dir may not exist yet on a fresh install — fall back to the
+  // string form rather than letting a missing dir skip the check.
+  const realDataDir = await fs
+    .realpath(path.resolve(DATA_DIR))
+    .catch(() => path.resolve(DATA_DIR));
+  if (realRoot === realDataDir || realDataDir.startsWith(realRoot + path.sep)) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" contains Orchestra's data directory`
+    );
+  }
+
+  return realRoot;
 }
 
 function projectMetaDir(projectId: string) {
@@ -598,8 +672,12 @@ export async function createProject(
   project: Omit<Project, "createdAt" | "updatedAt">
 ): Promise<Project> {
   const now = new Date().toISOString();
+  const linkedRoot = project.absoluteRoot?.trim();
   const fullProject: Project = {
     ...project,
+    // Validated at the library layer, not only at the route, so a script or a
+    // future caller cannot write an unchecked root behind the API's back.
+    absoluteRoot: linkedRoot ? await validateAbsoluteRoot(linkedRoot) : undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -696,13 +774,27 @@ export async function updateProject(
   updates: Partial<Project>
 ): Promise<Project | null> {
   const filePath = projectMetaFile(projectId);
+
+  // Validate BEFORE taking the lock: an invalid root must fail without
+  // touching project.json. An explicitly falsy `absoluteRoot` in the patch
+  // means "unlink" — the key is dropped and the project reverts to its
+  // sandbox. `JSON.stringify` omits the undefined value on write.
+  let patch = updates;
+  if ("absoluteRoot" in updates) {
+    const raw = updates.absoluteRoot?.trim();
+    patch = {
+      ...updates,
+      absoluteRoot: raw ? await validateAbsoluteRoot(raw) : undefined,
+    };
+  }
+
   return await withFileLock(filePath, async () => {
     const existing = await getProject(projectId);
     if (!existing) return null;
 
     const updated: Project = {
       ...existing,
-      ...updates,
+      ...patch,
       id: existing.id, // don't allow ID change
       updatedAt: new Date().toISOString(),
     };
@@ -752,10 +844,12 @@ export async function getProjectFiles(
   // PM #16 defense-in-depth — `path.join` normalizes `../` silently, so a
   // caller that forgot to validate `subPath` could escape the project
   // sandbox. Guard here too; route-layer validation is not assumed.
+  // PM #105 — realpath variant, because `baseDir` can be a linked project's
+  // real repository root, symlinks and all.
   let targetDir = baseDir;
   if (subPath) {
     try {
-      targetDir = assertPathInside(baseDir, subPath);
+      targetDir = await assertPathInsideRealpath(baseDir, subPath);
     } catch {
       return [];
     }

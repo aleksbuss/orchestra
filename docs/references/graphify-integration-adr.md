@@ -141,6 +141,28 @@ The strings "not connected" and "unconnected" do not appear. It cited `[EXTRACTE
 
 **The honest cost line:** on this project the skill was **1.8× slower** (174.8s vs 98.1s) and spent 12 subprocess calls to reach an answer the baseline already had. Run B's answer is *better reasoned* about static-vs-dynamic coupling; it is not *more correct*. Nothing here demonstrates value at 16 files — the case for the graph has to be made on a codebase where reading everything is not an option, and that has not been measured.
 
+## The big-codebase measurement (2026-08-15) — the value case is still NOT made, and the reason is invocation
+
+The 16-file run above closed with "the case for the graph has to be made on a codebase where reading everything is not an option." That measurement has now been run and **it did not make the case.** Recording it here so nobody re-runs it expecting a different answer without changing the setup.
+
+**Setup.** A linked project (`absoluteRoot`) pointing at a 336-file, 5.2 MB copy of this repository's `src/` + `scripts/` with tests excluded. Index: `graphify .` → 2652 nodes / 6521 edges / 186 communities in 20.5s, plus `graphify cluster-only .` in 11.9s. The extract billed **$0.0146** for the 30 non-code files it found — the documented doc-pass behaviour, which the agent never pays because `scrubProcessEnv` leaves it on the free AST path. Same question in every run (trace the path from the chat HTTP route to the actual provider call, with `file:line`), swarm forced, `~deepseek/deepseek-v4-flash-latest`. Trace memory and project memory were cleared between runs — the first attempt was contaminated by `.orchestra_traces` handing run 2 run 1's finished answer.
+
+| Run | Prompt | Skill | Wall | Cost | Prompt tok | `code_execution` | graphify queries | `file:line` cites (resolve) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A | neutral | not installed | 365.4s | $0.0153 | 676k | 13 | — | 12 (12) |
+| A′ | neutral | not installed | 334.8s | $0.0283 | 1211k | 18 | — | 11 (10) |
+| B | neutral | installed | 326.3s | $0.0112 | 403k | 7 | **0** | 18 (14) |
+| C | names the skill | installed | 225.5s | $0.0136 | 478k | 9 | **4** | 37 (37) |
+| C′ | names the skill | installed | 198.3s | $0.0144 | 596k | 17 | **0** | 49 (38) |
+
+Primary evidence on disk, project `graphify-eval`: chats `realrun-graphify-eval-9a15fde4` (A), `-541065c9` (A′), `-40f3d77e` (B), `-2c2e78d3` (C), `-bd182cd1` (C′). Two earlier runs (`-e9d1bc9b`, `-58aa89ae`) are kept but **discarded from the table**: they predate the PM #105 fix, so both answered from the wrong repository, and the second one read the first one's answer out of `.orchestra_traces`.
+
+**The finding is about invocation, not about the graph.** With the skill installed, the index present and the binary on `PATH`, the agent queried the graph in **one run out of three**. In B it loaded the skill, ran the `--version` probe, and then explored with `find`/`grep`. In C′ the user *named the skill in the prompt* and it still never issued a query. Selection into the skill is not the problem — `load_skill` fired every time; the gap is between loading it and using it.
+
+**No speed or quality claim survives this table.** C (4 queries) was fast with exact citations, which is what the skill promises — but C′ was **faster still with no queries at all**, so the spread is prompt- and variance-driven, not graph-driven. An earlier draft of `SKILL.md` cited "226s vs 365s" as measured evidence for the graph; the replicate refuted it and the claim was removed. n=2 per arm on a stochastic pipeline: treat every number here as a range, not a result.
+
+**What the exercise actually produced** was PM #105 — `get_current_project` reported the sandbox path for a linked project, the agent obeyed it, `cd`-ed out of the repository and answered from a different codebase. Driving the real agent found a defect no test had; the value question about the graph itself remains open.
+
 ## Consequences
 
 - Graphify is unavailable to untrusted triggers. Intentional; see the escalation path in option A.

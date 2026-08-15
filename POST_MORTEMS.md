@@ -38,6 +38,25 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 104. Six project directories existed on disk and not in the app, because a create writes its metadata last and the reader skips what it cannot parse — both silently
+**Date:** 2026-08
+**Status:** RESOLVED (code); the six directories themselves were quarantined by hand, see below
+**Severity:** P2 — no corruption and no loss, but one of the six was a real project the owner cared about, invisible for two months, and the condition was found by manual inspection rather than by anything the system said.
+**Symptoms:** `data/projects/` held 13 directories; the app listed 7. The other six had files on disk and no presence in the UI, no warning, no log line. Among them: `bughunt`, a real Telegram Mini App (Phaser game + Cloudflare Workers API), and `test-2`, holding an `autoresearch-mlx` experiment with a `results.tsv` of real measurements.
+**Detection:** Counting directories by hand while deciding what was left before the project could be left alone. Nothing in the system reports this state.
+**Root Cause:** Two silent behaviours composing.
+- `createProject` writes `.meta/project.json` **last**, after `ensureDir` on the project dir, `.meta`, `.meta/skills`, `.meta/knowledge`, `.meta/mcp` and after the MCP servers file — with no `try`/`catch` and no rollback. Anything that throws in between leaves a directory that looks like a project and is missing the one file that makes it one.
+- `getAllProjects` reads `.meta/project.json` inside a `try` whose `catch` was an empty block with the comment `// skip projects without metadata`. Skipping is correct — there is nothing to display. Saying nothing about it is not.
+Neither half is wrong alone. Together they mean the system can lose sight of a project and never mention it.
+**What the evidence did NOT support:** the first hypothesis was an in-app delete that dropped metadata and kept files. **Refuted by reading the code** — `deleteProject` does `fs.rm(projectDir, { recursive: true, force: true })` *and* removes `data/memory/<id>` *and* the project's chats, so a completed delete leaves nothing behind. Three of four reviewers on an external panel independently flagged "read the delete path" as the unasked question; it was, and the answer removed the scariest hypothesis rather than confirming it. The four `.meta`-bearing orphans also predate the repository itself (initial commit 2026-05-18; `test-2/.meta/skills` is dated 2026-05-01), and a bulk event on 2026-06-07 00:10 touched exactly 14 paths under `data/`. So the mechanism above is what the code *makes possible*; it is not established as what happened to these particular six.
+**Resolution:** `createProject` wraps the scaffolding in a `try`/`catch` that removes the directory on failure and rethrows — **only if that call created it**, so a failed create over a pre-existing directory can never become data loss. `getAllProjects` collects the names it skipped and warns once per changed set (it runs on most dashboard interactions; warning every call would bury the message in its own noise, and warning on change keeps a NEW orphan loud).
+**Regression Coverage:** Five cases in [`project-store.test.ts`](src/lib/storage/project-store.test.ts), mutation-verified: silencing the report kills the two warning tests; making the rollback unconditional kills the pre-existing-directory guard; removing the rollback kills the rollback test.
+**Data disposition (manual, operator-approved):** `bughunt` got a reconstructed `project.json` and is visible again — verified through `getAllProjects()` itself, 7 → 8. The other five were **moved, not deleted**, to `data/_orphans_2026-08-15/` with a README recording provenance, sizes, dates and this analysis.
+**One approved step was NOT executed, and that is the useful part.** The plan included deleting `test-2/login-page/node_modules` (252 MB — essentially all of `test-2`) as "regenerable noise", a premise both I and the external panel accepted. Checking before deleting refuted it: `login-page/` has **no `package.json` and no lockfile**, and its `.git` is a hollow shell (`objects/`, `refs/`, `logs/` but no `HEAD`, no `config` — git does not recognise it). Those 288 installed packages are the only surviving record of that dependency tree, so nothing was deleted.
+**Rule:** Write the file that makes a directory *legible* FIRST, or roll the whole thing back — a create whose last step is the identity file has a window where it produces something the reader will ignore forever. And **an empty `catch` next to a `continue` is a decision to hide a state**: if the state is one a human would want to know about, name it. **Corollary from the node_modules step: "regenerable" is a claim about a manifest you have not opened yet.** Verify it against the actual directory before deleting on the strength of it.
+
+---
+
 ## 103. Nothing ever booted Orchestra from an empty directory, because the e2e suite seeds the very thing a fresh install is missing
 **Date:** 2026-08
 **Status:** RESOLVED

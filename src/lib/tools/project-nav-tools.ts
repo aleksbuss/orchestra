@@ -77,7 +77,12 @@ export function createProjectNavTools(context: AgentContext): ToolSet {
         projectId: context.projectId,
         projectName: project?.name ?? null,
         currentPath: normalizeContextPathForOutput(context.currentPath),
-        workDir: getWorkDir(context.projectId),
+        // Same precedence as `resolveContextCwd`: the pre-resolved
+        // `context.workDir` wins because it honors a linked project's
+        // `absoluteRoot`. Reporting the raw `getWorkDir(projectId)` sandbox
+        // path here sends the agent `cd`-ing into an empty `data/projects/<id>/`
+        // while its tools actually run in the linked repo (PM #105).
+        workDir: context.workDir?.trim() || getWorkDir(context.projectId),
       };
     },
   });

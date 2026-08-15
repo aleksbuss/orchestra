@@ -216,6 +216,7 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | [`llm-provider.headers-timeout.test.ts`](src/lib/providers/llm-provider.headers-timeout.test.ts) | Every provider factory in `llm-provider.ts` passes a bounded `fetch` (PM #98) |
 | [`call-deadline-contract.test.ts`](src/lib/agent/call-deadline-contract.test.ts) | Every `generate*`/`stream*` call under `src/lib/agent` carries a TIME BOUND, not just an `abortSignal` (PM #98) |
 | [`key-resolution-contract.test.ts`](src/lib/agent/key-resolution-contract.test.ts) | No `createModel(settings.<slot>)` anywhere under `src/lib` + `src/app` — the vault-key defect class (PM #99) |
+| [`clean-boot.spec.ts`](tests/e2e/clean-boot.spec.ts) (Playwright `clean-boot` project) | A fresh install boots from an EMPTY data dir, admin/admin gets in, the dashboard renders error-free, and the model slots resolve to a credentialed provider (PM #101/#103). Runs against its own unseeded server — never add seeding to `.e2e-clean-data` |
 
 ---
 

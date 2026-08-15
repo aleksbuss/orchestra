@@ -63,6 +63,13 @@ Rules:
 
 ## Step 3 — query
 
+**Once the probe passes and an index exists, your first navigation action is a query — not `find`, not
+`grep`, not a full file tree.** The observed failure mode is not a bad query, it is no query at all:
+across five live runs on a 336-file indexed repository, the agent loaded this skill, ran `graphify
+--version`, and then explored with `find`/`grep` anyway in every run but one — including runs where the
+user named the skill explicitly. Confirming the index and then grepping spends the setup and throws the
+payoff away.
+
 ```bash
 graphify query "auth"                    # broad: a scoped subgraph around matching nodes
 graphify explain "authMiddleware"        # focused: one node and its neighbours

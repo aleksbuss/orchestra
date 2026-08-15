@@ -58,6 +58,12 @@ __pycache__/
 .e2e-data/
 # E2E isolated backup dir (PM #78 — never the real data-backups/)
 .e2e-data-backups/
+# Clean-boot server (PM #103): its own empty data dir, backup dir, and Next
+# build dir — two `next dev` processes cannot share `.next/`.
+.e2e-clean-data/
+.e2e-clean-data-backups/
+/.next-clean-boot/
+.e2e-clean-boot-manifest.json
 scratch.ts
 /scratch/
 playwright-report/

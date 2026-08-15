@@ -13,6 +13,11 @@ const eslintConfig = [
   {
     ignores: [
       ".next/**",
+      // The clean-boot e2e server's Next build dir (PM #103). Same generated
+      // output as `.next/**` above, different name because two `next dev`
+      // processes cannot share one build dir — and a name the `.next/**` glob
+      // does not match, which floods the gate with 176 generated-code errors.
+      ".next-clean-boot/**",
       "node_modules/**",
       "data/**",
       // Local-only data backups (gitignored). Contain copies of user PROJECT

@@ -68,6 +68,31 @@ If you are here to evaluate the engineering rather than the marketing, that docu
 
 ---
 
+## 🔍 How the defects that mattered were actually found
+
+The badges above count the tests and the post-mortems. Here is the uncomfortable part: **the tests did not find the serious ones.**
+
+Below are the ten most instructive entries — chosen as the highest-severity ones plus every case whose *discovery method* taught something. **Exactly one was surfaced by a failing assertion**, and even that one is a scan CI skips. The rest came from running the thing, reading the code, or asking what nothing covered. (#100 was noticed *during* a test run, but by watching directory timestamps move — no assertion failed.)
+
+| # | What was wrong | How it actually surfaced | What stops a repeat |
+|---|---|---|---|
+| **99** | `P0` A key saved in the API Keys Vault never reached the agent. Every fresh install was 100% dead. | A cold install on a second machine. **Unreproducible on a dev box** — `.env.local` silently covers for the broken vault lookup. | [`key-resolution-contract.test.ts`](src/lib/agent/key-resolution-contract.test.ts) — no `createModel(settings.<slot>)` anywhere |
+| **92** | `P1`, latent `P0` Untrusted Telegram triggers inherited RCE-class tools: prompt injection → code execution on the operator's machine. | Architecture review plus a cross-model second opinion on the trust boundary; confirmed by grep. | [`untrusted-trigger-contract.test.ts`](src/lib/agent/untrusted-trigger-contract.test.ts) — the flag is forwarded at every delegation hop |
+| **98** | `P1` Free Mode picked a tool-incapable model and the stream had no time bound. A simple question hung for seven minutes: no answer, no error. | Live, by the operator. The free-tier measurement that "passed" had exercised a different code path. | [`call-deadline-contract.test.ts`](src/lib/agent/call-deadline-contract.test.ts) — every agent call carries a time bound, not just a signal |
+| **100** | `P1` `npm test` wrote to the live database. Three separate layers of "isolation" were fake. | Directory mtimes moving during a run. **Three successive greps all undercounted**; only `touch marker && npm test && find data -newer marker` found them all. | Per-file `ORCHESTRA_DATA_DIR` redirects, each **asserted** — silent isolation must not be trusted |
+| **101** | `P1` Shipped model defaults named OpenAI, so anyone installing with only an OpenRouter key got a working key and a chat that could not answer. | Reading `DEFAULT_SETTINGS` during a wrap-up audit. No user had reported it yet. | [`fresh-install-defaults.test.ts`](src/lib/storage/fresh-install-defaults.test.ts) + the clean-boot e2e below |
+| **95** | `P1` An unbounded 82K-token memory injection mode-collapsed the model: it narrated instead of writing the file, and returned `200`. | Per-step telemetry. The very first line showed the recall block eating 82,711 of a 114,053-token prompt. | A window-relative recall budget, capped per chunk and in total |
+| **80** | `P1` A capable model looped rewriting one file forever, because the write tool returned `{success, bytes}` and no grounding signal. | On-disk forensics of the stuck chat JSON — explicitly not a test. | Write tools report the outcome the **model** needs, not just that the I/O landed |
+| **103** | `P2` Nothing had ever booted the app from an empty directory: the e2e setup seeds the developer's own config, so it measured something different on CI than on a laptop. | Asking what the suite actually covers. It is the reason #99 and #101 both reached a real machine. | [`clean-boot.spec.ts`](tests/e2e/clean-boot.spec.ts) — a second server on a genuinely empty data dir, in CI |
+| **104** | `P2` Six project directories existed on disk and not in the app. One was a real project, invisible for two months. | Counting directories by hand. Nothing in the system reported it. | A create that rolls back, and a reader that names what it skipped |
+| **102** | `P2` The post-mortem replay harness reported classifier drift that did not exist — the classifier was right, the harness was lying. | A full-suite run — **the one entry a test surfaced**, and only on a machine with real incident data. Its corpus is gitignored, so CI skips it. | Deterministic fixtures instead of a corpus CI never sees |
+
+**What the suite is actually for.** It is the regression net, not the discovery instrument — every row above ends in a guard that lives in it, and those guards hold. But a green suite is evidence that known failures stay fixed, not that the thing works. The methods that found new problems were: install it cold on a machine that has nothing, run it and read what it wrote to disk, instrument before theorising, get a second opinion from a model that has not been agreeing with you all session, and **mutate the fix to prove the test would have caught it** — which is how every guard listed above was verified, including two that turned out to assert nothing until they were rewritten.
+
+If you only look at one thing here, make it [`POST_MORTEMS.md`](./POST_MORTEMS.md). Each entry carries root cause, what was rejected and why, and the regression that pins it.
+
+---
+
 ## 🎯 The MoA Pipeline
 
 Every Swarm-mode turn flows through this pipeline. The key thing to understand: the ensemble's output is **never the terminal answer** — every path converges on **one final tool-capable stream** (the same `streamText` a non-swarm turn uses), which produces the response, streams it, and can call tools. By default the swarm's synthesis happens **inside** that stream (the "inline-synthesis collapse" — one brain generation per turn); the standalone aggregator only runs on the opt-in paths.

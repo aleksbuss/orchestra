@@ -3,6 +3,7 @@ import {
   getProject,
   updateProject,
   deleteProject,
+  InvalidProjectRootError,
 } from "@/lib/storage/project-store";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 
@@ -24,7 +25,19 @@ export async function PUT(
 ) {
   const { id } = await params;
   const body = await req.json();
-  const updated = await updateProject(id, body);
+
+  // The body is spread into the stored project, so `absoluteRoot` — the
+  // project's filesystem root — is settable from here. `updateProject`
+  // validates it; surface the rejection as a 400 instead of a 500.
+  let updated;
+  try {
+    updated = await updateProject(id, body);
+  } catch (error) {
+    if (error instanceof InvalidProjectRootError) {
+      return Response.json({ error: error.message }, { status: 400 });
+    }
+    throw error;
+  }
   if (!updated) {
     return Response.json({ error: "Project not found" }, { status: 404 });
   }

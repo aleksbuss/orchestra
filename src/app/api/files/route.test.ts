@@ -156,3 +156,31 @@ describe("GET /api/files — path traversal (auth'd directory enumeration)", () 
     expect(getProjectFiles).toHaveBeenCalledWith("foo", "");
   });
 });
+
+describe("/api/files — PM #105 symlink escape", () => {
+  /**
+   * On a linked project the root is the user's own repository, where a
+   * symlink pointing outside it is legal and common (`node_modules` links,
+   * a `logs -> /var/log` convenience link, a checked-in dotfile link).
+   * `assertPathInside` resolves strings only, so `<root>/link/x` reads as
+   * inside the root no matter where `link` actually points. The realpath
+   * guard is what closes it — for enumeration AND for `rm -rf`.
+   */
+  beforeEach(async () => {
+    // The suite-level beforeEach doesn't reset call counts.
+    vi.mocked(getProjectFiles).mockClear();
+    await fs.symlink(evilDir, path.join(workDir, "link"), "dir");
+  });
+
+  it("GET does not enumerate through a symlink out of the root", async () => {
+    const res = await GET(getRequest("link"));
+    expect(res.status).toBe(400);
+    expect(getProjectFiles).not.toHaveBeenCalled();
+  });
+
+  it("DELETE does not unlink a file reached through an escaping symlink", async () => {
+    const res = await DELETE(deleteRequest("link/secrets.txt"));
+    expect(res.status).toBe(403);
+    await expect(fs.stat(secretFile)).resolves.toBeDefined();
+  });
+});

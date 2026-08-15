@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import fs from "fs/promises";
 import path from "path";
 import { getWorkDir } from "@/lib/storage/project-store";
-import { assertPathInside } from "@/lib/storage/fs-utils";
+import { assertPathInsideRealpath } from "@/lib/storage/fs-utils";
 
 export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get("project");
@@ -21,9 +21,11 @@ export async function GET(req: NextRequest) {
   // class of bug, same fix: never trust `path.join` + `startsWith` without
   // `path.sep`. Read-paths are even more sensitive than delete-paths because
   // they can exfiltrate arbitrary readable files (e.g. `data/settings/`).
+  // PM #105 — realpath variant: a linked project's root is the user's own
+  // directory tree, and a symlink there defeats a string-only guard.
   let fullPath: string;
   try {
-    fullPath = assertPathInside(workDir, filePath);
+    fullPath = await assertPathInsideRealpath(workDir, filePath);
   } catch {
     return Response.json({ error: "Invalid file path" }, { status: 403 });
   }

@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import fs from "fs/promises";
 import { getProjectFiles, getWorkDir } from "@/lib/storage/project-store";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { assertPathInside } from "@/lib/storage/fs-utils";
+import { assertPathInsideRealpath } from "@/lib/storage/fs-utils";
 
 export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get("project");
@@ -20,9 +20,13 @@ export async function GET(req: NextRequest) {
   // sandbox (directory enumeration of data/settings, data/chats, …). The
   // DELETE handler below already guards; the GET side was the gap. Validate
   // at the route layer AND push down into getProjectFiles (defense-in-depth).
+  //
+  // PM #105 — the REALPATH variant, not the string one. A project root can be
+  // a directory the user owns (linked projects / Open Folder), and a symlink
+  // inside it — `<root>/logs -> /Users/me/.ssh` — passes a string-only check.
   if (subPath) {
     try {
-      assertPathInside(getWorkDir(projectId), subPath);
+      await assertPathInsideRealpath(getWorkDir(projectId), subPath);
     } catch {
       return Response.json({ error: "Invalid path" }, { status: 400 });
     }
@@ -52,11 +56,13 @@ export async function DELETE(req: NextRequest) {
   //      a path under `/data/projects/foo-evil`). The audit confirmed this
   //      was a real CVE-class bypass — the regression test for it is in
   //      `route.test.ts` (PM #6 — path traversal).
-  // `assertPathInside` does the right thing in one call: realpath-free
-  // string check that appends `path.sep` before the prefix comparison.
+  // PM #105 — use the realpath guard, not the string one: on a linked project
+  // the root is the user's own repo, where a symlink pointing outside it is
+  // both legal and invisible to a `path.resolve`-only check. `rm -rf` through
+  // a symlink is the destructive half of the same hole.
   let fullPath: string;
   try {
-    fullPath = assertPathInside(workDir, filePath);
+    fullPath = await assertPathInsideRealpath(workDir, filePath);
   } catch {
     return Response.json({ error: "Invalid file path" }, { status: 403 });
   }

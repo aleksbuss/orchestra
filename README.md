@@ -150,6 +150,8 @@ GOOGLE_API_KEY=...
 ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ```
 
+**"The first key it finds" is literal.** On a fresh install the chat and utility model slots are pointed at whichever provider you actually have a credential for — checked in the API Keys Vault first, then the env vars above, in the order OpenRouter → Anthropic → Google. Nothing to configure. Two things this deliberately does *not* do: it never overrides a model you picked yourself (Settings wins, always), and it leaves embeddings on OpenAI, because OpenRouter has no embeddings API — semantic memory needs an OpenAI key or a local Ollama embedding model. See PM #101.
+
 ### Full env reference
 
 | Variable | Required | Purpose |

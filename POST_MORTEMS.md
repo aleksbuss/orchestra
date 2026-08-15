@@ -38,6 +38,24 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 101. A fresh install shipped OpenAI model defaults, so an OpenRouter-only user got a working key and a chat that could not answer
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1 — not a data or billing hazard, but a 100% failure rate for a first-time user who follows the README and supplies any credential other than OpenAI. The same install class as PM #99, found by inspection rather than by a field report.
+**Symptoms:** Install from `main`, paste an OpenRouter key (the provider the README recommends first), send a message → the turn dies on a provider auth error. The key is valid, the model catalogue loads, the vault shows the key present. Nothing on screen connects the failure to two dropdowns in Settings, so it reads as "the app is broken".
+**Detection:** Reading `DEFAULT_SETTINGS` while auditing what remains before the project can be left alone. `chatModel` = `openai/gpt-4o`, `utilityModel` = `openai/gpt-4o-mini`, with no logic anywhere that reconciles those against the credentials the user actually holds. The README's "Orchestra works with the first key it finds" was, at that moment, simply false.
+**Root Cause:** Shipped defaults are a *guess about the operator*, and this one guessed OpenAI. The vault (PM #99) taught the key-resolution path to find a key for whatever provider a slot names; nobody ever taught the slot to name a provider the user has a key for. The two halves never met: `resolveWorkerKey` answers "what key does this model need?" and there was no counterpart answering "what model can this key run?".
+**Resolution:** [`storage/fresh-install-defaults.ts`](src/lib/storage/fresh-install-defaults.ts) — `applyCredentialAwareModelDefaults`, applied at every return path of `getSettings` (fresh, merged, and corrupt-fallback alike, via `withResolvedDefaults`). It fires ONLY when the chat slot is still byte-identical to the shipped default (same provider, same model id, no inline key) and OpenAI has no credential in either the vault or `process.env`; it then adopts the highest-priority credentialed provider (OpenRouter → Anthropic → Google) for the chat and utility slots. Because it hangs off the READ chokepoint rather than an install step, it covers both real orderings: a key pasted into the vault after first boot, and a key that only ever lived in `.env.local`.
+**Rejected:**
+- *Retargeting the utility slot when the chat slot was explicitly chosen.* Splits the user's setup across two providers behind their back — stranger than leaving a deliberate configuration alone. The chat slot is the signal; if it is touched, the module does nothing.
+- *Retargeting `embeddingsModel`.* Of the eligible providers only OpenAI exposes an embeddings API (`MODEL_PROVIDERS[p].embeddingModels`); OpenRouter has none. Pointing embeddings at a provider that cannot serve them trades a clear failure for a confusing one. Recall degrades instead: a fresh install's memory DB is empty and `searchMemory` short-circuits before it embeds, and the agent's recall block is inside a `try`.
+- *Treating `ollama`/`sglang`/`vllm` as credentialed.* They are `requiresApiKey: false`, so "has a credential" is vacuously true — every install would be silently pointed at a local server that is probably not running.
+**Regression Coverage:** [`fresh-install-defaults.test.ts`](src/lib/storage/fresh-install-defaults.test.ts) (24 cases, all with an explicit injected `env`) + six `getSettings` integration cases in [`settings-store.test.ts`](src/lib/storage/settings-store.test.ts). Mutation-verified: stubbing `withResolvedDefaults` to the identity function fails exactly the four positive integration cases and leaves the two negative controls green. Two of the tests are a catalogue coupling gate — every starter model id must also appear in `STAR_MODELS` / `LIGHT_MODELS`, so renaming a catalogue entry fails the build instead of shipping a 404 model id as somebody's first experience of Orchestra.
+**Doc Updates:** `README.md` § Bring Your Own Key; `docs/references/data-layout.md` § settings defaults.
+**Rule:** A shipped default that names a provider is a guess about the operator. Where the app can observe the truth — a vault entry, an env var — it must reconcile the guess against it, and must stop the moment the user has expressed a preference of their own. **And note how this was found:** not by a test and not by a user, but by asking "what does a stranger who clones this repo hit first?" No suite catches a default that is merely wrong for everyone except its author.
+
+---
+
 ## 100. The test suite wrote to the operator's live database, and three layers of "isolation" all failed silently
 **Date:** 2026-08
 **Status:** RESOLVED

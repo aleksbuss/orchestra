@@ -6,11 +6,11 @@ import {
   resolveCliWorkingDirectory,
   runCliCommand,
 } from "./cli-runner";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 import path from "path";
 
 vi.mock("@/lib/storage/project-store", () => ({
-  getWorkDir: vi.fn(),
+  getProjectContentRoot: vi.fn(),
   loadProjectMcpServers: vi.fn(),
 }));
 
@@ -87,37 +87,47 @@ describe("parseGeminiOutput", () => {
 // ---- resolveCliWorkingDirectory --------------------------------------------------
 
 describe("resolveCliWorkingDirectory", () => {
-  it("returns process.cwd() without a projectId", () => {
-    expect(resolveCliWorkingDirectory(undefined)).toBe(process.cwd());
-    expect(resolveCliWorkingDirectory({})).toBe(process.cwd());
+  it("returns process.cwd() without a projectId", async () => {
+    expect(await resolveCliWorkingDirectory(undefined)).toBe(process.cwd());
+    expect(await resolveCliWorkingDirectory({})).toBe(process.cwd());
   });
 
-  it("returns the project root when currentPath is blank", () => {
-    vi.mocked(getWorkDir).mockReturnValue("/tmp/orchestra-projects/p1");
-    expect(resolveCliWorkingDirectory({ projectId: "p1", currentPath: "  " })).toBe(
-      path.resolve("/tmp/orchestra-projects/p1")
-    );
-  });
-
-  it("resolves a relative currentPath inside the root", () => {
-    vi.mocked(getWorkDir).mockReturnValue("/tmp/orchestra-projects/p1");
-    expect(resolveCliWorkingDirectory({ projectId: "p1", currentPath: "src/lib" })).toBe(
-      path.resolve("/tmp/orchestra-projects/p1/src/lib")
-    );
-  });
-
-  it("clamps a traversal attempt back to the root", () => {
-    vi.mocked(getWorkDir).mockReturnValue("/tmp/orchestra-projects/p1");
-    expect(resolveCliWorkingDirectory({ projectId: "p1", currentPath: "../../etc" })).toBe(
-      path.resolve("/tmp/orchestra-projects/p1")
-    );
-  });
-
-  it("rejects a sibling-prefix escape (p1-evil does not start with p1 + sep)", () => {
-    vi.mocked(getWorkDir).mockReturnValue("/tmp/orchestra-projects/p1");
+  it("returns the project root when currentPath is blank", async () => {
+    vi.mocked(getProjectContentRoot).mockResolvedValue("/tmp/orchestra-projects/p1");
     expect(
-      resolveCliWorkingDirectory({ projectId: "p1", currentPath: "../p1-evil" })
+      await resolveCliWorkingDirectory({ projectId: "p1", currentPath: "  " })
     ).toBe(path.resolve("/tmp/orchestra-projects/p1"));
+  });
+
+  it("resolves a relative currentPath inside the root", async () => {
+    vi.mocked(getProjectContentRoot).mockResolvedValue("/tmp/orchestra-projects/p1");
+    expect(
+      await resolveCliWorkingDirectory({ projectId: "p1", currentPath: "src/lib" })
+    ).toBe(path.resolve("/tmp/orchestra-projects/p1/src/lib"));
+  });
+
+  it("clamps a traversal attempt back to the root", async () => {
+    vi.mocked(getProjectContentRoot).mockResolvedValue("/tmp/orchestra-projects/p1");
+    expect(
+      await resolveCliWorkingDirectory({ projectId: "p1", currentPath: "../../etc" })
+    ).toBe(path.resolve("/tmp/orchestra-projects/p1"));
+  });
+
+  it("rejects a sibling-prefix escape (p1-evil does not start with p1 + sep)", async () => {
+    vi.mocked(getProjectContentRoot).mockResolvedValue("/tmp/orchestra-projects/p1");
+    expect(
+      await resolveCliWorkingDirectory({ projectId: "p1", currentPath: "../p1-evil" })
+    ).toBe(path.resolve("/tmp/orchestra-projects/p1"));
+  });
+
+  // PM #105 — the CLI provider runs real commands, so it must land in the
+  // project's CONTENT root. A linked project resolving to the sandbox would
+  // point the entire CLI session at an empty scaffold.
+  it("uses the linked repository, not the sandbox, for a linked project", async () => {
+    vi.mocked(getProjectContentRoot).mockResolvedValue("/Users/me/repos/foo");
+    expect(await resolveCliWorkingDirectory({ projectId: "p1" })).toBe(
+      path.resolve("/Users/me/repos/foo")
+    );
   });
 });
 

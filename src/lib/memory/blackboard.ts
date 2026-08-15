@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { embed } from "ai";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectMetaRoot } from "@/lib/storage/project-store";
 import { createEmbeddingModel } from "@/lib/providers/llm-provider";
 import { getSettings } from "@/lib/storage/settings-store";
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
@@ -32,7 +32,10 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export async function getBlackboardPath(projectId: string): Promise<string> {
-  const workDir = getWorkDir(projectId);
+  // The blackboard is Orchestra's own state, so it lives in the META root and
+  // NEVER in a linked project's repository — dropping a `.blackboard.json`
+  // into the user's checkout would show up in their `git status`.
+  const workDir = getProjectMetaRoot(projectId);
   await fs.mkdir(workDir, { recursive: true });
   return path.join(workDir, BLACKBOARD_FILE_NAME);
 }

@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import type { AgentContext } from "@/lib/agent/types";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectMetaRoot } from "@/lib/storage/project-store";
 import { dataPath } from "@/lib/storage/data-dir";
 
 /**
@@ -14,15 +14,31 @@ import { dataPath } from "@/lib/storage/data-dir";
  */
 
 /**
- * Resolve the effective working directory for the current agent context.
- * Prefers pre-resolved `context.workDir` when the agent context builder set
- * it (linked projects honor `absoluteRoot` here); falls back to the sync
- * `getWorkDir` for sandbox projects and pre-existing call sites that
- * haven't been migrated to populate `workDir` yet. A `currentPath` that
+ * The base directory of the current agent context — the content root the
+ * agent is working in, before `currentPath` is applied.
+ *
+ * `context.workDir` is the project's content root, resolved once per turn by
+ * the agent context builder (`getProjectContentRoot`), so linked projects get
+ * their real repository here. When it is absent — a context built by an older
+ * call site, or a test — we fall back to the Orchestra-owned sandbox rather
+ * than doing a synchronous guess at the user's repo: no root is better than
+ * the wrong root.
+ *
+ * PM #105 — this is THE resolver. Any tool that reports where the agent is
+ * must call it, not re-derive the answer; a report that disagrees with the
+ * acting path is invisible to the model and it will act on the report.
+ */
+export function resolveContextBaseDir(context: AgentContext): string {
+  return context.workDir?.trim() || getProjectMetaRoot(context.projectId);
+}
+
+/**
+ * Resolve the effective working directory for the current agent context:
+ * the base directory with `currentPath` applied. A `currentPath` that
  * escapes the base directory resolves back to the base (sandbox posture).
  */
 export function resolveContextCwd(context: AgentContext): string {
-  const baseDir = context.workDir?.trim() || getWorkDir(context.projectId);
+  const baseDir = resolveContextBaseDir(context);
   const rawCurrentPath = context.currentPath?.trim();
   if (!rawCurrentPath) {
     return baseDir;

@@ -8,7 +8,7 @@
  * `createModel` calls `createCliLanguageModel` only when the native path
  * failed and the subprocess fallback is enabled.
  *
- * Imports only leaves (scrub-env, project-store's getWorkDir, codex.ts) and
+ * Imports only leaves (scrub-env, project-store's root resolvers, codex.ts) and
  * NOTHING from llm-provider (one-way: llm-provider -> here), so no cycle.
  * Pure helpers are exported for unit testing — this surface was previously
  * untested (the §10 CLI/OAuth/SSE coverage gap).
@@ -26,7 +26,7 @@ import type {
   LanguageModelV3Usage,
 } from "@ai-sdk/provider";
 import type { ModelConfig } from "@/lib/types";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 import { cliProviderEnv, scrubProcessEnv } from "@/lib/security/scrub-env";
 import { parseCodexOutput, resolveCodexMcpOverrides } from "@/lib/providers/codex";
 
@@ -161,13 +161,22 @@ export function runCliCommand(
   });
 }
 
-export function resolveCliWorkingDirectory(runtime: ModelRuntimeContext | undefined): string {
+/**
+ * Working directory for a spawned CLI provider (codex / gemini). The CLI
+ * reads and writes real files, so it belongs in the project's CONTENT root:
+ * on a linked project, handing it the sandbox path points the whole session
+ * at an empty scaffold (PM #105). Async for that reason — resolving content
+ * means reading project.json, and every caller is already async.
+ */
+export async function resolveCliWorkingDirectory(
+  runtime: ModelRuntimeContext | undefined
+): Promise<string> {
   const projectId = runtime?.projectId;
   if (!projectId) {
     return process.cwd();
   }
 
-  const root = path.resolve(getWorkDir(projectId));
+  const root = path.resolve(await getProjectContentRoot(projectId));
   const rawCurrentPath = (runtime.currentPath || "").trim();
   if (!rawCurrentPath) return root;
 
@@ -233,7 +242,7 @@ async function runCliModel(
   prompt: string,
   runtime: ModelRuntimeContext | undefined
 ): Promise<string> {
-  const cwd = resolveCliWorkingDirectory(runtime);
+  const cwd = await resolveCliWorkingDirectory(runtime);
 
   if (provider === "codex-cli") {
     const command = process.env.CODEX_COMMAND || "codex";

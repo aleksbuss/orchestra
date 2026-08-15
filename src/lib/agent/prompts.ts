@@ -4,7 +4,7 @@ import {
   getProject,
   loadProjectSkillsMetadata,
   getProjectFiles,
-  getWorkDir,
+  getProjectContentRoot,
 } from "@/lib/storage/project-store";
 import { getChatFiles } from "@/lib/storage/chat-files-store";
 import { getActiveGoal } from "@/lib/storage/goal-store";
@@ -39,7 +39,10 @@ async function getAllProjectFilesRecursive(
   projectId: string,
   subPath: string = ""
 ): Promise<{ name: string; path: string; size: number }[]> {
-  const baseDir = getWorkDir(projectId);
+  // The file list goes into the system prompt as absolute paths the agent is
+  // expected to open, so it must be the CONTENT root: on a linked project the
+  // sandbox path would advertise files under a directory nothing lives in.
+  const baseDir = await getProjectContentRoot(projectId);
   const files = await getProjectFiles(projectId, subPath);
   const result: { name: string; path: string; size: number }[] = [];
 

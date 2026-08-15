@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import fs from "fs/promises";
-import { getProjectFiles, getWorkDir } from "@/lib/storage/project-store";
+import { getProjectFiles, getProjectContentRoot } from "@/lib/storage/project-store";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { assertPathInsideRealpath } from "@/lib/storage/fs-utils";
 
@@ -26,7 +26,10 @@ export async function GET(req: NextRequest) {
   // inside it — `<root>/logs -> /Users/me/.ssh` — passes a string-only check.
   if (subPath) {
     try {
-      await assertPathInsideRealpath(getWorkDir(projectId), subPath);
+      await assertPathInsideRealpath(
+        await getProjectContentRoot(projectId),
+        subPath
+      );
     } catch {
       return Response.json({ error: "Invalid path" }, { status: 400 });
     }
@@ -47,7 +50,7 @@ export async function DELETE(req: NextRequest) {
     );
   }
 
-  const workDir = getWorkDir(projectId);
+  const workDir = await getProjectContentRoot(projectId);
 
   // PM #6 — `path.join` + `startsWith(workDir)` is NOT a security boundary:
   //   1. `path.join` normalizes `../` silently.

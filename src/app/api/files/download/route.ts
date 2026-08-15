@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 import { assertPathInsideRealpath } from "@/lib/storage/fs-utils";
 
 export async function GET(req: NextRequest) {
@@ -15,7 +15,7 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const workDir = getWorkDir(projectId);
+  const workDir = await getProjectContentRoot(projectId);
 
   // PM #6 — see `src/app/api/files/route.ts` for the full rationale. Same
   // class of bug, same fix: never trust `path.join` + `startsWith` without

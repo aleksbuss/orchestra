@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-3930%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-102%20documented-purple)](./POST_MORTEMS.md)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-103%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -225,7 +225,17 @@ npm test                  # full unit-test suite (live count in the tests badge 
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
 npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
+npx playwright test       # browser e2e, including the clean-boot suite
 ```
+
+**Clean boot is tested, not assumed.** The e2e run starts a second server against an
+empty data directory — no settings, no credential reset — and asserts that a
+first-time user can log in with the documented defaults, reach a working
+dashboard with no console or 5xx errors, and find the model slots pointed at a
+provider they actually hold a key for. It exists because two separate defects
+(PM #99, PM #101) made a fresh install unusable while the whole suite stayed
+green; the regular e2e dir is seeded with the developer's own config, which is
+exactly what made it blind to them.
 
 Coverage focus (re-measured via v8, 2026-07; project-wide aggregate ≈54% lines across all files, global floor `lines: 43`; the `src/lib` subdirs below run higher):
 - **High (>90% lines):** `lib/security/` (99%), `lib/cost/` (97%), `lib/memory/` (97%), `lib/auth/` (91%)

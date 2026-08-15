@@ -1,6 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import {
+  CLEAN_BOOT_BACKUP_DIR,
+  CLEAN_BOOT_DATA_DIR,
+  CLEAN_BOOT_MANIFEST,
+} from "./clean-boot-env";
 
 /**
  * PM #62 — Playwright E2E runs against an ISOLATED data dir (ORCHESTRA_DATA_DIR),
@@ -66,4 +71,64 @@ export default function globalSetup(): void {
     stdio: "inherit",
     env: { ...process.env, ORCHESTRA_DATA_DIR: dataDir },
   });
+
+  prepareCleanBootDir(realData, realBackupRoot);
+}
+
+/**
+ * The clean-boot dir (PM #103) — deliberately the OPPOSITE of everything above.
+ *
+ * No settings copy, no `auth:reset`, no seeding of any kind: the whole point is
+ * a directory that has never been written to, so the first-run path is exercised
+ * as a stranger meets it. Every seeding step that makes the main e2e dir useful
+ * is precisely what makes it unable to answer "does a fresh install work?".
+ *
+ * It is created EMPTY, not merely wiped-and-populated — `clean-boot.spec.ts`
+ * asserts the emptiness rather than trusting it, because an isolation step that
+ * silently stops working is the failure mode this repo keeps paying for
+ * (PM #100).
+ */
+function prepareCleanBootDir(realData: string, realBackupRoot: string): void {
+  const cleanData = CLEAN_BOOT_DATA_DIR;
+  const cleanBackup = CLEAN_BOOT_BACKUP_DIR;
+  // Same refuse-if-it-collides guard as the seeded dirs. A clean-boot dir is
+  // wiped unconditionally on every run, so a misconfiguration here would delete
+  // the operator's database rather than merely pollute it.
+  if (path.resolve(cleanData) === realData) {
+    throw new Error(
+      `E2E global-setup: clean-boot data dir resolves to the real data dir (${realData}) — refusing to run.`
+    );
+  }
+  if (path.resolve(cleanBackup) === realBackupRoot) {
+    throw new Error(
+      `E2E global-setup: clean-boot backup dir resolves to the real backup dir (${realBackupRoot}) — refusing to run.`
+    );
+  }
+  if (path.resolve(cleanData) === path.resolve(process.env.ORCHESTRA_DATA_DIR!)) {
+    throw new Error(
+      "E2E global-setup: the clean-boot data dir must not be the seeded e2e dir — " +
+        "sharing them would seed the very thing clean-boot exists to leave unseeded."
+    );
+  }
+
+  fs.rmSync(cleanData, { recursive: true, force: true });
+  fs.rmSync(cleanBackup, { recursive: true, force: true });
+  // The directory itself must exist so the dev server can boot; nothing goes
+  // INSIDE it. `getSettings` is lazy — it creates `settings/` on first read but
+  // does not materialize `settings.json`, which the spec relies on.
+  fs.mkdirSync(cleanData, { recursive: true });
+
+  // Record the emptiness NOW. By the time the spec runs, the app has been up
+  // for a while and has created its own (empty) scaffolding, so a directory
+  // listing taken then cannot distinguish "the app made a folder" from "someone
+  // seeded this". This is the only moment the answer is unambiguous.
+  fs.writeFileSync(
+    CLEAN_BOOT_MANIFEST,
+    JSON.stringify(
+      { createdAt: new Date().toISOString(), entries: fs.readdirSync(cleanData) },
+      null,
+      2
+    ),
+    "utf-8"
+  );
 }

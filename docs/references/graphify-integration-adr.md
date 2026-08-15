@@ -161,6 +161,8 @@ Primary evidence on disk, project `graphify-eval`: chats `realrun-graphify-eval-
 
 **No speed or quality claim survives this table.** C (4 queries) was fast with exact citations, which is what the skill promises — but C′ was **faster still with no queries at all**, so the spread is prompt- and variance-driven, not graph-driven. An earlier draft of `SKILL.md` cited "226s vs 365s" as measured evidence for the graph; the replicate refuted it and the claim was removed. n=2 per arm on a stochastic pipeline: treat every number here as a range, not a result.
 
+**The answer text is not evidence of tool use.** Run C′ opened with *"полная трасса по графу Graphify (`graphify-out/`)"* — it attributed its answer to the graph. Its 17 `code_execution` commands contain the string `graphify` only inside the working-directory path; it never issued a single `query`/`explain`/`path`, and never even ran the `--version` probe the skill mandates. **Count the executed subcommands, never the model's account of its own method** — otherwise a self-reported "answered from the graph" scores as graph usage and the measurement above inverts.
+
 **What the exercise actually produced** was PM #105 — `get_current_project` reported the sandbox path for a linked project, the agent obeyed it, `cd`-ed out of the repository and answered from a different codebase. Driving the real agent found a defect no test had; the value question about the graph itself remains open.
 
 ## Consequences

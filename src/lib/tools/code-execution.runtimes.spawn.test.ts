@@ -49,6 +49,31 @@ const sessionIdFrom = (out: string): string => {
   return m![1];
 };
 
+/**
+ * Poll the way a real caller has to: until the status stops being `running`.
+ *
+ * ONE `pollManagedProcessSession(id, 10_000)` does NOT mean "wait up to 10s for
+ * the process to finish". The helper's wait loop exits as soon as the session's
+ * VERSION changes — i.e. the instant new output lands — and a script that prints
+ * before exiting bumps the version milliseconds before the exit event arrives.
+ * So a one-shot poll returns `running` whenever the output bump is observed
+ * first. That is a coin flip decided by machine load, which is why this file
+ * failed full-suite runs at random while passing every time in isolation.
+ *
+ * The early return is DELIBERATE — it is what lets an agent stream a
+ * long-running command instead of blocking for the whole timeout. The product
+ * code is right; the one-shot expectation was wrong. This helper encodes the
+ * real contract once so no call site has to remember it.
+ */
+async function pollUntilTerminal(id: string, timeoutMs = 10_000) {
+  let poll = await pollManagedProcessSession(id, timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  while (poll.status === "running" && Date.now() < deadline) {
+    poll = await pollManagedProcessSession(id, 1_000);
+  }
+  return poll;
+}
+
 describe("terminal runtime — marker protocol", () => {
   it("captures stdout, strips the session marker, exits clean", async () => {
     const out = await executeCode("terminal", "echo TERM_OK", 4201, cfg(), workDir);
@@ -153,25 +178,10 @@ describe("managed sessions — yield_ms", () => {
     expect(out).toContain("[Execution yielded to background]");
     const id = sessionIdFrom(out);
 
-    // Poll until TERMINAL, not once.
-    //
-    // A single `pollManagedProcessSession(id, 10_000)` here was flaky — it
-    // failed 2 of 4 full-suite runs with `status: "running"`. The cause is not
-    // machine load and not a too-short cap: the helper's wait loop exits as
-    // soon as the session's VERSION changes, i.e. the moment new output lands,
-    // and `SLOW_DONE` is printed a few milliseconds BEFORE the process exits.
-    // So the poll returned while the status was still `running` whenever the
-    // output bump was observed first — a coin flip, not a timeout.
-    //
-    // Early-return-on-new-output is deliberate: it is what lets the agent
-    // stream a long-running command instead of blocking for the whole
-    // timeout. The helper is right; the one-shot expectation was wrong. Poll
-    // the way a real caller does — until the status stops being `running`.
-    let poll = await pollManagedProcessSession(id, 10_000);
-    const deadline = Date.now() + 10_000;
-    while (poll.status === "running" && Date.now() < deadline) {
-      poll = await pollManagedProcessSession(id, 1_000);
-    }
+    // Poll until TERMINAL, not once — see `pollUntilTerminal`, which is where
+    // the reasoning for that now lives. This site was the first one fixed; the
+    // other six kept the one-shot pattern and kept failing at random.
+    const poll = await pollUntilTerminal(id);
 
     expect(poll.success).toBe(true);
     expect(poll.status).toBe("completed");
@@ -207,7 +217,7 @@ describe("managed sessions — log reader", () => {
       { background: true }
     );
     const id = sessionIdFrom(out);
-    const poll = await pollManagedProcessSession(id, 10_000);
+    const poll = await pollUntilTerminal(id);
     expect(poll.status).toBe("completed");
     return id;
   };
@@ -254,7 +264,7 @@ describe("managed sessions — kill error branches", () => {
       background: true,
     });
     const id = sessionIdFrom(out);
-    await pollManagedProcessSession(id, 10_000);
+    await pollUntilTerminal(id);
     const res = killManagedProcessSession(id);
     expect(res.success).toBe(true);
     expect(res.status).toBe("already_finished");
@@ -276,8 +286,8 @@ describe("managed sessions — listing and cleanup", () => {
     const ids = listManagedProcessSessions().map((s) => s.sessionId);
     expect(ids.indexOf(secondId)).toBeLessThan(ids.indexOf(firstId));
 
-    await pollManagedProcessSession(firstId, 10_000);
-    await pollManagedProcessSession(secondId, 10_000);
+    await pollUntilTerminal(firstId);
+    await pollUntilTerminal(secondId);
   }, 15000);
 
   it("removeManagedProcessSession removes exactly the finished target", async () => {
@@ -285,7 +295,7 @@ describe("managed sessions — listing and cleanup", () => {
       background: true,
     });
     const id = sessionIdFrom(out);
-    await pollManagedProcessSession(id, 10_000);
+    await pollUntilTerminal(id);
 
     expect(removeManagedProcessSession("")).toEqual({ removed: false });
     expect(removeManagedProcessSession("proc-nope")).toEqual({ removed: false });
@@ -297,7 +307,7 @@ describe("managed sessions — listing and cleanup", () => {
     const out = await executeCode("nodejs", "console.log('y')", 0, cfg(), workDir, {
       background: true,
     });
-    await pollManagedProcessSession(sessionIdFrom(out), 10_000);
+    await pollUntilTerminal(sessionIdFrom(out));
     const { removed } = clearFinishedManagedProcessSessions();
     expect(removed).toBeGreaterThanOrEqual(1);
     expect(listManagedProcessSessions().filter((s) => s.status !== "running")).toHaveLength(0);

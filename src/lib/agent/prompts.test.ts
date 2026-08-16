@@ -57,11 +57,14 @@ const {
 
 vi.mock("@/lib/storage/project-store", () => ({
   getProject: (...args: unknown[]) => getProjectMock(...args),
-  loadProjectSkillsMetadata: (...args: unknown[]) =>
-    loadProjectSkillsMetadataMock(...args),
   getProjectFiles: (...args: unknown[]) => getProjectFilesMock(...args),
   getProjectContentRoot: (...args: unknown[]) =>
     getProjectContentRootMock(...args),
+}));
+
+vi.mock("@/lib/storage/project-skills", () => ({
+  loadProjectSkillsMetadata: (...args: unknown[]) =>
+    loadProjectSkillsMetadataMock(...args),
 }));
 
 vi.mock("@/lib/storage/chat-files-store", () => ({

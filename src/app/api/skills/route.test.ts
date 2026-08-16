@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-vi.mock("@/lib/storage/project-store", () => ({
+vi.mock("@/lib/storage/project-skills", () => ({
   loadProjectSkillsMetadata: vi.fn(),
 }));
 
@@ -27,7 +27,7 @@ vi.mock("@/lib/storage/bundled-skills-store", () => ({
 }));
 
 import { GET, POST } from "./route";
-import { loadProjectSkillsMetadata } from "@/lib/storage/project-store";
+import { loadProjectSkillsMetadata } from "@/lib/storage/project-skills";
 import {
   installBundledSkill,
   listBundledSkills,

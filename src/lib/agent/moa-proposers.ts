@@ -23,7 +23,7 @@ import { generateText, stepCountIs, type ModelMessage } from "ai";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import { agentSemaphore } from "./semaphore";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
@@ -156,6 +156,12 @@ export async function runProposerFanOut(
   } = ctx;
 
   const proposerStart = Date.now();
+
+  // Resolved ONCE for the whole fan-out: every proposer runs in the same
+  // place, and this is a project.json read. Proposers with `code_execution`
+  // execute here, so a linked project must get its real repository — the
+  // sandbox path would have them running commands in an empty scaffold.
+  const proposerCwd = await getProjectContentRoot(projectId);
 
   // D1 / PM #94 — ground the proposers in the recent task context. `safeHistory`
   // strips tool activity (goal-tracker status, file edits, command output) for
@@ -373,7 +379,7 @@ export async function runProposerFanOut(
             // Proposers run in the project root (or sandbox root for
             // global chats). Sub-paths aren't supported on the proposer
             // surface — they're synthesizers, not navigators.
-            cwd: getWorkDir(projectId),
+            cwd: proposerCwd,
           },
           // Wire the "does this model support tool calling?" gate (PM #17).
           // Without it, a non-tool proposer model (e.g. an OpenRouter model in

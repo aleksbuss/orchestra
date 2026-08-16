@@ -26,7 +26,7 @@ import AdmZipModule from "adm-zip";
 
 vi.mock("@/lib/storage/project-store", () => ({
   getProject: vi.fn(),
-  resolveWorkDirForProject: vi.fn(),
+  getProjectContentRoot: vi.fn(),
 }));
 
 vi.mock("@/lib/storage/chat-store", () => ({
@@ -35,12 +35,12 @@ vi.mock("@/lib/storage/chat-store", () => ({
 }));
 
 import { GET } from "./route";
-import { getProject, resolveWorkDirForProject } from "@/lib/storage/project-store";
+import { getProject, getProjectContentRoot } from "@/lib/storage/project-store";
 import { getAllChats, getChat } from "@/lib/storage/chat-store";
 import { NextRequest } from "next/server";
 
 const mockedGetProject = vi.mocked(getProject);
-const mockedResolveWorkDir = vi.mocked(resolveWorkDirForProject);
+const mockedResolveWorkDir = vi.mocked(getProjectContentRoot);
 const mockedGetAllChats = vi.mocked(getAllChats);
 const mockedGetChat = vi.mocked(getChat);
 

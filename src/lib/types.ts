@@ -457,11 +457,13 @@ export interface Project {
    * Absolute filesystem path the agent should treat as this project's working
    * directory. Set ONLY for "linked" projects (Open Folder feature) — projects
    * pointing at an existing real-world repo on disk. When undefined the project
-   * is a sandbox, and `getWorkDir` falls back to `data/projects/<id>/`.
+   * is a sandbox, and `getProjectContentRoot` falls back to
+   * `data/projects/<id>/`.
    *
    * Project metadata (`.meta/skills`, `.meta/mcp`, blackboard) ALWAYS lives
-   * under `data/projects/<id>/.meta/` regardless of `absoluteRoot`. We do not
-   * pollute the user's repository with Orchestra internals.
+   * under `data/projects/<id>/.meta/` regardless of `absoluteRoot` — that is
+   * what `getProjectMetaRoot` returns, and it never reads this field. We do
+   * not pollute the user's repository with Orchestra internals.
    */
   absoluteRoot?: string;
 }

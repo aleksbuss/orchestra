@@ -23,12 +23,12 @@ vi.mock("@/lib/storage/project-store", async () => {
   );
   return {
     ...actual,
-    getWorkDir: vi.fn(),
+    getProjectContentRoot: vi.fn(),
   };
 });
 
 import { GET } from "./route";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 
 let tmpRoot: string;
 let workDir: string;
@@ -46,7 +46,7 @@ beforeEach(async () => {
 
   await fs.writeFile(path.join(workDir, "readme.txt"), "ok-to-download", "utf-8");
 
-  vi.mocked(getWorkDir).mockReturnValue(workDir);
+  vi.mocked(getProjectContentRoot).mockResolvedValue(workDir);
 });
 
 function downloadRequest(filePath: string): NextRequest {
@@ -76,5 +76,35 @@ describe("GET /api/files/download — PM #6 path traversal", () => {
     expect(res.headers.get("content-disposition")).toMatch(/attachment/);
     const body = await res.text();
     expect(body).toBe("ok-to-download");
+  });
+});
+
+describe("GET /api/files/download — PM #105 symlink escape", () => {
+  /**
+   * A linked project's root is a directory the USER owns, so a symlink
+   * inside it pointing anywhere on the filesystem is ordinary, and a
+   * string-only `path.resolve` guard cannot see it: `<root>/link/secrets.txt`
+   * stays lexically inside `<root>`. Only `fs.realpath` catches this, which
+   * is why the route uses `assertPathInsideRealpath`.
+   */
+  it("does NOT follow a symlink out of the project root", async () => {
+    await fs.symlink(evilDir, path.join(workDir, "link"), "dir");
+
+    const res = await GET(downloadRequest("link/secrets.txt"));
+
+    expect(res.status, "symlinked path must be rejected").toBe(403);
+    expect(await res.text()).not.toContain("DO-NOT-LEAK");
+  });
+
+  it("still serves a file reached through an INSIDE-the-root symlink", async () => {
+    const inner = path.join(workDir, "real");
+    await fs.mkdir(inner);
+    await fs.writeFile(path.join(inner, "doc.txt"), "inside-ok", "utf-8");
+    await fs.symlink(inner, path.join(workDir, "alias"), "dir");
+
+    const res = await GET(downloadRequest("alias/doc.txt"));
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("inside-ok");
   });
 });

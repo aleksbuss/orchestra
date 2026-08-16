@@ -30,21 +30,21 @@ vi.mock("@/lib/realtime/event-bus", () => ({
   publishUiSyncEvent: vi.fn(),
 }));
 
-// `getWorkDir` is sync and returns a path under cwd. We override it per test
-// so we can plant the workdir + the sibling "evil" dir under a tmp root.
+// `getProjectContentRoot` reads project.json. We override it per test so we
+// can plant the workdir + the sibling "evil" dir under a tmp root.
 vi.mock("@/lib/storage/project-store", async () => {
   const actual = await vi.importActual<typeof import("@/lib/storage/project-store")>(
     "@/lib/storage/project-store"
   );
   return {
     ...actual,
-    getWorkDir: vi.fn(),
+    getProjectContentRoot: vi.fn(),
     getProjectFiles: vi.fn(async () => []),
   };
 });
 
 import { DELETE, GET } from "./route";
-import { getWorkDir, getProjectFiles } from "@/lib/storage/project-store";
+import { getProjectContentRoot, getProjectFiles } from "@/lib/storage/project-store";
 
 let tmpRoot: string;
 let workDir: string;
@@ -63,7 +63,7 @@ beforeEach(async () => {
   // Plant a benign file inside workDir so legit deletes still work.
   await fs.writeFile(path.join(workDir, "readme.txt"), "hello", "utf-8");
 
-  vi.mocked(getWorkDir).mockReturnValue(workDir);
+  vi.mocked(getProjectContentRoot).mockResolvedValue(workDir);
 });
 
 function deleteRequest(filePath: string): NextRequest {
@@ -154,5 +154,33 @@ describe("GET /api/files — path traversal (auth'd directory enumeration)", () 
     const res = await GET(getRequest());
     expect(res.status).toBe(200);
     expect(getProjectFiles).toHaveBeenCalledWith("foo", "");
+  });
+});
+
+describe("/api/files — PM #105 symlink escape", () => {
+  /**
+   * On a linked project the root is the user's own repository, where a
+   * symlink pointing outside it is legal and common (`node_modules` links,
+   * a `logs -> /var/log` convenience link, a checked-in dotfile link).
+   * `assertPathInside` resolves strings only, so `<root>/link/x` reads as
+   * inside the root no matter where `link` actually points. The realpath
+   * guard is what closes it — for enumeration AND for `rm -rf`.
+   */
+  beforeEach(async () => {
+    // The suite-level beforeEach doesn't reset call counts.
+    vi.mocked(getProjectFiles).mockClear();
+    await fs.symlink(evilDir, path.join(workDir, "link"), "dir");
+  });
+
+  it("GET does not enumerate through a symlink out of the root", async () => {
+    const res = await GET(getRequest("link"));
+    expect(res.status).toBe(400);
+    expect(getProjectFiles).not.toHaveBeenCalled();
+  });
+
+  it("DELETE does not unlink a file reached through an escaping symlink", async () => {
+    const res = await DELETE(deleteRequest("link/secrets.txt"));
+    expect(res.status).toBe(403);
+    await expect(fs.stat(secretFile)).resolves.toBeDefined();
   });
 });

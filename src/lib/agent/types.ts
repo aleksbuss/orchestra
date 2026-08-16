@@ -5,13 +5,17 @@ export interface AgentContext {
   projectId?: string;
   currentPath?: string; // relative path within the project for cwd
   /**
-   * Resolved absolute work directory for this run. Populated by the agent
-   * context builder after looking up the project — for linked projects this
-   * is the user's real repo root (`absoluteRoot`), for sandbox projects it
-   * is `data/projects/<id>/`. Sync helpers in `tool.ts` (resolveContextCwd)
-   * read this directly to avoid an async lookup on every file resolution.
-   * Optional for backward compat; if undefined, callers fall back to
-   * `getWorkDir(projectId)` which returns the sandbox path.
+   * The project's CONTENT root for this run, resolved once by the agent
+   * context builder via `getProjectContentRoot` — the user's real repo
+   * (`absoluteRoot`) for a linked project, `data/projects/<id>/` for a
+   * sandbox one. Sync helpers read it directly to avoid an async lookup on
+   * every file resolution.
+   *
+   * Optional for backward compat. When it is undefined, callers fall back to
+   * `getProjectMetaRoot(projectId)` — the Orchestra-owned sandbox, NOT a sync
+   * guess at the content root. PM #105: every consumer must go through
+   * `resolveContextBaseDir`, so the path the agent is TOLD and the path its
+   * tools ACT in can never disagree.
    */
   workDir?: string;
   memorySubdir: string;

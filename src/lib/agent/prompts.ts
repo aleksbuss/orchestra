@@ -2,10 +2,12 @@ import fs from "fs/promises";
 import path from "path";
 import {
   getProject,
-  loadProjectSkillsMetadata,
   getProjectFiles,
   getProjectContentRoot,
 } from "@/lib/storage/project-store";
+import {
+  loadProjectSkillsMetadata,
+} from "@/lib/storage/project-skills";
 import { getChatFiles } from "@/lib/storage/chat-files-store";
 import { getActiveGoal } from "@/lib/storage/goal-store";
 import type { GoalTask } from "@/lib/types";

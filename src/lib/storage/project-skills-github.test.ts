@@ -43,14 +43,16 @@ let cwdSpy: any;
 let fetchSpy: any;
 
 async function loadModule() {
-  // installSkillFromGitHub moved to project-skills-github; createProject /
-  // createSkill (test setup) stay in project-store. Merge both namespaces so
-  // every `m.<symbol>` accessor resolves regardless of which module it lives in.
-  const [store, github] = await Promise.all([
+  // The three modules this suite needs: `installSkillFromGitHub` lives in
+  // project-skills-github, `createSkill` (test setup) in project-skills, and
+  // `createProject` + the skill-dir helpers in project-store. Merge all three
+  // so every `m.<symbol>` accessor resolves regardless of which one owns it.
+  const [store, skills, github] = await Promise.all([
     import("./project-store"),
+    import("./project-skills"),
     import("./project-skills-github"),
   ]);
-  return { ...store, ...github };
+  return { ...store, ...skills, ...github };
 }
 
 beforeEach(async () => {

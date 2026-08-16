@@ -3,8 +3,10 @@ import path from "path";
 import {
   getProject,
   getProjectSkillsDir,
-  validateSkillName,
 } from "@/lib/storage/project-store";
+import {
+  validateSkillName,
+} from "@/lib/storage/project-skills";
 
 const SKILL_FILE_NAME = "SKILL.md";
 const BUNDLED_SKILLS_DIR = path.join(process.cwd(), "bundled-skills");

@@ -11,15 +11,17 @@ import fs from "fs/promises";
 import path from "path";
 import { safeWriteFile } from "./fs-utils";
 import {
+  getProjectSkillsDir,
+  getProject,
+  ensureDir,
+} from "./project-store";
+import {
   SKILL_FILE,
   parseFrontmatter,
   validateSkillName,
   findProjectSkillDir,
-  getProjectSkillsDir,
-  getProject,
-  ensureDir,
   migrateLegacySkillsDir,
-} from "./project-store";
+} from "./project-skills";
 
 const GITHUB_API_BASE = "https://api.github.com";
 const GITHUB_MAX_SKILL_FILES = 600;

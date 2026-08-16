@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProject, loadProjectSkills } from "@/lib/storage/project-store";
+import {
+  getProject,
+} from "@/lib/storage/project-store";
+import {
+  loadProjectSkills,
+} from "@/lib/storage/project-skills";
 
 export async function GET(
   _req: NextRequest,

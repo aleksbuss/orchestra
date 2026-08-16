@@ -9,7 +9,7 @@ import {
 import { deleteChatsByProjectId } from "@/lib/storage/chat-store";
 import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
-import { assertPathInside, safeWriteFile, withFileLock } from "./fs-utils";
+import { assertPathInsideRealpath, safeWriteFile, withFileLock } from "./fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
 
 const DATA_DIR = getDataDir();
@@ -18,51 +18,142 @@ const PROJECTS_DIR = path.join(DATA_DIR, "projects");
 /** ID used for "No Project (Global)" — work dir is data/projects */
 export const GLOBAL_PROJECT_ID = "none";
 
-/**
- * Resolve work directory for a project or global context.
+/*
+ * ─── Project roots: there are TWO, and they are deliberately two names ───
  *
- * - When `absoluteRoot` is provided (linked-project case): returns it as-is.
- *   This is how the Open Folder feature wires user-real-world repos through
- *   `getWorkDir` without changing every caller.
- * - When `projectId` is null/undefined or GLOBAL_PROJECT_ID ("none"): returns
- *   `data/projects/` (the global sandbox).
- * - Otherwise (sandbox project): returns `data/projects/<projectId>/`.
+ *   getProjectContentRoot(id)   async   Where the project's FILES live.
+ *                                       Linked project → its `absoluteRoot`.
+ *                                       Sandbox project → data/projects/<id>/.
  *
- * The function stays synchronous because most callers are sync. Async callers
- * that have only `projectId` and need to honor `absoluteRoot` should use
- * `resolveWorkDirForProject(projectId)` (below) which does the project lookup.
+ *   getProjectMetaRoot(id)      sync    Where ORCHESTRA's own per-project
+ *                                       state lives (.meta/, blackboard).
+ *                                       ALWAYS data/projects/<id>/ — never
+ *                                       the user's repository.
+ *
+ * PM #105 came from one name serving both meanings: `getWorkDir(projectId)`
+ * returned the sandbox, `getWorkDir(projectId, absoluteRoot)` returned the
+ * linked repo, and which one you got depended on whether the caller happened
+ * to have looked the project up. The tool that REPORTED the working directory
+ * got the sandbox while every tool that ACTED got the repo; the agent believed
+ * the report and answered from the wrong codebase.
+ *
+ * So: no single-name resolver, and no sync content root. Resolving content
+ * means reading project.json, and a cached sync accessor would hand out a
+ * stale root intermittently — a worse failure than the one being fixed
+ * (silent, non-reproducible, and it looks like a model error).
+ *
+ * A caller that cannot say which of the two it wants is the bug.
+ * `workdir-resolution-contract.test.ts` fails the build on new bare uses.
  */
-export function getWorkDir(
-  projectId?: string | null,
-  absoluteRoot?: string | null
-): string {
-  if (absoluteRoot && absoluteRoot.trim() !== "") return absoluteRoot;
+
+/**
+ * Orchestra-owned directory for a project: `data/projects/<id>/`, or
+ * `data/projects/` for the global context. Never honors `absoluteRoot` —
+ * Orchestra's internals do not get written into the user's repository.
+ */
+export function getProjectMetaRoot(projectId?: string | null): string {
   if (!projectId || projectId === GLOBAL_PROJECT_ID) return PROJECTS_DIR;
   return path.join(PROJECTS_DIR, projectId);
 }
 
 /**
- * Async helper: look up a project and return its effective work directory.
- * Used by the agent context builder when constructing `AgentContext.workDir`
- * so all downstream sync helpers (`resolveContextCwd` etc.) can read the
- * resolved path without re-doing the lookup per tool call.
+ * The project's content root — the directory whose FILES the project is
+ * about. For a linked project (Open Folder) that is the validated
+ * `absoluteRoot`; for a sandbox project it coincides with the meta root.
  *
- * Falls back to the sandbox path on any lookup failure — never throws.
+ * Async because it reads `project.json`. Falls back to the sandbox on any
+ * lookup failure — never throws, because every caller is on a request path
+ * where a thrown resolver would take down the turn.
  */
-export async function resolveWorkDirForProject(
+export async function getProjectContentRoot(
   projectId?: string | null
 ): Promise<string> {
   if (!projectId || projectId === GLOBAL_PROJECT_ID) return PROJECTS_DIR;
   try {
     const project = await getProject(projectId);
-    return getWorkDir(projectId, project?.absoluteRoot);
+    const linked = project?.absoluteRoot?.trim();
+    return linked || getProjectMetaRoot(projectId);
   } catch {
-    return getWorkDir(projectId);
+    return getProjectMetaRoot(projectId);
   }
 }
 
 export async function ensureDir(dir: string) {
   await fs.mkdir(dir, { recursive: true });
+}
+
+/**
+ * Thrown when an operator-supplied `absoluteRoot` is not a linkable directory.
+ * Routes map it to a 400; every other failure keeps its existing status.
+ */
+export class InvalidProjectRootError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidProjectRootError";
+  }
+}
+
+/**
+ * Validate and canonicalize an operator-supplied `absoluteRoot` before it is
+ * persisted. Until this existed, `PUT /api/projects/<id>` spread the request
+ * body straight into `updateProject`, so ANY string became a project's
+ * filesystem root — including one that does not exist, a regular file, or the
+ * data directory itself.
+ *
+ * Rejects:
+ *   - relative paths (a relative root resolves against `process.cwd()`, which
+ *     differs between `next dev`, a cron tick and a test run);
+ *   - paths that don't exist or aren't directories (the agent would `cd` into
+ *     nothing and improvise — that is PM #105's failure shape);
+ *   - the data directory or any ancestor of it. `data/settings/*.json` holds
+ *     provider API keys, and the Files API lists + downloads anything under a
+ *     project's content root — a root of `/` would publish the vault.
+ *
+ * Returns the REALPATH, not the input. Every guard on the linked surface
+ * (`assertPathInsideRealpath`) compares against the realpath'd root, so
+ * storing the realpath keeps the value the operator sees, the value we store,
+ * and the guard's baseline the same string. On macOS this means a link to
+ * `/tmp/x` is stored as `/private/tmp/x`.
+ */
+export async function validateAbsoluteRoot(raw: string): Promise<string> {
+  const candidate = raw.trim();
+  if (!candidate) {
+    throw new InvalidProjectRootError("absoluteRoot must not be empty");
+  }
+  if (!path.isAbsolute(candidate)) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot must be an absolute path (got "${candidate}")`
+    );
+  }
+
+  let realRoot: string;
+  try {
+    realRoot = await fs.realpath(path.resolve(candidate));
+  } catch {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" does not exist`
+    );
+  }
+
+  const stat = await fs.stat(realRoot);
+  if (!stat.isDirectory()) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" is not a directory`
+    );
+  }
+
+  // The data dir may not exist yet on a fresh install — fall back to the
+  // string form rather than letting a missing dir skip the check.
+  const realDataDir = await fs
+    .realpath(path.resolve(DATA_DIR))
+    .catch(() => path.resolve(DATA_DIR));
+  if (realRoot === realDataDir || realDataDir.startsWith(realRoot + path.sep)) {
+    throw new InvalidProjectRootError(
+      `absoluteRoot "${candidate}" contains Orchestra's data directory`
+    );
+  }
+
+  return realRoot;
 }
 
 function projectMetaDir(projectId: string) {
@@ -598,8 +689,12 @@ export async function createProject(
   project: Omit<Project, "createdAt" | "updatedAt">
 ): Promise<Project> {
   const now = new Date().toISOString();
+  const linkedRoot = project.absoluteRoot?.trim();
   const fullProject: Project = {
     ...project,
+    // Validated at the library layer, not only at the route, so a script or a
+    // future caller cannot write an unchecked root behind the API's back.
+    absoluteRoot: linkedRoot ? await validateAbsoluteRoot(linkedRoot) : undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -696,13 +791,27 @@ export async function updateProject(
   updates: Partial<Project>
 ): Promise<Project | null> {
   const filePath = projectMetaFile(projectId);
+
+  // Validate BEFORE taking the lock: an invalid root must fail without
+  // touching project.json. An explicitly falsy `absoluteRoot` in the patch
+  // means "unlink" — the key is dropped and the project reverts to its
+  // sandbox. `JSON.stringify` omits the undefined value on write.
+  let patch = updates;
+  if ("absoluteRoot" in updates) {
+    const raw = updates.absoluteRoot?.trim();
+    patch = {
+      ...updates,
+      absoluteRoot: raw ? await validateAbsoluteRoot(raw) : undefined,
+    };
+  }
+
   return await withFileLock(filePath, async () => {
     const existing = await getProject(projectId);
     if (!existing) return null;
 
     const updated: Project = {
       ...existing,
-      ...updates,
+      ...patch,
       id: existing.id, // don't allow ID change
       updatedAt: new Date().toISOString(),
     };
@@ -748,14 +857,16 @@ export async function getProjectFiles(
   projectId: string,
   subPath: string = ""
 ): Promise<{ name: string; type: "file" | "directory"; size: number }[]> {
-  const baseDir = getWorkDir(projectId);
+  const baseDir = await getProjectContentRoot(projectId);
   // PM #16 defense-in-depth — `path.join` normalizes `../` silently, so a
   // caller that forgot to validate `subPath` could escape the project
   // sandbox. Guard here too; route-layer validation is not assumed.
+  // PM #105 — realpath variant, because `baseDir` can be a linked project's
+  // real repository root, symlinks and all.
   let targetDir = baseDir;
   if (subPath) {
     try {
-      targetDir = assertPathInside(baseDir, subPath);
+      targetDir = await assertPathInsideRealpath(baseDir, subPath);
     } catch {
       return [];
     }
@@ -783,10 +894,6 @@ export async function getProjectFiles(
   } catch {
     return [];
   }
-}
-
-export function getProjectWorkDir(projectId: string): string {
-  return path.join(PROJECTS_DIR, projectId);
 }
 
 export { PROJECTS_DIR };

@@ -6,10 +6,12 @@ import {
   getAllProjects,
   createProject,
   getProject,
-  getWorkDir,
 } from "@/lib/storage/project-store";
 import { slugifyProjectId } from "@/lib/tools/text-helpers";
-import { normalizeContextPathForOutput } from "@/lib/tools/tool-paths";
+import {
+  normalizeContextPathForOutput,
+  resolveContextBaseDir,
+} from "@/lib/tools/tool-paths";
 
 /**
  * Project navigation tool family: list/inspect/switch/create projects.
@@ -65,7 +67,7 @@ export function createProjectNavTools(context: AgentContext): ToolSet {
           projectId: null,
           projectName: null,
           currentPath: normalizeContextPathForOutput(context.currentPath),
-          workDir: getWorkDir(undefined),
+          workDir: resolveContextBaseDir(context),
           message: "No project is selected (global context).",
         };
       }
@@ -77,12 +79,11 @@ export function createProjectNavTools(context: AgentContext): ToolSet {
         projectId: context.projectId,
         projectName: project?.name ?? null,
         currentPath: normalizeContextPathForOutput(context.currentPath),
-        // Same precedence as `resolveContextCwd`: the pre-resolved
-        // `context.workDir` wins because it honors a linked project's
-        // `absoluteRoot`. Reporting the raw `getWorkDir(projectId)` sandbox
-        // path here sends the agent `cd`-ing into an empty `data/projects/<id>/`
-        // while its tools actually run in the linked repo (PM #105).
-        workDir: context.workDir?.trim() || getWorkDir(context.projectId),
+        // PM #105 — the SAME resolver the acting tools use, not a lookalike.
+        // Reporting a separately-derived path sends the agent `cd`-ing into an
+        // empty `data/projects/<id>/` while its tools run in the linked repo,
+        // and the report is internally consistent so nothing catches it.
+        workDir: resolveContextBaseDir(context),
       };
     },
   });

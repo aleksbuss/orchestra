@@ -3,13 +3,13 @@
  * Orchestra. The full file is 1500+ lines; this suite covers four
  * tightly-scoped layers:
  *
- *   1. Path helpers (sync, pure-ish — `getWorkDir`, `getProjectSkillsDir`,
- *      `getProjectMcpDir`, etc.)
+ *   1. Path helpers (sync, pure-ish — `getProjectMetaRoot`,
+ *      `getProjectSkillsDir`, `getProjectMcpDir`, etc.)
  *   2. Skill-name validation (pure function, security-relevant)
  *   3. Project CRUD (`getAllProjects`, `getProject`, `createProject`,
  *      `updateProject`, `deleteProject`)
  *   4. File-tree readout (`getProjectFiles`) and the work-dir resolver
- *      (`resolveWorkDirForProject`).
+ *      (`getProjectContentRoot`).
  *
  * Skill mutations + MCP server config + GitHub install — these are
  * 600+ lines of separate logic and need their own follow-up suite.
@@ -69,6 +69,18 @@ afterEach(async () => {
 const projectsDir = () => path.join(tmpRoot, "data", "projects");
 
 /**
+ * Create a real directory OUTSIDE the data dir and return its realpath —
+ * what a linked project's `absoluteRoot` looks like after validation. The
+ * realpath matters on macOS, where `os.tmpdir()` is `/var/folders/…` and
+ * resolves to `/private/var/folders/…`.
+ */
+async function realDir(name: string): Promise<string> {
+  const dir = path.join(tmpRoot, "linked", name);
+  await fs.mkdir(dir, { recursive: true });
+  return await fs.realpath(dir);
+}
+
+/**
  * Make `fs.mkdir` throw for one path suffix, and hand back the restore.
  *
  * `fs` here is the SHARED `node:fs/promises` binding that every other module —
@@ -89,35 +101,38 @@ function failMkdirAt(pathSuffix: string): () => void {
 // TIER 1 — path helpers
 // ────────────────────────────────────────────────────────────
 
-describe("getWorkDir — sync sandbox / global / linked-root resolver", () => {
+describe("getProjectMetaRoot — sync, Orchestra-owned root", () => {
   it("returns PROJECTS_DIR for null/undefined projectId (global)", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir(null)).toBe(projectsDir());
-    expect(m.getWorkDir(undefined)).toBe(projectsDir());
+    expect(m.getProjectMetaRoot(null)).toBe(projectsDir());
+    expect(m.getProjectMetaRoot(undefined)).toBe(projectsDir());
   });
 
   it("returns PROJECTS_DIR for the literal GLOBAL_PROJECT_ID 'none'", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("none")).toBe(projectsDir());
+    expect(m.getProjectMetaRoot("none")).toBe(projectsDir());
     expect(m.GLOBAL_PROJECT_ID).toBe("none");
   });
 
-  it("returns sandbox path for a real project id", async () => {
+  it("returns the sandbox path for a real project id", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("proj-1")).toBe(path.join(projectsDir(), "proj-1"));
-  });
-
-  it("absoluteRoot wins — returns it verbatim when provided (linked project)", async () => {
-    const m = await loadModule();
-    expect(m.getWorkDir("proj-1", "/Users/me/repos/foo")).toBe(
-      "/Users/me/repos/foo"
+    expect(m.getProjectMetaRoot("proj-1")).toBe(
+      path.join(projectsDir(), "proj-1")
     );
   });
 
-  it("ignores empty/whitespace absoluteRoot (falls back to sandbox)", async () => {
+  it("NEVER honors absoluteRoot — a linked project's meta stays in the sandbox", async () => {
     const m = await loadModule();
-    expect(m.getWorkDir("proj-1", "")).toBe(path.join(projectsDir(), "proj-1"));
-    expect(m.getWorkDir("proj-1", "   ")).toBe(path.join(projectsDir(), "proj-1"));
+    const linkedRoot = await realDir("meta-stays-put");
+    await m.createProject(
+      sampleProject("proj-linked", { absoluteRoot: linkedRoot })
+    );
+    // The whole point of the second name: Orchestra's own state must not be
+    // written into the user's repository.
+    expect(m.getProjectMetaRoot("proj-linked")).toBe(
+      path.join(projectsDir(), "proj-linked")
+    );
+    expect(await m.getProjectContentRoot("proj-linked")).toBe(linkedRoot);
   });
 });
 
@@ -146,11 +161,6 @@ describe("path helpers — derived per-project paths", () => {
     expect(m.getProjectMcpServersPath("p-1")).toBe(
       path.join(projectsDir(), "p-1", ".meta", "mcp", "servers.json")
     );
-  });
-
-  it("getProjectWorkDir is the sandbox path (NEVER honors absoluteRoot — that's getWorkDir's job)", async () => {
-    const m = await loadModule();
-    expect(m.getProjectWorkDir("p-1")).toBe(path.join(projectsDir(), "p-1"));
   });
 });
 
@@ -341,12 +351,13 @@ describe("createProject", () => {
 
   it("preserves absoluteRoot when supplied (linked-project case)", async () => {
     const m = await loadModule();
+    const linkedRoot = await realDir("preserved");
     const out = await m.createProject(
-      sampleProject("p-linked", { absoluteRoot: "/Users/me/repos/foo" })
+      sampleProject("p-linked", { absoluteRoot: linkedRoot })
     );
-    expect(out.absoluteRoot).toBe("/Users/me/repos/foo");
+    expect(out.absoluteRoot).toBe(linkedRoot);
     const reloaded = await m.getProject("p-linked");
-    expect(reloaded?.absoluteRoot).toBe("/Users/me/repos/foo");
+    expect(reloaded?.absoluteRoot).toBe(linkedRoot);
   });
 });
 
@@ -653,40 +664,171 @@ describe("getProjectFiles", () => {
 });
 
 // ────────────────────────────────────────────────────────────
-// TIER 4 — resolveWorkDirForProject
+// TIER 4 — getProjectContentRoot
 // ────────────────────────────────────────────────────────────
 
-describe("resolveWorkDirForProject — async sandbox/linked resolver", () => {
+describe("getProjectContentRoot — async sandbox/linked resolver", () => {
   it("returns PROJECTS_DIR for null/undefined/'none'", async () => {
     const m = await loadModule();
-    expect(await m.resolveWorkDirForProject(null)).toBe(projectsDir());
-    expect(await m.resolveWorkDirForProject(undefined)).toBe(projectsDir());
-    expect(await m.resolveWorkDirForProject("none")).toBe(projectsDir());
+    expect(await m.getProjectContentRoot(null)).toBe(projectsDir());
+    expect(await m.getProjectContentRoot(undefined)).toBe(projectsDir());
+    expect(await m.getProjectContentRoot("none")).toBe(projectsDir());
   });
 
   it("returns the SANDBOX path for a project without absoluteRoot", async () => {
     const m = await loadModule();
     await m.createProject(sampleProject("p-sand"));
-    expect(await m.resolveWorkDirForProject("p-sand")).toBe(
+    expect(await m.getProjectContentRoot("p-sand")).toBe(
       path.join(projectsDir(), "p-sand")
     );
   });
 
   it("returns the absoluteRoot for a linked project (Open Folder feature)", async () => {
     const m = await loadModule();
+    const linkedRoot = await realDir("repo-linked");
     await m.createProject(
-      sampleProject("p-linked", { absoluteRoot: "/Users/me/repos/foo" })
+      sampleProject("p-linked", { absoluteRoot: linkedRoot })
     );
-    expect(await m.resolveWorkDirForProject("p-linked")).toBe(
-      "/Users/me/repos/foo"
-    );
+    expect(await m.getProjectContentRoot("p-linked")).toBe(linkedRoot);
   });
 
   it("falls back to sandbox when getProject lookup fails (never throws)", async () => {
     const m = await loadModule();
     // Project does not exist — getProject returns null, fallback path used.
-    expect(await m.resolveWorkDirForProject("p-missing")).toBe(
+    expect(await m.getProjectContentRoot("p-missing")).toBe(
       path.join(projectsDir(), "p-missing")
     );
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// TIER 5 — validateAbsoluteRoot (write-side guard)
+//
+// Before this existed, `PUT /api/projects/<id>` spread the request body into
+// `updateProject`, so any string at all became a project's filesystem root.
+// ────────────────────────────────────────────────────────────
+
+describe("validateAbsoluteRoot", () => {
+  it("accepts an existing directory and returns its REALPATH", async () => {
+    const m = await loadModule();
+    const dir = path.join(tmpRoot, "linked", "ok");
+    await fs.mkdir(dir, { recursive: true });
+    expect(await m.validateAbsoluteRoot(dir)).toBe(await fs.realpath(dir));
+  });
+
+  it("rejects a relative path — it would resolve against an unstable cwd", async () => {
+    const m = await loadModule();
+    await expect(m.validateAbsoluteRoot("../elsewhere")).rejects.toBeInstanceOf(
+      m.InvalidProjectRootError
+    );
+  });
+
+  it("rejects an empty / whitespace root", async () => {
+    const m = await loadModule();
+    await expect(m.validateAbsoluteRoot("   ")).rejects.toBeInstanceOf(
+      m.InvalidProjectRootError
+    );
+  });
+
+  it("rejects a path that does not exist", async () => {
+    const m = await loadModule();
+    await expect(
+      m.validateAbsoluteRoot(path.join(tmpRoot, "nope", "missing"))
+    ).rejects.toBeInstanceOf(m.InvalidProjectRootError);
+  });
+
+  it("rejects a regular file", async () => {
+    const m = await loadModule();
+    const file = path.join(tmpRoot, "a-file.txt");
+    await fs.writeFile(file, "x", "utf-8");
+    await expect(m.validateAbsoluteRoot(file)).rejects.toBeInstanceOf(
+      m.InvalidProjectRootError
+    );
+  });
+
+  it("rejects the data directory itself — that root publishes data/settings", async () => {
+    const m = await loadModule();
+    const dataDir = path.join(tmpRoot, "data");
+    await fs.mkdir(dataDir, { recursive: true });
+    await expect(m.validateAbsoluteRoot(dataDir)).rejects.toBeInstanceOf(
+      m.InvalidProjectRootError
+    );
+  });
+
+  it("rejects an ANCESTOR of the data directory (the `/` case)", async () => {
+    const m = await loadModule();
+    await fs.mkdir(path.join(tmpRoot, "data"), { recursive: true });
+    // tmpRoot contains data/ — linking it would expose the API-key vault
+    // through the Files API's list + download handlers.
+    await expect(m.validateAbsoluteRoot(tmpRoot)).rejects.toBeInstanceOf(
+      m.InvalidProjectRootError
+    );
+  });
+});
+
+describe("absoluteRoot is validated on every write path", () => {
+  it("createProject stores the realpath of a valid linked root", async () => {
+    const m = await loadModule();
+    const linkedRoot = await realDir("created");
+    const created = await m.createProject(
+      sampleProject("p-new", { absoluteRoot: linkedRoot })
+    );
+    expect(created.absoluteRoot).toBe(linkedRoot);
+    expect((await m.getProject("p-new"))?.absoluteRoot).toBe(linkedRoot);
+  });
+
+  it("createProject rejects a non-existent linked root", async () => {
+    const m = await loadModule();
+    await expect(
+      m.createProject(
+        sampleProject("p-bad", { absoluteRoot: "/definitely/not/here" })
+      )
+    ).rejects.toBeInstanceOf(m.InvalidProjectRootError);
+  });
+
+  it("updateProject rejects a bogus absoluteRoot and leaves project.json untouched", async () => {
+    const m = await loadModule();
+    await m.createProject(sampleProject("p-1"));
+    const before = await m.getProject("p-1");
+
+    await expect(
+      m.updateProject("p-1", { absoluteRoot: "/definitely/not/here" })
+    ).rejects.toBeInstanceOf(m.InvalidProjectRootError);
+
+    // Not even `updatedAt` moved — validation runs before the file lock.
+    expect(await m.getProject("p-1")).toEqual(before);
+  });
+
+  it("updateProject links a valid root (stored as realpath)", async () => {
+    const m = await loadModule();
+    await m.createProject(sampleProject("p-1"));
+    const linkedRoot = await realDir("updated");
+
+    const updated = await m.updateProject("p-1", { absoluteRoot: linkedRoot });
+    expect(updated?.absoluteRoot).toBe(linkedRoot);
+    expect(await m.getProjectContentRoot("p-1")).toBe(linkedRoot);
+  });
+
+  it("an explicitly empty absoluteRoot UNLINKS the project back to its sandbox", async () => {
+    const m = await loadModule();
+    const linkedRoot = await realDir("unlink-me");
+    await m.createProject(sampleProject("p-1", { absoluteRoot: linkedRoot }));
+
+    await m.updateProject("p-1", { absoluteRoot: "" });
+
+    expect((await m.getProject("p-1"))?.absoluteRoot).toBeUndefined();
+    expect(await m.getProjectContentRoot("p-1")).toBe(
+      path.join(projectsDir(), "p-1")
+    );
+  });
+
+  it("an update that does not mention absoluteRoot leaves the link intact", async () => {
+    const m = await loadModule();
+    const linkedRoot = await realDir("keep-me");
+    await m.createProject(sampleProject("p-1", { absoluteRoot: linkedRoot }));
+
+    await m.updateProject("p-1", { name: "Renamed" });
+
+    expect((await m.getProject("p-1"))?.absoluteRoot).toBe(linkedRoot);
   });
 });

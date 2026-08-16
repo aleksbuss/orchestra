@@ -55,7 +55,7 @@ import {
 } from "@/lib/agent/moa";
 import { captureSuccessfulTrace } from "@/lib/agent/trace-memory";
 import { insertMemory, searchMemory } from "@/lib/memory/memory";
-import { resolveWorkDirForProject } from "@/lib/storage/project-store";
+import { getProjectContentRoot } from "@/lib/storage/project-store";
 
 // §10 phase 1 — message/response helpers live in agent-response.ts.
 import {
@@ -444,7 +444,7 @@ export async function runAgent(options: RunAgentOptions) {
   // (linked projects honor `absoluteRoot`; sandbox projects fall back to
   // `data/projects/<id>/`). Pre-resolving here avoids an async lookup on
   // every tool call inside resolveContextCwd.
-  const workDir = await resolveWorkDirForProject(options.projectId);
+  const workDir = await getProjectContentRoot(options.projectId);
   const context: AgentContext = {
     chatId: options.chatId,
     projectId: options.projectId,
@@ -1452,7 +1452,7 @@ export async function runAgentText(options: {
     currentPath: options.currentPath,
   });
 
-  const workDir = await resolveWorkDirForProject(options.projectId);
+  const workDir = await getProjectContentRoot(options.projectId);
   const context: AgentContext = {
     chatId: options.chatId,
     projectId: options.projectId,
@@ -1724,7 +1724,7 @@ export async function runSubordinateAgent(options: {
     projectId: options.projectId,
   });
 
-  const workDir = await resolveWorkDirForProject(options.projectId);
+  const workDir = await getProjectContentRoot(options.projectId);
   const context: AgentContext = {
     // Sprint 9 — use the REAL parent chat id so deeper-level recursive
     // subordinates also see the real chat for budget + bubble-up.

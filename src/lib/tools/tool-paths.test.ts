@@ -4,11 +4,12 @@ import os from "os";
 import path from "path";
 import {
   normalizeContextPathForOutput,
+  resolveContextBaseDir,
   resolveContextCwd,
   resolveOutgoingFilePath,
   resolveReadableFilePath,
 } from "./tool-paths";
-import { getWorkDir } from "@/lib/storage/project-store";
+import { getProjectMetaRoot } from "@/lib/storage/project-store";
 import type { AgentContext } from "@/lib/agent/types";
 
 /**
@@ -70,9 +71,28 @@ describe("resolveContextCwd", () => {
     );
   });
 
-  it("falls back to getWorkDir(projectId) when no workDir is set", () => {
+  // PM #105 — the fallback is deliberately the Orchestra-owned META root, not
+  // a synchronous guess at the content root. A context with no `workDir` has
+  // no resolved project; the sandbox is the honest answer, and a linked
+  // project's real repo can only be reached through the async resolver.
+  it("falls back to the project META root when no workDir is set", () => {
     expect(resolveContextCwd(ctx({ workDir: undefined }))).toBe(
-      getWorkDir(undefined)
+      getProjectMetaRoot(undefined)
+    );
+  });
+});
+
+describe("resolveContextBaseDir", () => {
+  it("prefers context.workDir and ignores currentPath", () => {
+    const workDir = path.join(os.tmpdir(), "linked-project-root");
+    expect(
+      resolveContextBaseDir(ctx({ workDir, currentPath: "src/lib" }))
+    ).toBe(workDir);
+  });
+
+  it("falls back to the project META root when workDir is blank", () => {
+    expect(resolveContextBaseDir(ctx({ workDir: "   ", projectId: "p-1" }))).toBe(
+      getProjectMetaRoot("p-1")
     );
   });
 });

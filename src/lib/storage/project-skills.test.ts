@@ -42,8 +42,30 @@ vi.mock("@/lib/realtime/event-bus", () => ({
 let tmpRoot: string;
 let cwdSpy: any;
 
+/**
+ * Captured at import time, BEFORE `beforeEach` spies `process.cwd()` onto a
+ * tmpdir. The seam test below reads real repo source, so it must not go
+ * through the spy.
+ */
+const REPO_ROOT = process.cwd();
+
+/**
+ * The skills surface spans the seam on purpose: `project-skills.ts` owns the
+ * read/write API, `project-store.ts` keeps `createProject` and the skill
+ * DIRECTORY helpers (it scaffolds `.meta/skills/` itself, so moving those
+ * would make the two modules import each other). This suite drives the
+ * feature end-to-end, so it loads both — merged, and re-imported fresh after
+ * `vi.resetModules()` so each gets the spied cwd.
+ *
+ * A name collision between the two would be silently resolved by the spread,
+ * so the seam test below asserts there is none.
+ */
 async function loadModule() {
-  return await import("./project-store");
+  const [store, skills] = await Promise.all([
+    import("./project-store"),
+    import("./project-skills"),
+  ]);
+  return { ...store, ...skills };
 }
 
 beforeEach(async () => {
@@ -545,5 +567,102 @@ describe("deleteSkill", () => {
     const m = await loadModule();
     const result = await m.deleteSkill("p-1", "  CASE-TEST  ");
     expect(result.success).toBe(true);
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// The seam itself
+// ────────────────────────────────────────────────────────────
+
+describe("project-skills / project-store seam", () => {
+  it("exports no overlapping names, so the merged namespace above hides nothing", async () => {
+    const [store, skills] = await Promise.all([
+      import("./project-store"),
+      import("./project-skills"),
+    ]);
+    const overlap = Object.keys(skills).filter((k) => k in store);
+    expect(overlap).toEqual([]);
+  });
+
+  it("project-store does not import project-skills (one-way, no cycle)", async () => {
+    const fsSync = await import("node:fs");
+    const src = fsSync.readFileSync(
+      path.join(REPO_ROOT, "src/lib/storage/project-store.ts"),
+      "utf8"
+    );
+    // `createProject` calls `ensureDir(getProjectSkillsDir(id))`, so the
+    // directory helpers have to stay on the project-store side. If someone
+    // moves them, project-store starts importing project-skills, which
+    // already imports project-store — a cycle.
+    expect(src).not.toMatch(/from\s+["'](\.\/)?project-skills["']/);
+    expect(src).toMatch(/export function getProjectSkillsDir\b/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────
+// validateSkillName — moved here with its code (project-skills.ts)
+// ────────────────────────────────────────────────────────────
+
+describe("validateSkillName — pure validation (Agent Skills spec)", () => {
+  // The Agent Skills spec requires lowercase letters, digits, and hyphens,
+  // no leading/trailing hyphen, no consecutive hyphens, and ≤ 64 chars.
+  // This regex is the implicit security boundary: skill names flow into
+  // path joins as directory names, so anything that escapes the regex
+  // (slashes, dots, NULL bytes) becomes a path-traversal class issue.
+
+  it("accepts the spec-allowed shapes", async () => {
+    const m = await loadModule();
+    for (const name of [
+      "pdf",
+      "pdf-parsing",
+      "my-skill",
+      "abc123",
+      "skill-with-many-words",
+      "a", // 1-char minimum is allowed
+    ]) {
+      expect(m.validateSkillName(name), name).toBeNull();
+    }
+  });
+
+  it("rejects empty / whitespace-only", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("")).toMatch(/required/i);
+    expect(m.validateSkillName("   ")).toMatch(/required/i);
+  });
+
+  it("rejects names > 64 chars", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("x".repeat(65))).toMatch(/64 characters/i);
+  });
+
+  it("rejects uppercase letters (lowercase-only spec)", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("MySkill")).toMatch(/lowercase/i);
+    expect(m.validateSkillName("My-Skill")).toMatch(/lowercase/i);
+  });
+
+  it("rejects leading or trailing hyphens", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("-bad")).not.toBeNull();
+    expect(m.validateSkillName("bad-")).not.toBeNull();
+  });
+
+  it("rejects consecutive hyphens", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("a--b")).not.toBeNull();
+  });
+
+  it("rejects path-traversal-class characters (slashes, dots, NULL)", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("../evil")).not.toBeNull();
+    expect(m.validateSkillName("a/b")).not.toBeNull();
+    expect(m.validateSkillName("a\\b")).not.toBeNull();
+    expect(m.validateSkillName("a.b")).not.toBeNull();
+    expect(m.validateSkillName("a\x00b")).not.toBeNull();
+  });
+
+  it("rejects whitespace within the name", async () => {
+    const m = await loadModule();
+    expect(m.validateSkillName("a b")).not.toBeNull();
   });
 });

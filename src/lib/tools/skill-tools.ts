@@ -11,7 +11,7 @@ import {
   updateSkill,
   deleteSkill,
   writeSkillFile,
-} from "@/lib/storage/project-store";
+} from "@/lib/storage/project-skills";
 import { installSkillFromGitHub } from "@/lib/storage/project-skills-github";
 import { inferLanguageFromPath } from "@/lib/tools/text-helpers";
 import {

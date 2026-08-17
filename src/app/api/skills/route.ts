@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { loadProjectSkillsMetadata } from "@/lib/storage/project-store";
+import {
+  loadProjectSkillsMetadata,
+} from "@/lib/storage/project-skills";
 import {
   installBundledSkill,
   listBundledSkills,

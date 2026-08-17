@@ -7,11 +7,14 @@ import { NextRequest } from "next/server";
 
 vi.mock("@/lib/storage/project-store", () => ({
   getProject: vi.fn(),
+}));
+vi.mock("@/lib/storage/project-skills", () => ({
   loadProjectSkills: vi.fn(),
 }));
 
 import { GET } from "./route";
-import { getProject, loadProjectSkills } from "@/lib/storage/project-store";
+import { getProject } from "@/lib/storage/project-store";
+import { loadProjectSkills } from "@/lib/storage/project-skills";
 
 const mockedGet = vi.mocked(getProject);
 const mockedLoad = vi.mocked(loadProjectSkills);

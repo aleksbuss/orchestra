@@ -1,18 +1,17 @@
 /**
  * Tests for `project-store.ts` — the JSON-on-disk "main table" of
- * Orchestra. The full file is 1500+ lines; this suite covers four
- * tightly-scoped layers:
+ * Orchestra. This suite covers three tightly-scoped layers:
  *
  *   1. Path helpers (sync, pure-ish — `getProjectMetaRoot`,
  *      `getProjectSkillsDir`, `getProjectMcpDir`, etc.)
- *   2. Skill-name validation (pure function, security-relevant)
- *   3. Project CRUD (`getAllProjects`, `getProject`, `createProject`,
+ *   2. Project CRUD (`getAllProjects`, `getProject`, `createProject`,
  *      `updateProject`, `deleteProject`)
- *   4. File-tree readout (`getProjectFiles`) and the work-dir resolver
+ *   3. File-tree readout (`getProjectFiles`) and the work-dir resolver
  *      (`getProjectContentRoot`).
  *
- * Skill mutations + MCP server config + GitHub install — these are
- * 600+ lines of separate logic and need their own follow-up suite.
+ * Skills, MCP server config and GitHub install each moved out with their
+ * code — see `project-skills.test.ts`, `project-mcp.test.ts` and
+ * `project-skills-github.test.ts`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import os from "node:os";
@@ -161,74 +160,6 @@ describe("path helpers — derived per-project paths", () => {
     expect(m.getProjectMcpServersPath("p-1")).toBe(
       path.join(projectsDir(), "p-1", ".meta", "mcp", "servers.json")
     );
-  });
-});
-
-// ────────────────────────────────────────────────────────────
-// TIER 1.5 — validateSkillName (security-relevant)
-// ────────────────────────────────────────────────────────────
-
-describe("validateSkillName — pure validation (Agent Skills spec)", () => {
-  // The Agent Skills spec requires lowercase letters, digits, and hyphens,
-  // no leading/trailing hyphen, no consecutive hyphens, and ≤ 64 chars.
-  // This regex is the implicit security boundary: skill names flow into
-  // path joins as directory names, so anything that escapes the regex
-  // (slashes, dots, NULL bytes) becomes a path-traversal class issue.
-
-  it("accepts the spec-allowed shapes", async () => {
-    const m = await loadModule();
-    for (const name of [
-      "pdf",
-      "pdf-parsing",
-      "my-skill",
-      "abc123",
-      "skill-with-many-words",
-      "a", // 1-char minimum is allowed
-    ]) {
-      expect(m.validateSkillName(name), name).toBeNull();
-    }
-  });
-
-  it("rejects empty / whitespace-only", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("")).toMatch(/required/i);
-    expect(m.validateSkillName("   ")).toMatch(/required/i);
-  });
-
-  it("rejects names > 64 chars", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("x".repeat(65))).toMatch(/64 characters/i);
-  });
-
-  it("rejects uppercase letters (lowercase-only spec)", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("MySkill")).toMatch(/lowercase/i);
-    expect(m.validateSkillName("My-Skill")).toMatch(/lowercase/i);
-  });
-
-  it("rejects leading or trailing hyphens", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("-bad")).not.toBeNull();
-    expect(m.validateSkillName("bad-")).not.toBeNull();
-  });
-
-  it("rejects consecutive hyphens", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("a--b")).not.toBeNull();
-  });
-
-  it("rejects path-traversal-class characters (slashes, dots, NULL)", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("../evil")).not.toBeNull();
-    expect(m.validateSkillName("a/b")).not.toBeNull();
-    expect(m.validateSkillName("a\\b")).not.toBeNull();
-    expect(m.validateSkillName("a.b")).not.toBeNull();
-    expect(m.validateSkillName("a\x00b")).not.toBeNull();
-  });
-
-  it("rejects whitespace within the name", async () => {
-    const m = await loadModule();
-    expect(m.validateSkillName("a b")).not.toBeNull();
   });
 });
 

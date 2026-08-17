@@ -26,14 +26,13 @@ import fs from "node:fs/promises";
 vi.mock("@/lib/storage/project-store", () => ({
   getProject: vi.fn(),
   getProjectSkillsDir: vi.fn(),
+}));
+vi.mock("@/lib/storage/project-skills", () => ({
   validateSkillName: vi.fn(),
 }));
 
-import {
-  getProject,
-  getProjectSkillsDir,
-  validateSkillName,
-} from "@/lib/storage/project-store";
+import { getProject, getProjectSkillsDir } from "@/lib/storage/project-store";
+import { validateSkillName } from "@/lib/storage/project-skills";
 
 // `BUNDLED_SKILLS_DIR` is computed at module-load time via `process.cwd()`.
 // We must dynamic-import the module AFTER the cwd spy is installed so the

@@ -17,7 +17,7 @@ There is no APM. Reconstructing what happened requires reading three things:
 - **First command — one-shot diagnostic (PM #31):**
   ```bash
   curl -s --cookie "$(cat ~/.orchestra-cookie 2>/dev/null)" \
-    http://localhost:3000/api/_debug/chat/<chatId> | jq
+    http://localhost:3000/api/debug/chat/<chatId> | jq
   ```
   Returns `{ diskState, recentLogs, sseBusHealthy, activeJob, uptimeSec }` in one shot — replaces the four manual steps below for ~95% of cases. (Requires a session cookie; if you don't have one, log into the dashboard once and copy `orchestra_auth` out of dev-tools.)
 - **Fallback manual steps** (use when the route is unreachable — server down, no session, or to corroborate the diagnostic):

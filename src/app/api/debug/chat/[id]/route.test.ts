@@ -1,5 +1,5 @@
 /**
- * PM #31 regression test — `/api/_debug/chat/<id>` observability endpoint
+ * PM #31 regression test — `/api/debug/chat/<id>` observability endpoint
  * returns the 5 fields the operator needs in one shot: disk state, recent
  * logs scoped to the chat, SSE bus health, active-job presence, uptime.
  *
@@ -31,10 +31,10 @@ afterEach(async () => {
 });
 
 function makeReq(): NextRequest {
-  return new NextRequest("http://localhost:3000/api/_debug/chat/anything");
+  return new NextRequest("http://localhost:3000/api/debug/chat/anything");
 }
 
-describe("PM #31 — /api/_debug/chat/<id>", () => {
+describe("PM #31 — /api/debug/chat/<id>", () => {
   it("returns diskState.exists=false for a chatId with no on-disk file", async () => {
     const res = await routeModule.GET(makeReq(), {
       params: Promise.resolve({ id: "nonexistent" }),

@@ -115,6 +115,46 @@ export function createTokenGovernor(opts: {
   };
 }
 
+/** Fraction of the per-turn step budget at which the one-shot notice fires. */
+export const STEP_BUDGET_WARNING_RATIO = 0.75;
+
+/**
+ * Sprint B — wrap a `prepareStep` governor so that ONCE, when the tool loop
+ * crosses `STEP_BUDGET_WARNING_RATIO` of its step budget, a single notice is
+ * appended to that step's messages nudging the model to converge before the
+ * hard cap. This is the backpressure that pairs with the raised
+ * `MAX_TOOL_STEPS_PER_TURN`: the loop-abort breaker already catches an IDENTICAL
+ * repeated call, but not a legitimate-but-inefficient turn that wanders file by
+ * file — the exact 82%-of-budget exploration turn that motivated the raise.
+ *
+ * Injected AFTER the governor prunes (so the notice is never itself pruned) and
+ * exactly once (`stepNumber === warnAt`, and prepareStep runs before every step
+ * so the crossing is never skipped). ~1 sentence, negligibly over budget. Role
+ * `user`, not `system`: a mid-conversation system message is rejected by some
+ * providers, and this is the same channel `REISSUE_CORRECTION` uses.
+ */
+export function withStepBudgetNotice(
+  governor: PrepareStepFunction,
+  opts: { maxSteps: number }
+): PrepareStepFunction {
+  const warnAt = Math.floor(opts.maxSteps * STEP_BUDGET_WARNING_RATIO);
+  return async (stepOpts) => {
+    const governed = (await governor(stepOpts)) ?? {};
+    if (stepOpts.stepNumber !== warnAt) return governed;
+    const base = governed.messages ?? stepOpts.messages;
+    const notice: ModelMessage = {
+      role: "user",
+      content:
+        `SYSTEM NOTICE: you have used ${warnAt} of ${opts.maxSteps} tool steps this turn. ` +
+        `Reading files one by one to map an unfamiliar codebase is the slow path — if a ` +
+        `code-navigation / knowledge-graph skill is available, query it instead of more ` +
+        `reads. Converge on the most direct route to the answer and deliver it before the ` +
+        `step limit forces a pause.`,
+    };
+    return { ...governed, messages: [...base, notice] };
+  };
+}
+
 /**
  * Prune a message array toward `budget` tokens, least-destructive first.
  * Exported for direct unit testing.

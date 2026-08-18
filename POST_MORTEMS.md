@@ -38,6 +38,34 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 107. A free model printed its tool call in a dialect the hallucination detector did not know, so 18 KB of XML reached the user and the recovery forced a blank answer
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1 — a real operator turn on `telegramattacker` delivered garbage instead of the edited file, twice in a row; reproducible on any `dots-*` free model under long context.
+**Symptoms:** The user asked the agent (Free Mode, brain `dots-studio/dots-3-note-preview:free`) to write a file. Its FINAL message was 18829 characters of `<dots_function_call>\n<invoke name="write_text_file">\n<parameter name="file_path">…</parameter>…</invoke>\n</dots_function_call>` — printed as text, never executed. The file was not written; the user saw XML. The log showed `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=other)` — TWICE, because the forced-answer recovery landed in the same broken output.
+**Detection:** Reading the live chat on disk (`data/chats/9891bb43-*.json`) while watching the server log, NOT a test. The turn used **0 of its 50** tool steps before failing, which ruled out the step budget the operator suspected and pointed at the printed-markup class (PM #81). The decisive fact: `extractHallucinatedToolCall` returned `null` on the exact 18 KB message.
+**Root Cause:** `extractHallucinatedToolCall` (`src/lib/agent/agent-response.ts`) had five branches — Functionary `<function=NAME>`, Qwen `<tool_call>{json}`, Mistral `[TOOL_CALLS]`, DeepSeek `<｜tool▁call▁begin｜>`, and bare-`response` JSON. Every one assumes the tool NAME is either in the tag (`<function=NAME>`) or a JSON `name` field. The Claude/dots XML dialect puts the name in a `name="…"` ATTRIBUTE (`<invoke name="NAME">`) with `<parameter name="KEY">` pairs — no branch matched, so Sprint-1 suppression never fired and Sprint-2 re-issue was never reached.
+**Resolution:** Added branch 6 to `extractHallucinatedToolCall` for the `<invoke name="…"><parameter name="…">…</invoke>` form (optionally wrapped in `<dots_function_call>`/`<function_calls>`), anchored on the invoke tag plus a real block boundary so prose naming the syntax never matches. `REISSUE_CORRECTION` and `system.md` hard_constraint #5 now name this dialect explicitly.
+**Regression Coverage:** Four cases in [`hallucinated-tool-call.test.ts`](src/lib/agent/hallucinated-tool-call.test.ts) (dots-wrapped, bare `<invoke>`, no-arg call, and the prose-mention negative), and the fix was verified against the ACTUAL 18829-char message from the live chat (detected as `write_text_file`).
+**Doc Updates:** `src/prompts/system.md` hard_constraint #5.
+**Rule:** Every new free/frontier model can invent a NEW tool-call dialect; the printed-markup detector is a growing allowlist of shapes, not a finished one. When a turn ships markup as text, capture the REAL message and add a branch — a synthetic example proves nothing. And a "0 of N steps used" turn is not a step-budget problem.
+
+---
+
+## 106. The documented "stuck chat" observability endpoint 404'd over HTTP for its entire life, because a leading underscore made Next exclude the route
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1 — the one-shot forensics endpoint the runbook tells an operator to curl when a chat is stuck was never reachable; the recovery tool was dead exactly when it would be needed.
+**Symptoms:** `GET /api/_debug/chat/<id>` returned 404 over real HTTP — byte-identical to a nonexistent path — despite the route file existing and its unit test passing.
+**Detection:** A manual `curl` during a live verification pass, compared against a deliberately-bogus path (both 404). The route's own test (`route.test.ts`) had been green the whole time because it imports the `GET` handler directly and calls it with a hand-built `NextRequest`, so it exercises the handler's payload contract but NEVER Next's routing — the one thing that was broken.
+**Root Cause:** Next.js App Router treats any path segment beginning with `_` as a **private folder**, excluded from routing. `src/app/api/_debug/chat/[id]/route.ts` therefore never mapped to a URL. The `_debug` name was chosen to signal "internal", not knowing the framework reads it as "unrouteable".
+**Resolution:** Renamed `src/app/api/_debug` → `src/app/api/debug`; updated the test URL and the live doc pointers (`observability-runbook.md`, `CLAUDE.md` reference index, `graphify-integration-adr.md`). Verified live on an isolated server: the old `/api/_debug/...` path 404s, the new `/api/debug/...` returns 200 with the full `{chatId, diskState, recentLogs, sseBusHealthy, …}` envelope.
+**Regression Coverage:** [`route.test.ts`](src/app/api/debug/chat/[id]/route.test.ts) continues to guard the handler; routing is now correct by construction (no `_` segment). **Known gap, stated honestly:** a handler-imported-directly test cannot catch a routing-exclusion bug — only an HTTP-level (e2e) request can, and none is wired for this route.
+**Doc Updates:** `CLAUDE.md` reference-index row; `docs/references/observability-runbook.md`.
+**Rule:** A folder whose name starts with `_` under `app/` is invisible to routing — never name a real route segment `_x`. And a test that imports a route's handler proves the handler, not that the URL resolves; the two failure modes do not overlap.
+
+---
+
 ## 105. The agent's own orientation tool told it the wrong working directory, so on a linked project it answered from a different repository
 **Date:** 2026-08
 **Status:** RESOLVED
@@ -1823,7 +1851,7 @@ Deliberately NOT introducing `@tanstack/react-virtual`: pulling in a 5 KB dep fo
 **Symptoms:** Recurring time-tax on debug sessions. CLAUDE.md § Observability listed a 4-step manual checklist (read `data/chats/<id>.json`, grep `data/logs/*.jsonl`, curl `/api/events`, check daemon active-jobs). Each step is fine in isolation; running 4 of them every time a user said "the chat is stuck" was friction. No structured way to ask "what is the full state of chat X right now?"
 **Detection:** Self-audit Section #1.E — flagged as an enabler for the rest of Sprint 1. Concretely: every other PM in this sprint produces signals that need a query surface; without it, the signals exist but are invisible.
 **Root Cause:** Original design intentionally avoided an APM dep. The four-source checklist worked but composed badly. No single-file aggregator existed.
-**Resolution:** New `GET /api/_debug/chat/<id>` route in [`src/app/api/_debug/chat/[id]/route.ts`](src/app/api/_debug/chat/[id]/route.ts). Auth-gated through standard middleware (no entry in `isPublicApi`, so a valid session cookie is required — the route reads chat state and recent logs, both potentially sensitive).
+**Resolution:** New `GET /api/debug/chat/<id>` route in [`src/app/api/debug/chat/[id]/route.ts`](src/app/api/debug/chat/[id]/route.ts). Auth-gated through standard middleware (no entry in `isPublicApi`, so a valid session cookie is required — the route reads chat state and recent logs, both potentially sensitive). *(Originally shipped at `/api/_debug/…`; the leading underscore made Next exclude the folder from routing so it 404'd over HTTP for its whole life — renamed to `debug` in PM #106. Paths here are the current ones.)*
 
 Returns five fields in one JSON envelope:
   1. `diskState` — exists, title, projectId, messageCount, updatedAt, lastMessage (id/role/contentPreview ≤ 240 chars, toolName, createdAt). The canonical source of truth per PM #5.
@@ -1835,9 +1863,9 @@ Returns five fields in one JSON envelope:
 Single curl now replaces the 4-step checklist:
 ```bash
 curl -s --cookie "$(cat ~/.orchestra-cookie)" \
-  http://localhost:3000/api/_debug/chat/<id> | jq
+  http://localhost:3000/api/debug/chat/<id> | jq
 ```
-**Regression Coverage:** [`src/app/api/_debug/chat/[id]/route.test.ts`](src/app/api/_debug/chat/[id]/route.test.ts) — 4 cases: missing-chat response shape; existing-chat lastMessage population; `recentLogs` filter scope (only the requested chatId; other chats' logs and non-JSON lines stay out); contentPreview ≤ 240 chars boundary.
+**Regression Coverage:** [`src/app/api/debug/chat/[id]/route.test.ts`](src/app/api/debug/chat/[id]/route.test.ts) — 4 cases: missing-chat response shape; existing-chat lastMessage population; `recentLogs` filter scope (only the requested chatId; other chats' logs and non-JSON lines stay out); contentPreview ≤ 240 chars boundary.
 **Doc Updates:** [`CLAUDE.md`](CLAUDE.md) § "Observability" — checklist updated to point at the new endpoint as the first command; the 4 manual sources remain as fallback when the route is unreachable (server down, no session).
 **Rule:** Observability endpoints are not free, but they pay back N times for every debug session. Pattern: ONE endpoint per "what's the state of X?" question, auth-gated, idempotent, bounded output. Add to the postmortem checklist in CLAUDE.md when you ship one — otherwise the operator never knows it exists.
 

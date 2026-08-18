@@ -6,8 +6,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-3974%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-105%20documented-purple)](./POST_MORTEMS.md)
+[![Tests](https://img.shields.io/badge/tests-3998%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-107%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -230,7 +230,7 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 - **MCP support** — per-project MCP server config with SSRF guard
 
 ### Observability
-- **`/api/_debug/chat/<id>`** — single-shot diagnostic endpoint
+- **`/api/debug/chat/<id>`** — single-shot diagnostic endpoint
 - **`POST_MORTEMS.md`** — architectural failure modes documented with regression-test pointers
 - **Structured JSONL logs** with `traceId` propagation
 

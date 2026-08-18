@@ -98,6 +98,43 @@ describe("extractHallucinatedToolCall (PM #81)", () => {
     expect(call?.args).toEqual({ file_path: "e.ts" });
   });
 
+  // ── PM #81 followup (LIVE 2026-08-18, chat 9891bb43): a free `dots-*` model
+  // printed the Claude/dots XML form as its FINAL message — name in a `name="…"`
+  // ATTRIBUTE, `<parameter name="…">` pairs, wrapped in `<dots_function_call>`.
+  // No prior branch matched it, so 18 KB of XML reached the user. ──────────────
+  it("parses the dots_function_call-wrapped <invoke name=><parameter name=> form (the live degradation)", () => {
+    const raw =
+      "<dots_function_call>\n<invoke name=\"write_text_file\">\n" +
+      "<parameter name=\"file_path\">\n/proj/src/perf.ts\n</parameter>\n" +
+      "<parameter name=\"content\">\nimport { EventEmitter } from 'events';\nexport class M {}\n</parameter>\n" +
+      "</invoke>\n</dots_function_call>";
+    const call = extractHallucinatedToolCall(raw);
+    expect(call?.name).toBe("write_text_file");
+    expect(call?.args.file_path).toBe("/proj/src/perf.ts");
+    expect(String(call?.args.content)).toContain("import { EventEmitter }");
+  });
+
+  it("parses a bare <invoke name=> block with no wrapper", () => {
+    const raw =
+      'I will read it.\n<invoke name="read_text_file"><parameter name="file_path">a.ts</parameter></invoke>';
+    const call = extractHallucinatedToolCall(raw);
+    expect(call?.name).toBe("read_text_file");
+    expect(call?.args).toEqual({ file_path: "a.ts" });
+  });
+
+  it("parses a no-argument <invoke name=> call (get_current_project)", () => {
+    const raw = '<invoke name="get_current_project"></invoke>';
+    const call = extractHallucinatedToolCall(raw);
+    expect(call?.name).toBe("get_current_project");
+    expect(call?.args).toEqual({});
+  });
+
+  it("does NOT match prose that merely names the <invoke name=...> syntax", () => {
+    const prose =
+      'A degraded model may type `<invoke name="write_text_file">` as text instead of calling it.';
+    expect(extractHallucinatedToolCall(prose)).toBeNull();
+  });
+
   it("recovers a bare JSON `response` blob (PM #61) — the ONLY bare-JSON case", () => {
     const raw = '{"name":"response","arguments":{"message":"hi"}}';
     expect(extractHallucinatedToolCall(raw)?.name).toBe("response");

@@ -44,7 +44,7 @@ import {
   filterDeepRecall,
 } from "@/lib/agent/compressor";
 import { resolveContextWindow, compactionThresholdFor, effectiveContextWindow } from "@/lib/providers/context-window";
-import { createTokenGovernor } from "@/lib/agent/token-governor";
+import { createTokenGovernor, withStepBudgetNotice } from "@/lib/agent/token-governor";
 import { getBrainConfig, type PresetTier } from "@/lib/agent/presets";
 import { resolveWorkerKey } from "@/lib/agent/moa-personas";
 import {
@@ -104,13 +104,19 @@ export type { TurnContinuationResult };
 
 // Per-turn tool-step budget. A SAFETY/cost bound on ONE generateText/streamText
 // loop — NOT a task-sizing target (a heavy task spans several user "Continue"s).
-// Raised 30→50 once the runaway protection got stronger (PM #76 loop guard, the
-// per-file rewrite budget, the token governor): the cap can be more generous
-// because identical/looping/oversized churn is now interrupted independently of
-// it. When a turn EXHAUSTS this budget without delivering an answer, the agent
-// emits a deterministic "reached step limit — press Continue" pause notice
-// instead of forcing a model-authored completion summary (which masqueraded as
-// "done"). See resolveTurnContinuation (agent-response.ts).
+// Raised 30→50, then 50→100 (Sprint B): the runaway protection is now decoupled
+// from this ceiling entirely, so the ceiling only has to bound a LEGITIMATE turn.
+// An IDENTICAL repeated call is aborted in ~3 steps by `loopAbortStop`, oversized
+// churn by the token governor + per-file rewrite budget — none of which counts on
+// this number being small. What 50 actually bounded was honest exploration: a
+// real turn that read a codebase file by file used 41/50 and a graphify-less
+// codebase-assessment turn spent 82% of the budget on reads. Raising to 100 gives
+// that legitimate work room; `withStepBudgetNotice` (token-governor.ts) adds a
+// one-shot backpressure nudge at 75% so the extra room is not silent. When a turn
+// EXHAUSTS this budget without delivering an answer, the agent still emits a
+// deterministic "reached step limit — press Continue" pause notice instead of a
+// model-authored completion summary (which masqueraded as "done"). See
+// resolveTurnContinuation (agent-response.ts).
 /**
  * What a non-streaming turn returns when neither the model nor the delivery
  * ladder produced any text. An empty string would be reported as success by
@@ -123,7 +129,7 @@ const EMPTY_TURN_NOTICE =
   "retry costs time without changing the outcome. Try again, or switch the " +
   "chat model.";
 
-const MAX_TOOL_STEPS_PER_TURN = 50;
+const MAX_TOOL_STEPS_PER_TURN = 100;
 const MAX_TOOL_STEPS_SUBORDINATE = 25;
 
 /**
@@ -133,7 +139,7 @@ const MAX_TOOL_STEPS_SUBORDINATE = 25;
  *
  * A spiral is a FAILURE state, not a finish — so we bound it, we do NOT convert
  * it to "done". A WEAK model that compulsively re-runs one passing command now
- * aborts in ~3 steps instead of bleeding to the 50-step cap; a STRONG model never
+ * aborts in ~3 steps instead of bleeding to the per-turn cap; a STRONG model never
  * repeats one BLOCKED call 3× in a row (it changes arguments), so this has ZERO
  * regression surface for strong models. onFinish re-derives the same signal
  * (`countTrailingLoopBlockSteps`) to drive the honest loop-abort PAUSE notice.
@@ -905,7 +911,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
     providerOptions,
     tools: effectiveTools,
     maxRetries: 3,
-    prepareStep: tokenGovernor,
+    // Sprint B — token governor + a one-shot step-budget backpressure notice at
+    // 75% of the raised cap (no-op on a non-tool 1-step turn).
+    prepareStep: withStepBudgetNotice(tokenGovernor, { maxSteps: MAX_TOOL_STEPS_PER_TURN }),
     ...(useTools
       ? {
           // PM #65 — AI SDK v5 removed `maxSteps` from streamText; it was a
@@ -1024,7 +1032,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // Loop-abort (2026-07-28): did the turn stop EARLY because the model was
         // stuck repeating an identical blocked call? Re-derive the same signal
         // the `loopAbortStop` stopWhen used, from the final steps, so the pause
-        // notice can distinguish "stuck in a loop" from "hit the 50-step cap".
+        // notice can distinguish "stuck in a loop" from "hit the per-turn step cap".
         const loopAbortReached =
           Array.isArray((event as unknown as { steps?: unknown[] }).steps) &&
           countTrailingLoopBlockSteps(
@@ -1524,7 +1532,8 @@ export async function runAgentText(options: {
       providerOptions,
       tools,
       maxRetries: 3,
-      prepareStep: tokenGovernor,
+      // Sprint B — see the streamText path: same 75%-of-cap backpressure notice.
+      prepareStep: withStepBudgetNotice(tokenGovernor, { maxSteps: MAX_TOOL_STEPS_PER_TURN }),
       stopWhen: [stepCountIs(MAX_TOOL_STEPS_PER_TURN), hasToolCall("response"), loopAbortStop],
       temperature: settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(settings.chatModel),

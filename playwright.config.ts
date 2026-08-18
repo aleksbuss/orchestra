@@ -85,7 +85,14 @@ export default defineConfig({
       // Always start our OWN isolated server — never reuse a server that might be
       // pointed at the real data dir.
       reuseExistingServer: false,
-      env: { ORCHESTRA_DATA_DIR: E2E_DATA_DIR, ORCHESTRA_BACKUP_DIR: E2E_BACKUP_DIR },
+      env: {
+        ORCHESTRA_DATA_DIR: E2E_DATA_DIR,
+        ORCHESTRA_BACKUP_DIR: E2E_BACKUP_DIR,
+        // Determinism: never let a graphify CLI on the runner's PATH change what
+        // a created project contains (skill-autoinstall.ts). Explicit, not by
+        // absence of the binary.
+        ORCHESTRA_SKILL_AUTOINSTALL: "off",
+      },
     },
     {
       command: `PORT=${CLEAN_BOOT_PORT} npm run dev`,
@@ -97,6 +104,10 @@ export default defineConfig({
         // Its own build dir — two `next dev` processes sharing `.next/` race
         // each other (see the note in next.config.mjs).
         ORCHESTRA_NEXT_DIST_DIR: CLEAN_BOOT_DIST_DIR,
+        // A clean boot must contain exactly what a fresh install creates — a
+        // graphify CLI on the runner's PATH must not silently add a skill to a
+        // project the spec creates. Pinned off explicitly, not left to chance.
+        ORCHESTRA_SKILL_AUTOINSTALL: "off",
         ...CLEAN_BOOT_PROVIDER_ENV,
       },
     },

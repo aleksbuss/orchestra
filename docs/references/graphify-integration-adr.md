@@ -22,7 +22,7 @@ The question this record answers: should agents get it, and through which of the
 
 **Ship it as a skill routed through `code_execution`. Do not add a tool. Do not add an MCP server.**
 
-The skill is opt-in per project (`installBundledSkill`), so it costs zero prompt tokens and zero risk until an operator installs it into a project.
+The skill is opt-in per project (`installBundledSkill`), so it costs zero prompt tokens and zero risk until an operator installs it into a project. *(Updated 2026-08-18: installation is now **binary-gated auto-install** — a new project receives graphify automatically when, and only when, the `graphify` CLI is present on `PATH`. See "Binary-gated auto-install" below. The zero-cost-until-present property is preserved: no CLI → no install.)*
 
 ## Options considered
 
@@ -127,7 +127,7 @@ AST-derived edges print `[EXTRACTED]`. Nodes produced by the semantic (doc) pass
 
 ## End-to-end verification (2026-08-15, `scripts/run-real-task.ts`, project `bughunt`, `openrouter/~deepseek/deepseek-v4-flash-latest`, swarm forced)
 
-Two real agent turns, same project, same question. **Primary evidence is on disk** — chats `realrun-bughunt-688c1369` (Run A) and `realrun-bughunt-42c9e7d4` (Run B); reconstruct either with `/api/_debug/chat/<id>` (see [`observability-runbook.md`](./observability-runbook.md)). The `bughunt` project keeps its `graphify-out/` index and its installed copy of the skill, so both runs are re-runnable.
+Two real agent turns, same project, same question. **Primary evidence is on disk** — chats `realrun-bughunt-688c1369` (Run A) and `realrun-bughunt-42c9e7d4` (Run B); reconstruct either with `/api/debug/chat/<id>` (see [`observability-runbook.md`](./observability-runbook.md)). The `bughunt` project keeps its `graphify-out/` index and its installed copy of the skill, so both runs are re-runnable.
 
 **Run A — neutral prompt, skill installed but not named.** The agent did **not** load the skill: `{"read_text_file": 11}`, zero `load_skill`, zero `code_execution`; 98.1s. The `<available_skills>` block WAS in the prompt with the full description, so this is a selection decision, not a delivery failure — and it was the **right** decision: on a 16-file project, reading beats indexing, which is what this skill's own "when not to use" section says. It produced a fully correct answer naming `X-Telegram-Init-Data`, `verifyInitData`, the HMAC-SHA256 + 24h freshness check and the D1 upsert.
 
@@ -165,10 +165,30 @@ Primary evidence on disk, project `graphify-eval`: chats `realrun-graphify-eval-
 
 **What the exercise actually produced** was PM #105 — `get_current_project` reported the sandbox path for a linked project, the agent obeyed it, `cd`-ed out of the repository and answered from a different codebase. Driving the real agent found a defect no test had; the value question about the graph itself remains open.
 
+## Mitigation attempt (2026-08-18) — address invocation at the policy level, not only in the skill
+
+The 1-in-3 finding above is an *invocation* gap: `load_skill` fires, the graph does not. The skill's own Step 3 already said "query first, not grep" and it did not move the number — because the agent has usually already defaulted to `find`/`grep` **before** it reads any skill body. So the nudge was lifted to where that decision is actually made:
+
+- **`src/prompts/system.md` (`<code_execution_rules>`)** — a "codebase-exploration tool hierarchy" line that fires at the moment the agent is about to run `find`/`grep` to *understand* structure: check `<available_skills>` for a code-navigation skill and `load_skill` it first. Deliberately **conditional** on the skill being listed, so projects without graphify (the overwhelming majority) get no instruction referencing a skill they lack. This half is global and reaches every project immediately.
+- **`bundled-skills/graphify/SKILL.md`** — a `## Decision — graphify first, grep second` table moved to the TOP (above Step 0). The old fork lived at the bottom under "When not to use this skill", i.e. after the agent had already chosen its path.
+
+**Effect is unmeasured.** This is a prompt change against a stochastic, weak-free-model pipeline where n=2-per-arm already refuted one "measured" claim in this very document — so do not record a success number until it is re-run (arms B/C/C′) and the query-vs-no-query rate is compared honestly by *counting executed subcommands*, per the epistemics two paragraphs up. **Installed-copy drift is a known gap:** the two projects that carry graphify (`bughunt`, `graphify-eval`) hold older `SKILL.md` snapshots and will not pick up the new Decision block until reinstalled — as of 2026-08-18 their copies were refreshed by hand from the template, but nothing keeps them in sync (`installBundledSkill` refuses when a copy already exists, so it does not re-sync either).
+
+## Binary-gated auto-install (2026-08-18) — A+, the "install everywhere" the operator asked for
+
+The measured 82%-of-budget manual-exploration turn happened on a project where graphify was *not installed at all*, so no prompt fix could have reached it. The operator's standing request was to install graphify in **every** project. Blanket-installing it unconditionally is wrong for the reason this ADR kept it opt-in — it wraps a Python CLI absent on most fresh installs, so it would list a dead skill and spend prompt tokens on machines that cannot run it. The resolution is **binary-gated**: [`skill-autoinstall.ts`](../../src/lib/storage/skill-autoinstall.ts), called best-effort from `createProject`, installs graphify into a new project **only when a `graphify` executable is discoverable on `PATH`**.
+
+- **Detection is a `PATH` scan, not a spawn** (`fs.stat` over `PATH` entries, exec-bit checked on POSIX). Probing with `graphify --version` would add a child process to the scaffolding path and drag in the `scrubProcessEnv` obligation for a spawn `project-store` has no business making.
+- **`ORCHESTRA_SKILL_AUTOINSTALL`** (feature toggle, not a security-invariant bypass, so it lives here and not in the escape-hatch registry): `auto` (default — install iff the CLI is on `PATH`), `off`, `force`. The vitest setup pins it to `off` so the suite is hermetic — otherwise `createProject` would install on a developer machine that has the CLI and not on CI, and a skill-count assertion would flake by machine.
+- **Clean-boot stays green, for a concrete reason:** CI has no `graphify` binary → detection returns false → no install → `createProject` behaves exactly as before. The guarantee is preserved by the *gate*, not by opt-in-ness. Never install unconditionally.
+- Best-effort and never throws: the project is fully created before the copy is attempted (after the PM #104 rollback block), so a skill-copy failure cannot undo a project. It also never clobbers an existing copy. `createProject` logs `skill_autoinstall_failed` on a genuine failure (broken/permission-denied bundled copy) — distinct from the CLI simply being absent, which is silent.
+- **The copy is atomic** (hardened after a `protake` review): it lands in a unique `.graphify.installing-<pid>-<ts>` staging dir, its `SKILL.md` is verified, then it is `rename`d into place. A crash mid-copy therefore cannot leave a half-populated `graphify/` that a later run mistakes for a complete install and skips forever — the failure path removes the staging dir and leaves `target` untouched. Windows detection requires an executable extension (a bare `graphify` file is not a CLI). **Determinism:** both e2e servers pin `ORCHESTRA_SKILL_AUTOINSTALL=off` in [`playwright.config.ts`](../../playwright.config.ts) rather than relying on the runner's PATH lacking the binary. **Trust boundary:** the leaf module does not re-`assertPathInside` its `targetSkillsDir` — it trusts the one caller, which derives it from a ProjectSchema-validated id; do not call it with a user-supplied path.
+- Regression: [`skill-autoinstall.test.ts`](../../src/lib/storage/skill-autoinstall.test.ts) (mode parse, `PATH` detection incl. the non-exec-file negative, off/force/auto policy, install/skip-present/skip-off branches, no staging leftover) + two `createProject` integration cases in [`project-store.test.ts`](../../src/lib/storage/project-store.test.ts) (default-off installs nothing; forced installs the skill).
+
 ## Consequences
 
 - Graphify is unavailable to untrusted triggers. Intentional; see the escalation path in option A.
-- `bundled-skills/graphify` documents a dependency on an external Python CLI that is absent on essentially every fresh install. This is **not** a zero-dependency integration and must not be described as one. The clean-boot guarantee ([`clean-boot.spec.ts`](../../tests/e2e/clean-boot.spec.ts)) is unaffected because the skill is opt-in per project and probes for the binary before use.
+- `bundled-skills/graphify` documents a dependency on an external Python CLI that is absent on essentially every fresh install. This is **not** a zero-dependency integration and must not be described as one. The clean-boot guarantee ([`clean-boot.spec.ts`](../../tests/e2e/clean-boot.spec.ts)) is unaffected because auto-install is **binary-gated** (see the section above): a machine without the `graphify` CLI on `PATH` installs nothing, exactly as before. Installation is no longer purely opt-in — on a machine that HAS the CLI, every new project now receives it automatically — but the probe still runs before use, and the gate still means a fresh install with no CLI is untouched.
 - No change to the pinned tool inventory, no new npm dependency, no change to `package.json`.
 
 ## Provenance

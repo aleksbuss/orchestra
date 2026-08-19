@@ -33,6 +33,12 @@ import {
 } from "ai";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
+import { estimateTokenCount } from "@/lib/agent/compressor";
+import { governMessages } from "@/lib/agent/token-governor";
+import {
+  argumentByteSize,
+  recordToolChannelDegradation,
+} from "@/lib/agent/degradation-telemetry";
 import {
   extractHallucinatedToolCall,
   getLastAssistantText,
@@ -48,6 +54,23 @@ const REISSUE_MAX_RETRIES = 2;
 const REISSUE_STEP_CAP = 8;
 /** FIFO bound on tracked chats. */
 const MAX_TRACKED_CHATS = 500;
+
+/**
+ * PM #109 — token budget the re-issue runs at, independent of the brain's
+ * advertised window.
+ *
+ * The re-issue used to replay the FULL failing context to the SAME model, which
+ * is a retry under the exact conditions that just failed — measured live as a
+ * guaranteed repeat (three turns, ~77 s each, zero progress). Context length is
+ * one of the two variables driving the collapse, so the retry must change it.
+ *
+ * The value is deliberately far below any observed collapse point (the live
+ * incident degraded at ≈53 K sent tokens) rather than a fraction of the window:
+ * a re-issue does not need the whole conversation, only the recent tool results
+ * plus the correction. Pruning is pair-safe (`governMessages` → the SDK's own
+ * `pruneMessages`), so a dropped tool result never orphans its call.
+ */
+const REISSUE_CONTEXT_TOKEN_BUDGET = 16000;
 
 const attemptsByChat = new Map<string, number>();
 
@@ -81,46 +104,37 @@ export function resetReissueBudget(chatId?: string): void {
 }
 
 /**
- * PM #82 — chats where the model has printed a tool call as TEXT (the degradation
- * symptom). A flagged chat compacts more aggressively on its next pre-flight pass
- * to escape the long-context hallucination loop — a behavior-triggered backstop
- * that needs no window number, so it catches any model/provider that degrades
- * BELOW the static reliable-window cap. In-memory + per-process, evaporating on
- * restart like the reissue budget. Self-limiting: the tighter threshold only
- * fires when the chat is actually large, so a flag on a now-small chat is inert.
+ * PM #109 — the degraded-chat flag moved to `degradation-telemetry.ts`, which
+ * now owns BOTH the flag and the structured event that records the conditions.
+ * Re-exported here so the existing importers keep their import path.
  */
-const degradedChats = new Set<string>();
+export {
+  recordChatDegradation,
+  isChatDegraded,
+  resetChatDegradation,
+} from "@/lib/agent/degradation-telemetry";
 
-/** Flag `chatId` as degraded (a tool call was printed as text). */
-export function recordChatDegradation(chatId?: string): void {
-  if (!chatId) return;
-  degradedChats.add(chatId);
-  while (degradedChats.size > MAX_TRACKED_CHATS) {
-    const oldest = degradedChats.values().next().value;
-    if (oldest === undefined) break;
-    degradedChats.delete(oldest);
-  }
-}
-
-/** Has this chat shown the printed-tool-call degradation symptom? */
-export function isChatDegraded(chatId?: string): boolean {
-  return chatId ? degradedChats.has(chatId) : false;
-}
-
-/** Clear the degradation flag — one chat, or all when no id is given (tests). */
-export function resetChatDegradation(chatId?: string): void {
-  if (chatId) degradedChats.delete(chatId);
-  else degradedChats.clear();
-}
-
-/** Deterministic, Orchestra-authored correction injected for the re-issue. */
+/**
+ * Deterministic, Orchestra-authored correction injected for the re-issue.
+ *
+ * PM #109 — the last two sentences are load-bearing, not politeness. The
+ * measured trigger for the channel collapse is ARGUMENT SIZE × context, so a
+ * re-issue that repeats the SAME 16 KB `write_text_file` argument degrades
+ * again by construction (observed: three consecutive turns on chat 9891bb43).
+ * Steering the retry to a small targeted edit changes the causal variable
+ * instead of just asking the model to try harder.
+ */
 export const REISSUE_CORRECTION =
   "SYSTEM CORRECTION: Your previous message PRINTED a tool call as plain text " +
   "(e.g. a tool_call block, a function= block, an invoke/dots_function_call " +
   "block, or a raw JSON blob). That text was NOT executed — it never reaches the " +
   "tools. Re-issue the SAME action now as a NATIVE tool/function call through the " +
-  "proper tool-calling channel. Do NOT print tool-call markup again. If you " +
-  "genuinely cannot call the tool, explain the situation to the user in plain prose instead.";
+  "proper tool-calling channel. Do NOT print tool-call markup again. " +
+  "IMPORTANT: keep the tool ARGUMENTS SMALL — a large argument is what made the " +
+  "call fail to go through. If you were rewriting a whole existing file, do NOT " +
+  "repeat that; use `replace_in_file` on the smallest span that achieves the " +
+  "change, one call at a time. If you genuinely cannot call the tool, explain " +
+  "the situation to the user in plain prose instead.";
 
 /**
  * PM #97 (Layer 2) — correction for an intermittently-DROPPED native tool call.
@@ -155,6 +169,31 @@ export interface ToolReissueResult {
  * answer that is not itself another hallucination), else null — caller then
  * falls back to the plain forced answer. Never throws (returns null on error).
  */
+/**
+ * PM #109 — build the re-issue payload at a SHORT context.
+ *
+ * Exported for direct unit testing: the correction MUST survive pruning (it is
+ * the whole point of the call) and the result must stay pair-safe.
+ */
+export function buildReissueMessages(
+  baseMessages: ModelMessage[],
+  priorMessages: ModelMessage[],
+  correction: string,
+  budget: number = REISSUE_CONTEXT_TOKEN_BUDGET
+): { messages: ModelMessage[]; compactedFrom?: number } {
+  const merged = mergeConsecutiveSameRole([
+    ...baseMessages,
+    ...priorMessages,
+    { role: "user", content: correction },
+  ]);
+  const before = estimateTokenCount(merged);
+  if (before <= budget) return { messages: merged };
+  // `governMessages` keeps the most recent suffix, so the correction (last
+  // message) always survives; it is also what the in-flight governor uses, so
+  // the re-issue prunes exactly the way a normal step would.
+  return { messages: governMessages(merged, budget), compactedFrom: before };
+}
+
 export async function attemptToolReissue(args: {
   model: Parameters<typeof generateText>[0]["model"];
   systemPrompt: string;
@@ -172,16 +211,30 @@ export async function attemptToolReissue(args: {
    * (budget, pairing-safe merge, executed-tool detection) is identical.
    */
   correction?: string;
+  /**
+   * PM #109 — identity for the degradation event emitted when the re-issue
+   * ITSELF degrades into markup. Optional: omitting it costs the measurement,
+   * never the retry.
+   */
+  telemetry?: { chatId?: string; provider?: string; model?: string };
 }): Promise<ToolReissueResult | null> {
   try {
+    const { messages: reissueMessages, compactedFrom } = buildReissueMessages(
+      args.baseMessages,
+      args.priorMessages,
+      args.correction ?? REISSUE_CORRECTION
+    );
+    if (compactedFrom !== undefined) {
+      console.warn(
+        `[Agent] PM #109 — re-issuing at a SHORT context: ${compactedFrom} → ` +
+          `${estimateTokenCount(reissueMessages)} tokens (budget ${REISSUE_CONTEXT_TOKEN_BUDGET}). ` +
+          `Replaying the full failing context to the same model is a guaranteed repeat.`
+      );
+    }
     const result = await generateText({
       model: args.model,
       system: args.systemPrompt,
-      messages: mergeConsecutiveSameRole([
-        ...args.baseMessages,
-        ...args.priorMessages,
-        { role: "user", content: args.correction ?? REISSUE_CORRECTION },
-      ]),
+      messages: reissueMessages,
       providerOptions: args.providerOptions,
       tools: args.tools,
       prepareStep: args.prepareStep,
@@ -208,8 +261,26 @@ export async function attemptToolReissue(args: {
     // Nothing useful happened: empty output, OR degraded into markup again with
     // no tool executed. Either way the caller falls back to a plain answer.
     if (!text && !executedTool) return null;
-    if (!responseToolText && !executedTool && extractHallucinatedToolCall(text)) {
-      return null;
+    if (!responseToolText && !executedTool) {
+      const residual = extractHallucinatedToolCall(text);
+      if (residual) {
+        // PM #109 — the retry reproduced the failure. Record it: this is the
+        // sample that tells us whether the SHORT-context retry helped, which is
+        // the input to any future per-model boundary.
+        const usage = (result as { usage?: RawUsage }).usage;
+        recordToolChannelDegradation({
+          stage: "reissue",
+          chatId: args.telemetry?.chatId,
+          provider: args.telemetry?.provider,
+          model: args.telemetry?.model,
+          toolName: residual.name,
+          argBytes: argumentByteSize(residual.args),
+          markupChars: text.length,
+          contextTokensEstimate: estimateTokenCount(reissueMessages),
+          promptTokens: usage?.inputTokens ?? usage?.promptTokens,
+        });
+        return null;
+      }
     }
 
     return {

@@ -22,6 +22,7 @@ import {
   isLoopGuardRepeatBlock,
   LOOP_GUARD_REPEAT_MARKER,
 } from "./agent-response";
+import { isChatDegraded, resetChatDegradation } from "./degradation-telemetry";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -208,6 +209,42 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     // An honest, actionable notice is delivered instead.
     expect(res.text).toContain("printed the call as text");
     expect(res.uiNotice).toContain("write_text_file");
+  });
+
+  it("PM #109 — FLAGS the chat when the forced answer degrades, so the next turn compacts harder", async () => {
+    // The live defect (chat 9891bb43): this site shipped the notice but recorded
+    // nothing, so the PM #82 backstop never armed and the next turn ran at the
+    // same context and failed identically — three turns in a row.
+    resetChatDegradation("chat-degraded-at-forced-answer");
+    expect(isChatDegraded("chat-degraded-at-forced-answer")).toBe(false);
+
+    await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      chatId: "chat-degraded-at-forced-answer",
+      model: modelReturning(
+        '<dots_function_call>\n<invoke name="write_text_file">\n' +
+          '<parameter name="file_path">/x.ts</parameter>\n' +
+          '<parameter name="content">export const x = 1;</parameter>\n' +
+          "</invoke>\n</dots_function_call>"
+      ) as never,
+    });
+
+    expect(isChatDegraded("chat-degraded-at-forced-answer")).toBe(true);
+    resetChatDegradation("chat-degraded-at-forced-answer");
+  });
+
+  it("PM #109 — does NOT flag the chat when the forced answer is a clean reply", async () => {
+    resetChatDegradation("chat-clean-forced-answer");
+    await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      chatId: "chat-clean-forced-answer",
+      model: modelReturning("Here is your answer.") as never,
+    });
+    expect(isChatDegraded("chat-clean-forced-answer")).toBe(false);
   });
 
   it("still recovers a `response` tool call printed as markup in the forced answer (not treated as degradation)", async () => {

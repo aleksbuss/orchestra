@@ -17,7 +17,7 @@ import { detectToolSupport } from "@/lib/agent/agent-tool-capability";
 import { createStreamWatchdog, turnDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { handleStreamAbort, createPartialTextBuffer } from "@/lib/agent/agent-abort";
-import { foldTurnUsage } from "@/lib/cost/accumulator";
+import { foldTurnUsage, type RawUsage } from "@/lib/cost/accumulator";
 import {
   buildSystemPrompt,
   PLAIN_CHAT_TOOL_OVERRIDE,
@@ -79,10 +79,15 @@ import {
   attemptToolReissue,
   recordReissueAttempt,
   resetReissueBudget,
-  recordChatDegradation,
-  isChatDegraded,
   DROP_REISSUE_CORRECTION,
 } from "@/lib/agent/agent-tool-reissue";
+// PM #109 — degradation flag + the structured event that records the conditions.
+import {
+  argumentByteSize,
+  isChatDegraded,
+  readUpstreamProvider,
+  recordToolChannelDegradation,
+} from "@/lib/agent/degradation-telemetry";
 
 // §10 phase 2 — message conversion + request logging live in agent-messages.ts.
 import {
@@ -1060,7 +1065,27 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           // PM #82 — printing a tool call as text is the degradation symptom.
           // Flag the chat so its NEXT pre-flight pass compacts aggressively and
           // escapes the long-context loop (behavior-triggered backstop).
-          recordChatDegradation(options.chatId);
+          // PM #109 — and RECORD the conditions (argument size, context size,
+          // provider-reported prompt tokens, upstream) so the boundary can be
+          // learned from data instead of guessed at.
+          const lastStepUsage = (
+            (event as unknown as { steps?: ReadonlyArray<{ usage?: RawUsage }> }).steps ?? []
+          ).at(-1)?.usage;
+          recordToolChannelDegradation({
+            stage: "main-turn",
+            chatId: options.chatId,
+            provider: resolvedModelConfig.provider,
+            model: resolvedModelConfig.model,
+            toolName: hallucinatedCall.name,
+            argBytes: argumentByteSize(hallucinatedCall.args),
+            markupChars: hallucinatedCall.raw.length,
+            contextTokensEstimate: estimateTokenCount([
+              ...messages,
+              ...rawResponseMessages,
+            ]),
+            promptTokens: lastStepUsage?.inputTokens ?? lastStepUsage?.promptTokens,
+            upstreamProvider: readUpstreamProvider(event),
+          });
           const budget = recordReissueAttempt(options.chatId);
           console.warn(
             `[Agent] PM #81 — model printed "${hallucinatedCall.name}" as text instead of ` +
@@ -1077,6 +1102,11 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               prepareStep: tokenGovernor,
               settings,
               abortSignal: options.abortSignal,
+              telemetry: {
+                chatId: options.chatId,
+                provider: resolvedModelConfig.provider,
+                model: resolvedModelConfig.model,
+              },
             });
             if (reissue) {
               reissueMessages = reissue.responseMessages;
@@ -1127,6 +1157,11 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               settings,
               abortSignal: options.abortSignal,
               correction: DROP_REISSUE_CORRECTION,
+              telemetry: {
+                chatId: options.chatId,
+                provider: resolvedModelConfig.provider,
+                model: resolvedModelConfig.model,
+              },
             });
             if (reissue) {
               reissueMessages = reissue.responseMessages;
@@ -1174,6 +1209,9 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           brainConfig: resolvedModelConfig,
           projectId: options.projectId,
           currentPath: options.currentPath,
+          // PM #109 — so a degradation detected at the forced-answer stage flags
+          // the chat and is recorded, like one detected in the main turn.
+          chatId: options.chatId,
           degradationPolicy: resolveDegradationPolicy(
             settings,
             options.degradationPolicy,

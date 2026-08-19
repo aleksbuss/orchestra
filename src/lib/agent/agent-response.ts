@@ -781,6 +781,20 @@ const STEP_LIMIT_PAUSE_MESSAGE =
 const STEP_LIMIT_PAUSE_NOTICE =
   "[Agent] Reached the per-turn step limit — press Continue to resume the unfinished work.";
 
+/**
+ * Delivered when even the forced final answer degraded into a printed ACTION
+ * tool call — the model kept emitting tool markup as text under context pressure
+ * (the free-model long-context tool-channel dropout; see
+ * `orchestra-free-model-toolcall-limit`). Better an honest, actionable notice
+ * than shipping kilobytes of un-executed markup as if it were the answer.
+ */
+const TOOL_MARKUP_DEGRADATION_NOTICE =
+  "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
+  "nothing was changed. This is a known limit of some free models once the conversation grows long: a " +
+  "large tool argument makes them drop the tool-calling channel. To get it working: ask for a **smaller, " +
+  "targeted change** (the agent will use `replace_in_file` on a small span), start a **fresh chat** to " +
+  "shorten the context, or switch the chat model to a stronger one.";
+
 // ── Loop-abort (2026-07-28, DoubleTake-reviewed) ──────────────────────────────
 // The stable prefix `applyGlobalToolLoopGuard` (tool-guard.ts) emits when it
 // BLOCKS an identical (tool+args) repeat. Shared here — NOT in tool-guard.ts —
@@ -1017,6 +1031,20 @@ export async function resolveTurnContinuation(args: {
       degradationPolicy,
     });
     const text = unwrapSerializedResponseCall(attempt.text);
+    // If the forced answer ITSELF degraded into a printed ACTION tool call (the
+    // model keeps emitting tool markup as text under context pressure), do NOT
+    // ship the raw markup as the answer — that is the 16 KB-of-garbage failure.
+    // `response`-markup is already recovered by unwrapSerializedResponseCall
+    // above; anything else that still parses as a tool call is un-executed action
+    // (lost work), so deliver an honest, actionable notice instead.
+    const residual = extractHallucinatedToolCall(text);
+    if (residual && residual.name !== "response") {
+      return {
+        text: TOOL_MARKUP_DEGRADATION_NOTICE,
+        usage: attempt.usage,
+        uiNotice: `[Agent] Forced answer still printed a '${residual.name}' tool call as text; delivered an honest failure notice instead of raw markup.`,
+      };
+    }
     if (text) {
       console.log(
         `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`

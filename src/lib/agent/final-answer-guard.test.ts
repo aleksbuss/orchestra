@@ -190,6 +190,39 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.uiNotice).toBeUndefined();
   });
 
+  it("does NOT ship a printed ACTION tool call as the forced answer — honest notice instead (bug B / free-model markup degradation)", async () => {
+    const markup =
+      '<dots_function_call>\n<invoke name="write_text_file">\n' +
+      '<parameter name="file_path">/x.ts</parameter>\n' +
+      '<parameter name="content">export const x = 1;\n// ...16KB of file...\n</parameter>\n' +
+      "</invoke>\n</dots_function_call>";
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      model: modelReturning(markup) as never, // the FORCED answer itself degrades into markup
+    });
+    // The raw markup must NEVER be delivered as the answer.
+    expect(res.text).not.toContain("dots_function_call");
+    expect(res.text).not.toContain("write_text_file");
+    // An honest, actionable notice is delivered instead.
+    expect(res.text).toContain("printed the call as text");
+    expect(res.uiNotice).toContain("write_text_file");
+  });
+
+  it("still recovers a `response` tool call printed as markup in the forced answer (not treated as degradation)", async () => {
+    const responseMarkup =
+      '<dots_function_call>\n<invoke name="response">\n' +
+      '<parameter name="message">Here is the real answer.</parameter>\n</invoke>\n</dots_function_call>';
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      model: modelReturning(responseMarkup) as never,
+    });
+    expect(res.text).toBe("Here is the real answer.");
+  });
+
   it("does NOT force when a `response` tool already delivered the answer", async () => {
     const res = await resolveTurnContinuation({
       ...base,

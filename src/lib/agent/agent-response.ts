@@ -13,6 +13,10 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
+import {
+  argumentByteSize,
+  recordToolChannelDegradation,
+} from "@/lib/agent/degradation-telemetry";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -911,6 +915,13 @@ export async function resolveTurnContinuation(args: {
   currentPath?: string;
   /** Sprint 4 — may this turn substitute another configured model? */
   degradationPolicy?: DegradationPolicy;
+  /**
+   * PM #109 — needed so a degradation detected HERE (the forced-answer stage)
+   * flags the chat and is recorded, exactly like one detected in the main turn.
+   * Before this, the forced-answer stage was the one detection site that
+   * recorded nothing, so the PM #82 compaction backstop never armed for it.
+   */
+  chatId?: string;
 }): Promise<TurnContinuationResult> {
   const {
     responseMessages,
@@ -927,6 +938,7 @@ export async function resolveTurnContinuation(args: {
     projectId,
     currentPath,
     degradationPolicy,
+    chatId,
   } = args;
   const lastAssistantText = getLastAssistantText(responseMessages);
   const readUsage = (r: unknown) =>
@@ -1039,6 +1051,20 @@ export async function resolveTurnContinuation(args: {
     // (lost work), so deliver an honest, actionable notice instead.
     const residual = extractHallucinatedToolCall(text);
     if (residual && residual.name !== "response") {
+      // PM #109 — flag the chat AND record the conditions. This site used to do
+      // neither: the notice shipped, the chat stayed un-flagged, so the next
+      // turn ran at the same context and failed the same way (observed three
+      // times in a row on chat 9891bb43).
+      recordToolChannelDegradation({
+        stage: "forced-answer",
+        chatId,
+        provider: brainConfig?.provider,
+        model: brainConfig?.model,
+        toolName: residual.name,
+        argBytes: argumentByteSize(residual.args),
+        markupChars: text.length,
+        promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
+      });
       return {
         text: TOOL_MARKUP_DEGRADATION_NOTICE,
         usage: attempt.usage,

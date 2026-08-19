@@ -5,6 +5,8 @@ import {
   createTokenGovernor,
   governMessages,
   capToolResultSize,
+  withStepBudgetNotice,
+  STEP_BUDGET_WARNING_RATIO,
 } from "./token-governor";
 import { estimateTokenCount } from "./compressor";
 import { MAX_RELIABLE_CONTEXT_WINDOW } from "@/lib/providers/context-window";
@@ -271,5 +273,66 @@ describe("createTokenGovernor — systemPromptTokens (Layer 0, PM #94-follow-up)
     // Still returns a non-empty pruned array (never empty, never throws).
     expect(out.messages).toBeDefined();
     expect(out.messages!.length).toBeGreaterThan(0);
+  });
+});
+
+describe("withStepBudgetNotice (Sprint B backpressure)", () => {
+  // A trivial inner governor that never prunes, so the notice is the only edit.
+  const passthrough = () => ({});
+  // A pruning inner governor, so we can prove the notice rides on the PRUNED set.
+  const pruner = () => ({ messages: [{ role: "user", content: "pruned" }] as ModelMessage[] });
+
+  function callAt(
+    gov: ReturnType<typeof withStepBudgetNotice>,
+    stepNumber: number,
+    messages: ModelMessage[]
+  ) {
+    return gov({
+      messages,
+      stepNumber,
+      steps: [],
+      model: {} as never,
+      experimental_context: undefined,
+    }) as Promise<{ messages?: ModelMessage[] }>;
+  }
+
+  const msgs: ModelMessage[] = [{ role: "user", content: "hi" }];
+
+  it("computes warnAt = floor(maxSteps * ratio) and fires there exactly once", async () => {
+    const gov = withStepBudgetNotice(passthrough, { maxSteps: 100 });
+    const warnAt = Math.floor(100 * STEP_BUDGET_WARNING_RATIO); // 75
+    const out = await callAt(gov, warnAt, msgs);
+    expect(out.messages).toBeDefined();
+    const last = out.messages![out.messages!.length - 1];
+    expect(String(last.content)).toContain("SYSTEM NOTICE");
+    expect(String(last.content)).toContain("75 of 100");
+    expect(last.role).toBe("user");
+  });
+
+  it("does NOT inject before the threshold", async () => {
+    const gov = withStepBudgetNotice(passthrough, { maxSteps: 100 });
+    const out = await callAt(gov, 74, msgs);
+    expect(out.messages).toBeUndefined(); // passthrough returned {}, unchanged
+  });
+
+  it("does NOT inject after the threshold (one-shot)", async () => {
+    const gov = withStepBudgetNotice(passthrough, { maxSteps: 100 });
+    const out = await callAt(gov, 90, msgs);
+    expect(out.messages).toBeUndefined();
+  });
+
+  it("appends the notice onto the inner governor's PRUNED messages, not the originals", async () => {
+    const gov = withStepBudgetNotice(pruner, { maxSteps: 100 });
+    const out = await callAt(gov, 75, msgs);
+    expect(out.messages).toHaveLength(2); // the single pruned msg + the notice
+    expect(String(out.messages![0].content)).toBe("pruned");
+    expect(String(out.messages![1].content)).toContain("SYSTEM NOTICE");
+  });
+
+  it("scales the threshold with a different budget (subordinate-sized)", async () => {
+    const gov = withStepBudgetNotice(passthrough, { maxSteps: 25 });
+    const warnAt = Math.floor(25 * STEP_BUDGET_WARNING_RATIO); // 18
+    expect((await callAt(gov, warnAt - 1, msgs)).messages).toBeUndefined();
+    expect((await callAt(gov, warnAt, msgs)).messages).toBeDefined();
   });
 });

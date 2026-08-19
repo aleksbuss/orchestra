@@ -191,6 +191,42 @@ describe("createProject", () => {
     ).toBe(true);
   });
 
+  // A+ (graphify ADR) — binary-gated auto-install. `cwd` is spied to tmpRoot,
+  // so the module's GRAPHIFY_BUNDLED_DIR resolves under tmpRoot; fabricate the
+  // bundled source there. Suite default is "off" (vitest.setup), so the case
+  // above proves the OFF path already: a plain create installs no skill.
+  it("does NOT auto-install graphify by default (policy off)", async () => {
+    const m = await loadModule();
+    await m.createProject(sampleProject("no-auto"));
+    await expect(
+      fs.stat(path.join(m.getProjectSkillsDir("no-auto"), "graphify"))
+    ).rejects.toThrow();
+  });
+
+  it("auto-installs graphify when policy forces it", async () => {
+    const bundledGraphify = path.join(tmpRoot, "bundled-skills", "graphify");
+    await fs.mkdir(bundledGraphify, { recursive: true });
+    await fs.writeFile(
+      path.join(bundledGraphify, "SKILL.md"),
+      "---\nname: graphify\ndescription: test\n---\nbody\n"
+    );
+    const prev = process.env.ORCHESTRA_SKILL_AUTOINSTALL;
+    process.env.ORCHESTRA_SKILL_AUTOINSTALL = "force";
+    try {
+      const m = await loadModule();
+      await m.createProject(sampleProject("with-auto"));
+      const installed = path.join(
+        m.getProjectSkillsDir("with-auto"),
+        "graphify",
+        "SKILL.md"
+      );
+      expect((await fs.stat(installed)).isFile()).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.ORCHESTRA_SKILL_AUTOINSTALL;
+      else process.env.ORCHESTRA_SKILL_AUTOINSTALL = prev;
+    }
+  });
+
   // PM #104 — `project.json` is written LAST, so a create that throws part-way
   // used to leave a directory `getAllProjects` skips forever: on disk, but not
   // in the app. Six of those accumulated for real.

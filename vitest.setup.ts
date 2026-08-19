@@ -12,3 +12,16 @@
  * because the import is side-effect-only on the global expect.
  */
 import "@testing-library/jest-dom/vitest";
+
+/**
+ * Skill auto-install (graphify, binary-gated — see `skill-autoinstall.ts`) is
+ * forced OFF for the whole suite so tests are hermetic: otherwise `createProject`
+ * would copy the graphify skill on a developer machine that happens to have the
+ * CLI on `PATH` and not on CI, and any skill-count assertion would flake by
+ * machine. UNCONDITIONAL assignment on purpose — `??=` would inherit a
+ * developer's or CI's pre-exported `auto`/`force` and reintroduce exactly the
+ * machine-dependence this guards against. A test that needs the install path
+ * sets the var explicitly in its own body (which runs after this setup) and
+ * restores it.
+ */
+process.env.ORCHESTRA_SKILL_AUTOINSTALL = "off";

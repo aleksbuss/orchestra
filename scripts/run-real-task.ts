@@ -95,12 +95,14 @@ async function main(): Promise<void> {
     const t0 = Date.now();
     let ttft: number | undefined;
     try {
+      // ORCHESTRA_TASK_SWARM=off runs the single-agent path; default is swarm.
+      const swarmOn = process.env.ORCHESTRA_TASK_SWARM !== "off";
       const result = await runAgent({
         chatId,
         userMessage,
         projectId,
-        swarmEnabled: true,
-        forceSwarm: true,
+        swarmEnabled: swarmOn,
+        forceSwarm: swarmOn,
       });
       const response = result.toUIMessageStreamResponse({});
       if (response.body) {

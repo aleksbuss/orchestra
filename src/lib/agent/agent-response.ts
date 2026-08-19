@@ -286,6 +286,28 @@ export function extractHallucinatedToolCall(
     return { name: ds[1], args: rec ?? {}, raw: body };
   }
 
+  // 6) Claude/dots XML form: `<invoke name="NAME"><parameter name="KEY">VALUE</parameter>…</invoke>`,
+  //    optionally wrapped in `<dots_function_call>` / `<function_calls>`. Verified LIVE
+  //    (chat 9891bb43, 2026-08-18): `dots-studio/dots-3-note-preview:free` printed exactly
+  //    `<dots_function_call>\n<invoke name="write_text_file">\n<parameter name="file_path">…`
+  //    as its FINAL message and Orchestra detected NOTHING, so PM #69 forced a blank answer
+  //    over 18 KB of XML garbage — TWICE. Branch 1 (Functionary) cannot catch this: it needs
+  //    `<function=NAME>` (equals sign, name IN the tag), whereas this form puts the name in a
+  //    `name="…"` ATTRIBUTE and uses `<parameter name="…">` pairs. Anchor on the invoke tag AND
+  //    a real block boundary (`</invoke>` or a `<parameter name=`) so prose that merely names
+  //    the syntax (e.g. a correction message) never matches.
+  const inv = body.match(/<invoke\s+name\s*=\s*["']([A-Za-z0-9_.\-]+)["']\s*>/i);
+  if (inv && /<\/(?:antml:)?invoke>|<parameter\s+name\s*=/i.test(body)) {
+    const after = body.slice((inv.index ?? 0) + inv[0].length);
+    const args: Record<string, unknown> = {};
+    for (const p of after.matchAll(
+      /<parameter\s+name\s*=\s*["']([A-Za-z0-9_.\-]+)["']\s*>([\s\S]*?)(?=<\/parameter>|<parameter\s+name|<\/(?:antml:)?invoke>|<\/dots_function_call>|<\/function_calls>|$)/gi
+    )) {
+      args[p[1]] = p[2].trim();
+    }
+    return { name: inv[1], args, raw: body };
+  }
+
   // 5) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
   //    Bare JSON is too ambiguous to treat as an ACTION-tool call: a legitimate
   //    final answer can BE bare JSON (e.g. "reply with only the tool-call JSON,
@@ -759,6 +781,20 @@ const STEP_LIMIT_PAUSE_MESSAGE =
 const STEP_LIMIT_PAUSE_NOTICE =
   "[Agent] Reached the per-turn step limit — press Continue to resume the unfinished work.";
 
+/**
+ * Delivered when even the forced final answer degraded into a printed ACTION
+ * tool call — the model kept emitting tool markup as text under context pressure
+ * (the free-model long-context tool-channel dropout; see
+ * `orchestra-free-model-toolcall-limit`). Better an honest, actionable notice
+ * than shipping kilobytes of un-executed markup as if it were the answer.
+ */
+const TOOL_MARKUP_DEGRADATION_NOTICE =
+  "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
+  "nothing was changed. This is a known limit of some free models once the conversation grows long: a " +
+  "large tool argument makes them drop the tool-calling channel. To get it working: ask for a **smaller, " +
+  "targeted change** (the agent will use `replace_in_file` on a small span), start a **fresh chat** to " +
+  "shorten the context, or switch the chat model to a stronger one.";
+
 // ── Loop-abort (2026-07-28, DoubleTake-reviewed) ──────────────────────────────
 // The stable prefix `applyGlobalToolLoopGuard` (tool-guard.ts) emits when it
 // BLOCKS an identical (tool+args) repeat. Shared here — NOT in tool-guard.ts —
@@ -789,7 +825,7 @@ export function isLoopGuardRepeatBlock(output: unknown): boolean {
  * changes arguments or tactics after the first block), so a threshold of 3 has
  * zero regression surface for strong models; a WEAK model that compulsively
  * re-runs one passing command aborts in 3 steps instead of bleeding to the
- * 50-step cap. It deliberately does NOT auto-submit the model's prose as an
+ * per-turn step cap. It deliberately does NOT auto-submit the model's prose as an
  * answer (that would reopen the narration hole) — the caller emits an honest
  * PAUSE.
  */
@@ -860,7 +896,7 @@ export async function resolveTurnContinuation(args: {
    * LOOP_ABORT_CONSECUTIVE consecutive pure-block steps). Drives a distinct
    * honest PAUSE — never an auto-submitted "done". Takes precedence over the
    * step-cap check (it is the more specific stop reason, and it fires well
-   * before the 50-step cap).
+   * before the per-turn step cap).
    */
   loopAbortReached?: boolean;
   /**
@@ -903,7 +939,7 @@ export async function resolveTurnContinuation(args: {
   // for a model that narrates before each tool call ("Now I understand. Let me
   // fix X"): that narration is non-empty assistant text, so `turnHasDeliverableAnswer`
   // returned true, the block was skipped, and the pause never fired — the live
-  // failure was a 50-step turn ending on a dangling tool-call with NO pause notice.
+  // failure was a step-cap-length turn ending on a dangling tool-call with NO pause notice.
   // At the step cap, ONLY a real `response`-tool answer counts as a genuine finish;
   // narration before an action tool does not. Deterministic + system-authored on
   // purpose (a forced model "final answer" masquerades as completion). No LLM call.
@@ -995,6 +1031,20 @@ export async function resolveTurnContinuation(args: {
       degradationPolicy,
     });
     const text = unwrapSerializedResponseCall(attempt.text);
+    // If the forced answer ITSELF degraded into a printed ACTION tool call (the
+    // model keeps emitting tool markup as text under context pressure), do NOT
+    // ship the raw markup as the answer — that is the 16 KB-of-garbage failure.
+    // `response`-markup is already recovered by unwrapSerializedResponseCall
+    // above; anything else that still parses as a tool call is un-executed action
+    // (lost work), so deliver an honest, actionable notice instead.
+    const residual = extractHallucinatedToolCall(text);
+    if (residual && residual.name !== "response") {
+      return {
+        text: TOOL_MARKUP_DEGRADATION_NOTICE,
+        usage: attempt.usage,
+        uiNotice: `[Agent] Forced answer still printed a '${residual.name}' tool call as text; delivered an honest failure notice instead of raw markup.`,
+      };
+    }
     if (text) {
       console.log(
         `[Agent] PM #69 — forced final answer after a no-delivery turn (finishReason=${finishReason}).`

@@ -116,11 +116,11 @@ export function resetChatDegradation(chatId?: string): void {
 /** Deterministic, Orchestra-authored correction injected for the re-issue. */
 export const REISSUE_CORRECTION =
   "SYSTEM CORRECTION: Your previous message PRINTED a tool call as plain text " +
-  "(e.g. `<tool_call>…</tool_call>`, `<function=…>`, or a raw JSON blob). That " +
-  "text was NOT executed — it never reaches the tools. Re-issue the SAME action " +
-  "now as a NATIVE tool/function call through the proper tool-calling channel. " +
-  "Do NOT print tool-call markup again. If you genuinely cannot call the tool, " +
-  "explain the situation to the user in plain prose instead.";
+  "(e.g. a tool_call block, a function= block, an invoke/dots_function_call " +
+  "block, or a raw JSON blob). That text was NOT executed — it never reaches the " +
+  "tools. Re-issue the SAME action now as a NATIVE tool/function call through the " +
+  "proper tool-calling channel. Do NOT print tool-call markup again. If you " +
+  "genuinely cannot call the tool, explain the situation to the user in plain prose instead.";
 
 /**
  * PM #97 (Layer 2) — correction for an intermittently-DROPPED native tool call.

@@ -6,6 +6,7 @@ import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { assertPathInsideRealpath, safeWriteFile, withFileLock } from "./fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
+import { autoInstallGraphifyIfAvailable } from "@/lib/storage/skill-autoinstall";
 
 const DATA_DIR = getDataDir();
 const PROJECTS_DIR = path.join(DATA_DIR, "projects");
@@ -364,6 +365,22 @@ export async function createProject(
       await fs.rm(projectDir, { recursive: true, force: true }).catch(() => {});
     }
     throw err;
+  }
+
+  // Binary-gated: install graphify into the new project only when the CLI is
+  // actually present (see skill-autoinstall.ts). Best-effort and never throws —
+  // the project is already fully created above; a skill copy failure must not
+  // undo it. Runs AFTER the rollback-protected block for exactly that reason.
+  const skillInstall = await autoInstallGraphifyIfAvailable(
+    getProjectSkillsDir(project.id)
+  ).catch(() => "failed" as const);
+  if (skillInstall === "failed") {
+    // Surface a broken/permission-denied bundled copy — distinct from the CLI
+    // simply being absent (which is "skipped-unavailable", not logged). Never
+    // fails the create; the project above is already committed.
+    console.error(
+      JSON.stringify({ event: "skill_autoinstall_failed", projectId: project.id, skill: "graphify" })
+    );
   }
 
   publishUiSyncEvent({

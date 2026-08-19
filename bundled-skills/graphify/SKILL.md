@@ -14,6 +14,19 @@ key, so what you get is the free AST path.)
 runs through `code_execution`. See [`docs/references/graphify-integration-adr.md`](../../docs/references/graphify-integration-adr.md)
 for why this is a skill and not a tool.
 
+## Decision — graphify first, grep second (read this before you touch `find`/`grep`)
+
+You loaded this skill because a codebase question came up. The measured failure mode is loading it and
+then grepping anyway. Do not. Make the call explicitly:
+
+| The question is… | Do this |
+| --- | --- |
+| Where is `X` defined? What calls `Y`? How do `A` and `B` connect? How is this codebase structured? Planning a cross-file refactor? | **`graphify query` / `explain` / `path` FIRST** (after the Step 0 probe). This is what the graph is for; one query replaces dozens of file reads. |
+| A literal string/comment/config value; a file whose path you already know; a tiny project; the exact current text of lines you are about to edit | `grep` / `read_text_file` — the graph is derived and can lag; don't route these through it. |
+| Probe (`graphify --version`) failed, or no index exists and building is not appropriate here | Fall back to `grep`, and say plainly the graph is unavailable. |
+
+If you catch yourself about to run `find`/`grep`/`ls` to *understand* the code rather than to *find a literal string*, stop and issue a `graphify query` instead.
+
 ## Step 0 — probe before you rely on it
 
 Run this first, every session, before promising the user a graph-based answer:

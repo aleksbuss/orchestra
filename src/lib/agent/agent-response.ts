@@ -1024,9 +1024,21 @@ export async function resolveTurnContinuation(args: {
     const attempt = await generateFinalAnswerWithFailover({
       model,
       systemPrompt,
+      // PM #109 (2nd follow-up) — NEUTRALIZE the printed-markup before the forced
+      // answer. `baseMessages` are already neutralized (agent.ts), but
+      // `responseMessages` is the CURRENT turn's RAW output, which is exactly
+      // where the fresh printed tool-call markup lives — and it is the most
+      // recent context, so the recency prune KEEPS it. Measured live (chat
+      // 9891bb43): after the context prune + output cap landed, the forced answer
+      // STILL degraded — a 109-byte `read_text_file` printed as text at only 19K
+      // tokens. Tiny argument, modest context: the dominant cause here is not
+      // size, it is the model IMITATING the markup sitting in its own transcript
+      // (the protake council's correction). Stripping that fodder removes the
+      // example. Idempotent on the already-clean `baseMessages` (a placeholder is
+      // not a hallucinated call), and it only rewrites assistant messages, so the
+      // instruction below is untouched.
       messages: mergeConsecutiveSameRole([
-        ...baseMessages,
-        ...responseMessages,
+        ...neutralizeHallucinatedHistory([...baseMessages, ...responseMessages]),
         {
           role: "user",
           content:

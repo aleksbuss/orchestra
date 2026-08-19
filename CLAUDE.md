@@ -64,7 +64,7 @@ Full contract text, per-PM rationale, historical decisions, shipped-track narrat
 
 ### 🧭 Before you grep or open a raw file: query the graph
 
-This repo has a knowledge-graph index at `graphify-out/graph.json` (4698 nodes, 10131 edges, built from this exact codebase — code nodes come from deterministic AST parsing of the current working tree, not a cached summary). Before running `grep`/`rg`/`find` or opening a source file to explore ("where is X defined", "how does Y work", "what calls Z"), run:
+This repo has a knowledge-graph index at `graphify-out/graph.json` (~5100 nodes, ~11000 edges, built from this exact codebase — code nodes come from deterministic AST parsing of the current working tree, not a cached summary). Before running `grep`/`rg`/`find` or opening a source file to explore ("where is X defined", "how does Y work", "what calls Z"), run:
 
 ```
 graphify query "<question>"       # broad: scoped subgraph for a question

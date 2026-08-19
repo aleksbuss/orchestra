@@ -38,6 +38,35 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 109. The printed-markup recovery retried the SAME model at the SAME context — a guaranteed repeat — and two of the three detection sites recorded nothing
+**Date:** 2026-08
+**Status:** RESOLVED (retry now runs at a short context; every site records) — the per-model boundary itself is still UNKNOWN and is what the new telemetry exists to measure
+**Severity:** P1 — three consecutive turns on a real chat produced no work and ~77 s each; the operator had to intervene by hand, and the runtime had no record of why.
+**Symptoms:** Live test on chat `9891bb43` (`telegramattacker`, Free Mode, brain `dots-studio/dots-3-note-preview:free`). Asked to rewrite an existing 312-line file, the model printed `<dots_function_call><invoke name="write_text_file">…16-18 KB…</invoke></dots_function_call>` as text (PM #107/#108 behaviour). PM #108's honest notice fired correctly — but the *recovery* accomplished nothing on all three attempts, and each attempt cost a full generation.
+**Detection:** Reading the failing chat's on-disk JSON and the dev log together, then MEASURING the context with the project's own estimator rather than guessing:
+
+| Quantity | Value |
+| --- | --- |
+| `dots-3-note-preview:free` advertised window (live OpenRouter catalogue) | 512 000 |
+| Clamp for a model outside the reliable-family allowlist | 120 000 |
+| Compaction threshold (0.75 × clamp) | 90 000 |
+| Chat at the failing turn, all 98 messages, RAW — *what the threshold is compared against* | **76 385** |
+| Same, after `neutralizeHallucinatedHistory` | 66 679 |
+| Last 80 after neutralization — *what `History(80)` actually SENT* | **53 464** |
+
+So pre-flight compaction correctly did NOT fire (76 385 < 90 000), yet the channel collapsed anyway — at ~53 K sent tokens. Compaction defends against window OVERFLOW; this is TOOL-CHANNEL COLLAPSE, a different and much lower boundary. A second finding fell out of the same table: the threshold is compared against a number 43% larger than the payload actually sent.
+**Root Cause (three faults):**
+1. `attemptToolReissue` (`agent-tool-reissue.ts`) replayed `baseMessages + priorMessages + correction` — i.e. the FULL failing context — to the SAME model. Context length is one of the two variables driving the collapse (PM #108 measured the other, argument size), so the retry re-created the failure conditions exactly. It degraded again every time, burned a generation, and returned `null`.
+2. The correction text asked the model to "re-issue the SAME action", which for a whole-file rewrite means reproducing the same oversized argument — the other causal variable, held constant too.
+3. Of the three sites that detect the degradation, only the main-turn detector (`agent.ts`, PM #81 branch) called `recordChatDegradation`. The forced-answer site (`agent-response.ts`, PM #108 notice) and the re-issue-degraded-again site recorded NOTHING, so the PM #82 backstop (a flagged chat compacts at HALF the threshold — here 45 000, which would have fired) never armed for the two degradations that actually happened. And no site recorded the CONDITIONS at all, which is why every proposal to move the threshold was a guess.
+**Resolution:** (1) `buildReissueMessages` prunes the re-issue payload to `REISSUE_CONTEXT_TOKEN_BUDGET = 16000` tokens via `governMessages` (pair-safe; the correction always survives as the last user turn) — the retry now runs far below any observed collapse point instead of at the failing length. (2) `REISSUE_CORRECTION` now explicitly steers the retry to SMALL arguments and to `replace_in_file` instead of repeating a whole-file write. (3) New `degradation-telemetry.ts` owns the degraded-chat flag (moved out of `agent-tool-reissue.ts`) and `recordToolChannelDegradation`, which flags the chat AND emits a `tool_channel_degradation` event carrying stage, model, provider, tool name, argument bytes, our context estimate, the provider-REPORTED prompt tokens, and the upstream that served the request. All three sites call it. Events land in the existing daily JSONL (`data/logs/`) — deliberately not a new persistent surface: `grep '"event":"tool_channel_degradation"' data/logs/*.jsonl | jq .`
+**Rejected / deferred:** (a) **Text-protocol executor** — killed for the second time, now on a stronger argument than the first: its value zone (large arguments) IS its risk zone (delimiter collision inside file content, `.trim()` mangling, quotation-vs-action ambiguity), and executing parsed markup rewards the very channel collapse we are trying to stop. Two independent councils (4 free models, then 4 frontier models via `protake`) rejected it 8/8. (b) **A deterministic `write_text_file` size guard** — proposed here, then dropped after all four frontier reviewers pointed out the same thing: in this failure the tool is NEVER invoked (the call was printed, not made), so an in-`execute` guard is dead code for this mode. It survives only as future-argument hygiene, not as this fix. (c) **A smaller hardcoded clamp for `:free` tiers** (32 K) — trades one arbitrary constant for another on one data point; the telemetry above is the prerequisite for setting it from observed behaviour instead.
+**Regression Coverage:** [`degradation-telemetry.test.ts`](src/lib/agent/degradation-telemetry.test.ts) (flag + event fields + never-throws + upstream extraction); `buildReissueMessages` cases in [`agent-tool-reissue.test.ts`](src/lib/agent/agent-tool-reissue.test.ts) (prunes below budget, correction survives, no orphaned tool result at the head); two `resolveTurnContinuation` cases in [`final-answer-guard.test.ts`](src/lib/agent/final-answer-guard.test.ts) (a degraded forced answer FLAGS the chat; a clean one does not).
+**Doc Updates:** this entry; [`tools-and-skills.md`](docs/references/tools-and-skills.md) recovery-contract section.
+**Rule:** A retry that reproduces the conditions of the failure is not a retry. When a recovery path re-runs a failed generation, it MUST change something causal — context length, argument size, or the model — and every detection site for a degradation must record it, because a symptom observed at one site and acted on at another is a backstop that never arms.
+
+---
+
 ## 108. Free-model coding failed on a MEASURED root cause — a large tool ARGUMENT under context makes free models drop the native tool channel — and the forced-answer path shipped the resulting markup verbatim
 **Date:** 2026-08
 **Status:** RESOLVED (primary mitigation + honest backstop); a full text-protocol executor is a recorded follow-up

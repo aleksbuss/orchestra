@@ -11,12 +11,50 @@ import { describe, expect, it } from "vitest";
 import type { ModelMessage } from "ai";
 import {
   extractHallucinatedToolCall,
+  printedActionCallName,
   turnHasDeliverableAnswer,
   detectActionHallucination,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
   HALLUCINATED_HISTORY_PLACEHOLDER,
 } from "./agent-response";
+
+describe("printedActionCallName (PM #109 — catches TRUNCATED markup)", () => {
+  // The live bug: the forced-answer output cap truncated a <tool_call>{…} blob
+  // mid-string, so extractHallucinatedToolCall (which needs valid JSON) returned
+  // null and the raw markup shipped to the user.
+  const truncated =
+    'I\'ll write the complete file now using the proper tool call.\n\n' +
+    '<tool_call>\n{"name": "write_text_file", "arguments": {"file_path": "/x.ts", ' +
+    '"content": "import { Counter } from \'prom-client\';\\nclass PerformanceMonitor';
+
+  it("returns the tool name for a truncated <tool_call> blob that does NOT parse", () => {
+    expect(extractHallucinatedToolCall(truncated)).toBeNull(); // parser gives up …
+    expect(printedActionCallName(truncated)).toBe("write_text_file"); // … structural catches it
+  });
+
+  it("returns the name for a truncated [TOOL_CALLS] blob", () => {
+    const raw = '[TOOL_CALLS] {"name": "read_text_file", "arguments": {"file_path": "/very/long';
+    expect(printedActionCallName(raw)).toBe("read_text_file");
+  });
+
+  it("still uses the strict parser when the JSON is valid", () => {
+    const raw = '<tool_call>{"name":"search_web","arguments":{"query":"x"}}</tool_call>';
+    expect(printedActionCallName(raw)).toBe("search_web");
+  });
+
+  it("returns null for a printed `response` call (that is a delivered answer, not degradation)", () => {
+    const raw = '<tool_call>\n{"name": "response", "arguments": {"message": "here is the ans';
+    expect(printedActionCallName(raw)).toBeNull();
+  });
+
+  it("returns null for prose that merely mentions the syntax", () => {
+    expect(
+      printedActionCallName("To call a tool, emit a <tool_call> block with a name field.")
+    ).toBeNull();
+    expect(printedActionCallName("Here is your plain answer.")).toBeNull();
+  });
+});
 
 describe("extractHallucinatedToolCall (PM #81)", () => {
   it("parses a Qwen/Hermes <tool_call> JSON block", () => {

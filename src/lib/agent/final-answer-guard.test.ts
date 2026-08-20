@@ -211,6 +211,26 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.uiNotice).toContain("write_text_file");
   });
 
+  it("PM #109 — does NOT ship a TRUNCATED <tool_call> blob whose JSON no longer parses", async () => {
+    // The live regression (chat 9891bb43): the forced-answer output cap cut a
+    // write_text_file blob mid-string, so the strict JSON parser saw "no call"
+    // and the raw 4KB markup shipped. The structural residual check must catch it.
+    const truncated =
+      "I'll write the complete file now using the proper tool call.\n\n" +
+      '<tool_call>\n{"name": "write_text_file", "arguments": {"file_path": "/x.ts", ' +
+      '"content": "import { Counter } from \'prom-client\';\\nclass PerformanceMonitor';
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      model: modelReturning(truncated) as never,
+    });
+    expect(res.text).not.toContain("<tool_call>");
+    expect(res.text).not.toContain("write_text_file");
+    expect(res.text).toContain("printed the call as text");
+    expect(res.uiNotice).toContain("write_text_file");
+  });
+
   it("PM #109 — FLAGS the chat when the forced answer degrades, so the next turn compacts harder", async () => {
     // The live defect (chat 9891bb43): this site shipped the notice but recorded
     // nothing, so the PM #82 backstop never armed and the next turn ran at the
@@ -258,6 +278,35 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
       model: modelReturning(responseMarkup) as never,
     });
     expect(res.text).toBe("Here is the real answer.");
+  });
+
+  it("PM #109 — NEUTRALIZES printed markup in responseMessages before the forced answer (removes the imitation fodder)", async () => {
+    // Live finding (chat 9891bb43): after the context prune + output cap, the
+    // forced answer STILL degraded — the model imitated the fresh printed-markup
+    // sitting in the current turn's raw responseMessages, which recency pruning
+    // keeps. The forced-answer generation must not SEE that markup.
+    const printedMarkup =
+      '<dots_function_call>\n<invoke name="read_text_file">\n' +
+      '<parameter name="file_path">/x.ts</parameter>\n</invoke>\n</dots_function_call>';
+    let sawPrompt = "";
+    const capturing = new MockLanguageModelV3({
+      doGenerate: async ({ prompt }) => {
+        sawPrompt = JSON.stringify(prompt);
+        return genResult("clean final answer");
+      },
+    });
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText(printedMarkup)],
+      finishReason: "other",
+      model: capturing as never,
+    });
+    expect(res.text).toBe("clean final answer");
+    // The raw markup must not reach the forced-answer model …
+    expect(sawPrompt).not.toContain("dots_function_call");
+    expect(sawPrompt).not.toContain("read_text_file");
+    // … it is replaced by the neutral placeholder.
+    expect(sawPrompt).toContain("Orchestra removed a tool call");
   });
 
   it("does NOT force when a `response` tool already delivered the answer", async () => {

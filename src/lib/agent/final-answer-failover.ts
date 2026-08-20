@@ -36,6 +36,8 @@ import { generateText, type ModelMessage } from "ai";
 import type { RawUsage } from "@/lib/cost/accumulator";
 import { createModel } from "@/lib/providers/llm-provider";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
+import { estimateTokenCount } from "@/lib/agent/compressor";
+import { governMessages } from "@/lib/agent/token-governor";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   classifyModelFailure,
@@ -50,6 +52,52 @@ import {
   undeliverableNotice,
   type DegradationPolicy,
 } from "@/lib/agent/degradation-policy";
+
+/**
+ * PM #109 follow-up — the forced answer runs at a SHORT context AND a small
+ * output cap.
+ *
+ * MEASURED (live, chat 9891bb43): the forced answer ITSELF degraded into a
+ * printed `write_text_file` markup blob — provider-reported 68 317 prompt tokens,
+ * a 14 881-byte argument. The main-turn re-issue (PM #109, already short-context)
+ * never ran because the main turn ended with NO delivery, not printed markup, so
+ * the whole failure travelled through this path — which was passing the full
+ * transcript verbatim.
+ *
+ * A tool-less call has no native channel to "collapse"; a council review
+ * (protake, 4 frontier models) corrected the causal model: the forced answer
+ * degrades because (a) a weak model loses instruction-following at long context
+ * and (b) the transcript CONTAINS in-context examples of the failure (printed
+ * markup, giant tool-result payloads) that the model imitates. Two levers, both
+ * council-endorsed and neither risking a confidently-wrong summary:
+ *
+ *  - CONTEXT: prune once, via `governMessages`, which the token governor already
+ *    uses — it is pair-safe (SDK `pruneMessages` by `toolCallId`) AND pins the
+ *    leading system run + first user turn (the ORIGINAL TASK) as anchors, so the
+ *    forced answer can still say what it was doing. The "write your final answer"
+ *    instruction is the LAST message, so the recency slide always keeps it. This
+ *    is NOT naive recency pruning (which would drop the task and keep the poison).
+ *  - OUTPUT: cap `maxOutputTokens` so a 15 KB markup blob physically cannot form;
+ *    a plain-prose fallback reply never needs more.
+ *
+ * Council levers NOT taken here (recorded, not built): a synthetic
+ * task+execution-digest prompt replacing the transcript, and substituting a
+ * tool-robust model. The latter is unavailable in Free Mode anyway — the whole
+ * substitution pool (`utilityModel`, `proposerTiers.*`) is itself free-tier — so
+ * for the case that actually fails, pruning + the output cap is the fix.
+ */
+const FORCED_ANSWER_CONTEXT_BUDGET = 24000;
+const FORCED_ANSWER_MAX_OUTPUT_TOKENS = 1500;
+
+/**
+ * Prune the forced-answer transcript to the weak-model-safe budget. Exported for
+ * direct unit testing — the property that matters is "task pinned, instruction
+ * last, under budget", and it must never return empty.
+ */
+export function boundForcedAnswerContext(messages: ModelMessage[]): ModelMessage[] {
+  if (estimateTokenCount(messages) <= FORCED_ANSWER_CONTEXT_BUDGET) return messages;
+  return governMessages(messages, FORCED_ANSWER_CONTEXT_BUDGET);
+}
 
 /** Backoff before the single brain retry (jittered — see `emptyBackoffMs` in moa.ts). */
 function retryBackoffMs(): number {
@@ -135,7 +183,13 @@ async function attemptOnce(
       messages: args.messages,
       providerOptions: args.providerOptions,
       temperature: args.settings.chatModel.temperature ?? 0.7,
-      maxOutputTokens: resolveMaxOutputTokens(args.settings.chatModel),
+      // PM #109 follow-up — cap the forced answer's output. It is a plain-prose
+      // fallback reply, so it never needs the full configured budget, and the
+      // cap means the model cannot emit a 15 KB markup blob even if it starts to.
+      maxOutputTokens: Math.min(
+        resolveMaxOutputTokens(args.settings.chatModel),
+        FORCED_ANSWER_MAX_OUTPUT_TOKENS
+      ),
       // PM #98 — the RECOVERY ladder. It runs precisely when the brain has
       // already failed, so an unbounded call here turns a recoverable turn
       // into a total silent failure.
@@ -172,6 +226,13 @@ export async function generateFinalAnswerWithFailover(
   args: FinalAnswerAttemptArgs
 ): Promise<FinalAnswerResult> {
   const { brainConfig, abortSignal } = args;
+  // PM #109 follow-up — bound the context ONCE, up front, and reuse it for every
+  // attempt. Prune-once (not per-attempt) is right for THIS pool: in Free Mode
+  // every substitute is itself a free model, so there is no larger-window
+  // candidate being starved; a stronger install rarely reaches this path because
+  // its brain does not degrade. Pruning the transcript that CAUSED the degraded
+  // forced answer is the point — the substitute must not inherit the full 68K.
+  args = { ...args, messages: boundForcedAnswerContext(args.messages) };
   let usage: RawUsage | undefined;
 
   const fold = (u: RawUsage | undefined) => {

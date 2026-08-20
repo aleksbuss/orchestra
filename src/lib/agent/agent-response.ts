@@ -13,10 +13,7 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
-import {
-  argumentByteSize,
-  recordToolChannelDegradation,
-} from "@/lib/agent/degradation-telemetry";
+import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -340,6 +337,41 @@ export function extractHallucinatedToolCall(
     }
   }
 
+  return null;
+}
+
+/**
+ * PM #109 (3rd follow-up) — the NAME of a printed ACTION tool call in `text`,
+ * whether or not its body PARSES.
+ *
+ * `extractHallucinatedToolCall` requires the Qwen/Hermes `<tool_call>{…}` and
+ * Mistral `[TOOL_CALLS]…` bodies to parse as JSON, so it MISSES a call whose JSON
+ * is broken or truncated. That gap shipped raw markup to a user (chat 9891bb43):
+ * the forced-answer output cap (PM #109 part 1) truncated a `<tool_call>{"name":
+ * "write_text_file", …}` blob mid-string → the JSON no longer parsed → the
+ * residual gate saw "no tool call" and delivered the raw markup. A truncated
+ * printed call is STILL a printed call; shipping it is never right.
+ *
+ * So: try the strict parser first (covers every dialect, incl. `<invoke>` /
+ * `<function=>` which don't need JSON), then fall back to a STRUCTURAL match for
+ * the two JSON-bodied dialects — a `name` field naming a non-`response` tool
+ * right after the opener. The `"name"`-adjacency keeps prose that merely mentions
+ * `<tool_call>` from matching. Returns null when nothing actionable is printed.
+ */
+export function printedActionCallName(text: string): string | null {
+  const parsed = extractHallucinatedToolCall(text);
+  if (parsed) return parsed.name === "response" ? null : parsed.name;
+  const body = text.trim();
+  const structural =
+    body.match(
+      /<tool_call>\s*\{[\s\S]{0,160}?["']name["']\s*:\s*["']([A-Za-z0-9_.\-]+)["']/i
+    ) ||
+    body.match(
+      /\[TOOL_(?:CALLS?|REQUEST)\][\s\S]{0,160}?["']name["']\s*:\s*["']([A-Za-z0-9_.\-]+)["']/i
+    );
+  if (structural) {
+    return structural[1].toLowerCase() === "response" ? null : structural[1];
+  }
   return null;
 }
 
@@ -1059,10 +1091,16 @@ export async function resolveTurnContinuation(args: {
     // model keeps emitting tool markup as text under context pressure), do NOT
     // ship the raw markup as the answer — that is the 16 KB-of-garbage failure.
     // `response`-markup is already recovered by unwrapSerializedResponseCall
-    // above; anything else that still parses as a tool call is un-executed action
-    // (lost work), so deliver an honest, actionable notice instead.
-    const residual = extractHallucinatedToolCall(text);
-    if (residual && residual.name !== "response") {
+    // above; anything else printed as an action call is un-executed work.
+    //
+    // `printedActionCallName` (NOT `extractHallucinatedToolCall`) so a call whose
+    // JSON was TRUNCATED still counts: the output cap above can cut a
+    // `<tool_call>{"name":"write_text_file",…}` blob mid-string, and a parser that
+    // requires valid JSON then sees "no tool call" and ships the raw markup — the
+    // exact bug this gate exists to stop (chat 9891bb43, a 4367-char truncated
+    // blob delivered to the user).
+    const residualName = printedActionCallName(text);
+    if (residualName) {
       // PM #109 — flag the chat AND record the conditions. This site used to do
       // neither: the notice shipped, the chat stayed un-flagged, so the next
       // turn ran at the same context and failed the same way (observed three
@@ -1072,15 +1110,14 @@ export async function resolveTurnContinuation(args: {
         chatId,
         provider: brainConfig?.provider,
         model: brainConfig?.model,
-        toolName: residual.name,
-        argBytes: argumentByteSize(residual.args),
+        toolName: residualName,
         markupChars: text.length,
         promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
       });
       return {
         text: TOOL_MARKUP_DEGRADATION_NOTICE,
         usage: attempt.usage,
-        uiNotice: `[Agent] Forced answer still printed a '${residual.name}' tool call as text; delivered an honest failure notice instead of raw markup.`,
+        uiNotice: `[Agent] Forced answer still printed a '${residualName}' tool call as text; delivered an honest failure notice instead of raw markup.`,
       };
     }
     if (text) {

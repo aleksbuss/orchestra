@@ -211,6 +211,26 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.uiNotice).toContain("write_text_file");
   });
 
+  it("PM #109 — does NOT ship a TRUNCATED <tool_call> blob whose JSON no longer parses", async () => {
+    // The live regression (chat 9891bb43): the forced-answer output cap cut a
+    // write_text_file blob mid-string, so the strict JSON parser saw "no call"
+    // and the raw 4KB markup shipped. The structural residual check must catch it.
+    const truncated =
+      "I'll write the complete file now using the proper tool call.\n\n" +
+      '<tool_call>\n{"name": "write_text_file", "arguments": {"file_path": "/x.ts", ' +
+      '"content": "import { Counter } from \'prom-client\';\\nclass PerformanceMonitor';
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("<thinking>done</thinking>")],
+      finishReason: "other",
+      model: modelReturning(truncated) as never,
+    });
+    expect(res.text).not.toContain("<tool_call>");
+    expect(res.text).not.toContain("write_text_file");
+    expect(res.text).toContain("printed the call as text");
+    expect(res.uiNotice).toContain("write_text_file");
+  });
+
   it("PM #109 — FLAGS the chat when the forced answer degrades, so the next turn compacts harder", async () => {
     // The live defect (chat 9891bb43): this site shipped the notice but recorded
     // nothing, so the PM #82 backstop never armed and the next turn ran at the

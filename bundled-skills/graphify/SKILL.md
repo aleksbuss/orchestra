@@ -21,11 +21,16 @@ then grepping anyway. Do not. Make the call explicitly:
 
 | The question is… | Do this |
 | --- | --- |
-| Where is `X` defined? What calls `Y`? How do `A` and `B` connect? How is this codebase structured? Planning a cross-file refactor? | **`graphify query` / `explain` / `path` FIRST** (after the Step 0 probe). This is what the graph is for; one query replaces dozens of file reads. |
-| A literal string/comment/config value; a file whose path you already know; a tiny project; the exact current text of lines you are about to edit | `grep` / `read_text_file` — the graph is derived and can lag; don't route these through it. |
+| Where is `X` defined? What calls `X`? (you have the symbol name) | **`graphify explain "X"`** — the cheapest, highest-precision call here. Measured 971 chars vs 1668 for the equivalent grep, and it reports call DIRECTION, which grep cannot. |
+| What breaks if I change `X`? | **`graphify affected "X"`** (reverse traversal). |
+| How do `A` and `B` connect? | **`graphify path "A" "B"`** — but empty output is NOT proof of no connection (dynamic imports, DI, string-keyed registries). |
+| How is this codebase structured? Planning a cross-file refactor? | **`graphify query "<identifiers>" --budget 500`** — see the budget warning below; never call `query` without `--budget`. |
+| A literal string/comment/config value; a file whose path you already know; the exact current text of lines you are about to edit; a command's exit code; a field inside a JSON file | `grep` / `read_text_file`. The graph models code STRUCTURE — it does not model runtime values or literal text. Routing these through it returns confident noise. **This is the right call, not a shortcut.** |
 | Probe (`graphify --version`) failed, or no index exists and building is not appropriate here | Fall back to `grep`, and say plainly the graph is unavailable. |
 
-If you catch yourself about to run `find`/`grep`/`ls` to *understand* the code rather than to *find a literal string*, stop and issue a `graphify query` instead.
+⚠️ **`query`'s default budget does not hold.** `--budget N` is documented as "cap output at N tokens (default 2000)". Measured on a 5100-node graph: the cap is applied to the *node* set only, and edge lines ship unmetered — one `query` emitted **29,977 chars (~7,500 tokens), 3.7× the stated default**, byte-identical at `--budget 2000` and `--budget 8000`. Only `--budget 500` truncated correctly. Natural-language questions also seed the traversal from common English words (a question containing "path" seeded the node literally named `path`, exploding it to 257 nodes, 193 of them cut) — **query with identifiers, not prose**.
+
+Earlier revisions of this skill said "if you catch yourself about to grep, issue a `graphify query` instead." That was withdrawn: measured, it was ignored in ~2/3 of runs *because the tasks were literal*, and a directive that is correctly ignored teaches the model to discount every other directive it ships with. Pick by question shape.
 
 ## Step 0 — probe before you rely on it
 

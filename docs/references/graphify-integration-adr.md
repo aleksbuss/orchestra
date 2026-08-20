@@ -127,7 +127,53 @@ Natural-language queries appear to work on large graphs only because a long ques
 | **2000 (default)** | **29,977** | 53 | **201** | **no** |
 | 8000 | 29,977 | 53 | 201 | no |
 
-29,977 chars ≈ **7,500 tokens, 3.7× the advertised default**, and byte-identical at 2000 and 8000 — the budget is simply not reached by the node count, after which the 201 edges ship free. **Always pass an explicit `--budget` (500–800) to `query`.** `explain` is unaffected: one node, ~971 chars.
+29,977 chars ≈ **7,500 tokens, 3.7× the advertised default**, byte-identical at 2000 and 8000. **Always pass an explicit `--budget` (500–800) to `query`.** `explain` is unaffected: one node, ~971 chars.
+
+### Root cause — read from the installed source, not inferred
+
+⚠️ **An earlier revision of this section said "the cap is applied to the node set only; edge lines ship unmetered." That was wrong and is withdrawn.** It was inferred from the symptom table above and never checked against code. The real mechanism is in `graphify/serve.py::_subgraph_to_text` (graphifyy **0.9.44**, installed at `~/.local/share/uv/tools/graphifyy/lib/python3.13/site-packages/graphify/serve.py`):
+
+```python
+char_budget = token_budget * 3                       # :979   2000 tok -> 6000 chars
+for nid in ordered:  lines.append(node_line)         # :1013  ALL nodes, no per-line check
+for u, v in edges:   lines.append(edge_line)         # :1036  ALL edges, no per-line check
+output = "\n".join(lines)
+if len(output) > char_budget:                        # :1072  29,977 > 6,000 -> True
+    cut_at      = ...                                # :1073  cut point IS computed
+    total_nodes = sum(1 for l in lines if l.startswith("NODE "))
+    shown_nodes = output[:cut_at].count("\nNODE ") + ...
+    cut_count   = total_nodes - shown_nodes
+    if cut_count == 0:
+        return output                                # :1093  <-- THE CUT IS DISCARDED
+```
+
+The budget **is** measured over the whole rendered text (nodes *and* edges) and the overflow **is** detected. The defect is the early return at `:1093`: the computed cut is thrown away whenever it would not drop a **whole NODE line**. Nodes render first and are short (~94 chars each here), so 53 of them fit inside a 6,000-char budget, `cut_count` is 0, and the entire 29,977-char output — all 201 edge lines included — is returned unbudgeted.
+
+This explains every row of the table, including the one the old inference could not:
+
+| `--budget` | `char_budget` | all nodes fit? | `cut_count` | path taken |
+| --- | --- | --- | --- | --- |
+| 500 | 1,500 | no — 16 of 53 | 37 | real truncation → 1,890 chars |
+| 2000 | 6,000 | yes | **0** | `return output` → 29,977 |
+| 8000 | 24,000 | yes | **0** | `return output` → 29,977 |
+
+**Why 2000 and 8000 are byte-identical:** both exceed `char_budget`, both reach `:1093` with `cut_count == 0`, both take the same early return. Past the point where all nodes fit, the budget value stops affecting the output at all — so a *larger* `--budget` is indistinguishable from the default. Only a budget small enough to cut a node does anything.
+
+**Predicted from the source, then confirmed by measurement.** If the early return is the mechanism, there must be a *cliff* at the budget where the last node stops fitting — roughly `53 nodes × ~94 chars ÷ 3 ≈ 1,670`. Swept it:
+
+| `--budget` | `char_budget` | NODE | EDGE | truncated? | chars |
+| --- | --- | --- | --- | --- | --- |
+| 1400 | 4,200 | 43 | 0 | yes | 4,583 |
+| 1600 | 4,800 | 49 | 0 | yes | 5,188 |
+| **1700** | **5,100** | **52 of 53** | **0** | **yes** | **5,490** |
+| **1800** | **5,400** | **53** | **201** | **no** | **29,976** |
+| 2000 | 6,000 | 53 | 201 | no | 29,976 |
+
+**A 100-token budget increase (1700 → 1800, +6%) multiplies the output 5.5×.** One node that did not fit was holding back the entire edge block; the moment it fit, `cut_count` hit 0 and the early return shipped everything. That is the cliff the mechanism predicts, at the budget it predicts, and it is the single strongest confirmation available from outside the process. Note the practical trap this creates: **tuning `--budget` upward to "get a bit more context" can silently cross the cliff and cost 24,000 extra characters.** Tune downward, never up.
+
+**It is deliberate, not sloppy — and that is the interesting part.** The comment above the early return (`:1085–1092`) cites issue **#2601**: the previous behaviour announced *"showing 53 of 53 nodes … the answer may be among the 0 cut nodes"*, a false truncation warning that taught agents to distrust complete answers and burn follow-up narrowing calls. The fix chose "when every node is shown the answer is complete: return the full output with no banner rather than silently dropping edges under a misleading notice." Reasonable — but **"no whole node would be lost" is a bad proxy for "the output fits the budget."** A false warning was traded for unbounded output. The correct fix is to still cut trailing edges at `char_budget` while suppressing the node-count banner (or emitting an edge-aware one).
+
+**Method note, and the reason this correction exists:** the first version of this finding was published — merged in PR #101 — on a mechanism inferred from black-box measurements alone. The measurements were right; the causal story attached to them was not. The source was sitting on this machine the whole time. [[feedback-verify-the-instrument]] applies to explanations, not just to instruments: **a symptom table does not license a mechanism claim.** Upstream-report-ready as written; not yet filed.
 
 Two related CLI traps: `graphify query --help` is **not a flag** — it searches for the string "help" and returns `helpers.ts` / `helpText()`; only top-level `graphify --help` lists subcommand flags. And `hook-guard`, the subcommand wired into `.claude/settings.json` by `graphify claude install`, is undocumented in `--help`.
 

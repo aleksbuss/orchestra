@@ -230,6 +230,52 @@ describe("generateFinalAnswerWithFailover", () => {
     const out = await generateFinalAnswerWithFailover(args());
     expect(out.usage).toEqual({ totalTokens: 7 });
   });
+
+  it("PM #109 — caps the forced answer's output tokens (a 15KB markup blob cannot form)", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: "ok" } as never);
+    await generateFinalAnswerWithFailover(args());
+    const passed = (mockedGenerateText.mock.calls[0][0] as { maxOutputTokens?: number })
+      .maxOutputTokens;
+    expect(passed).toBeLessThanOrEqual(1500);
+  });
+
+  it("PM #109 — runs the forced answer at a BOUNDED context, pinning the original task", async () => {
+    // A transcript far over budget: the original task first, a huge tool result
+    // in the middle (the imitation fodder), the 'write your answer' instruction
+    // last. The bounded context must keep the task + instruction and shed the
+    // middle, so the model never sees the full 68K that collapsed the channel.
+    const big = "y".repeat(200_000);
+    const out = await (async () => {
+      mockedGenerateText.mockResolvedValueOnce({ text: "recovered" } as never);
+      return generateFinalAnswerWithFailover(
+        args({
+          messages: [
+            { role: "user", content: "THE ORIGINAL TASK: rewrite performanceMonitor.ts" },
+            { role: "assistant", content: `here is a huge file dump ${big}` },
+            { role: "user", content: "Write your final answer now, in plain prose." },
+          ],
+        })
+      );
+    })();
+    expect(out.text).toBe("recovered");
+    const sent = (mockedGenerateText.mock.calls[0][0] as { messages: Array<{ content: unknown }> })
+      .messages;
+    const flat = JSON.stringify(sent);
+    expect(flat).toContain("THE ORIGINAL TASK"); // pinned
+    expect(flat).toContain("Write your final answer now"); // instruction survives (last)
+    expect(flat).not.toContain(big); // the giant middle is gone
+  });
+
+  it("PM #109 — a SMALL transcript is passed through untouched", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: "ok" } as never);
+    const small = [
+      { role: "user" as const, content: "small task" },
+      { role: "user" as const, content: "answer now" },
+    ];
+    await generateFinalAnswerWithFailover(args({ messages: small }));
+    const sent = (mockedGenerateText.mock.calls[0][0] as { messages: unknown }).messages;
+    expect(sent).toEqual(small);
+  });
 });
 
 describe("buildFinalAnswerPool", () => {

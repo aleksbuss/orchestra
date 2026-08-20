@@ -62,17 +62,22 @@ Full contract text, per-PM rationale, historical decisions, shipped-track narrat
 
 ---
 
-### 🧭 Before you grep or open a raw file: query the graph
+### 🧭 Structural question? `explain` first. Literal question? grep, and don't apologise.
 
-This repo has a knowledge-graph index at `graphify-out/graph.json` (~5100 nodes, ~11000 edges, built from this exact codebase — code nodes come from deterministic AST parsing of the current working tree, not a cached summary). Before running `grep`/`rg`/`find` or opening a source file to explore ("where is X defined", "how does Y work", "what calls Z"), run:
+This repo has a knowledge-graph index at `graphify-out/graph.json` (~5100 nodes, ~11000 edges, built from this exact codebase — code nodes come from deterministic AST parsing of the current working tree, not a cached summary). **It answers structural questions only.** Exit codes, JSON field values, the literal text of a line — the graph does not model those; reaching for it there is a category error, not diligence.
 
 ```
-graphify query "<question>"       # broad: scoped subgraph for a question
-graphify explain "<concept>"      # focused: one node + its neighbors
-graphify path "<A>" "<B>"         # how two things connect
+graphify explain "<symbol>"           # PREFERRED. ~950 chars, gives call DIRECTION + file:line
+graphify path "<A>" "<B>"             # how two things connect
+graphify affected "<X>"               # reverse: what breaks if X changes
+graphify query "<q>" --budget 500     # broad subgraph. ALWAYS pass --budget (see below)
 ```
 
-It's usually cheaper and more precise than grep output, and it's current — not something to double-check against raw source before trusting. Fall back to raw `grep`/`Read` only when the graph doesn't surface what you need, or when you're modifying/debugging specific lines and need the literal text. This applies to subagents too — include it in any subagent prompt that explores code.
+**`explain` beats grep** on a known symbol — measured 971 chars vs grep's 1668, and it reports who calls whom, which grep cannot. Prefer it.
+
+⚠️ **`query` is the expensive one, and its default budget does not hold.** `--budget N` is documented as "cap output at N tokens (default 2000)"; measured, the cap is enforced on the *node* set only and edge lines ship unmetered — `query "forcedAnswer"` emits **29,977 chars (~7,500 tokens), 3.7× over the stated default**, identical at `--budget 2000` and `--budget 8000`. `--budget 500` truncates correctly. So: never call `query` without an explicit `--budget`. A natural-language question also seeds the traversal from common English words (asking about a "path" seeded the node literally named `path`, exploding it to 257 nodes) — prefer identifiers.
+
+There is **no mandate to consult the graph before grepping**, and the earlier one was withdrawn: it was ignored in ~2/3 of runs *because the tasks were literal*, which trains "MANDATORY" to read as decorative across the other rules in this file. Use the graph when the question is structural. This applies to subagents too.
 
 Extra references: `graphify-out/wiki/index.md` for broad navigation, `graphify-out/GRAPH_REPORT.md` for a full architecture writeup. After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
 
@@ -256,4 +261,4 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | "Already decided / built / rejected?" | `docs/references/session-handoff-archive.md` |
 
 ---
-*Note for AI Assistants: read this file plus the Level 2 reference whose trigger matches your change — not the whole `docs/references/` tree. When in doubt about where code lives, run `graphify query` / `graphify explain` before grepping.*
+*Note for AI Assistants: read this file plus the Level 2 reference whose trigger matches your change — not the whole `docs/references/` tree. When in doubt about where code lives, `graphify explain "<symbol>"` is cheaper than grep; for literal text, grep is the right tool.*

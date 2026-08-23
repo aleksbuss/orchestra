@@ -37,6 +37,10 @@ import {
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 
+/** Outline shared by every sidebar section so the groups read as separate cards. */
+const SECTION_CARD =
+  "mx-2 w-auto rounded-xl border border-border/50 bg-foreground/[0.02]";
+
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const router = useRouter();
   const pathname = usePathname();
@@ -162,7 +166,6 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                 </div>
                 <div className="grid flex-1 text-left text-sm leading-tight">
                   <span className="truncate font-semibold tracking-tight">Orchestra</span>
-                  <span className="truncate text-xs text-muted-foreground">Nexus Agent</span>
                 </div>
               </Link>
             </SidebarMenuButton>
@@ -184,7 +187,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       <SidebarContent>
 
         {/* Project selector */}
-        <SidebarGroup>
+        <SidebarGroup className={SECTION_CARD}>
           <SidebarGroupLabel className="text-xs font-medium text-muted-foreground">Project</SidebarGroupLabel>
           <SidebarMenu>
             {projects.length === 0 && (
@@ -212,7 +215,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         </SidebarGroup>
 
         {/* File tree */}
-        <SidebarGroup>
+        <SidebarGroup className={SECTION_CARD}>
           <SidebarGroupLabel className="text-xs font-medium text-muted-foreground flex items-center">
             <FolderOpen className="size-3.5 mr-1.5" />
             Files
@@ -234,7 +237,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       </SidebarContent>
 
       <SidebarFooter>
-        <SidebarGroup>
+        <SidebarGroup className={SECTION_CARD}>
           <SidebarGroupLabel className="text-xs font-medium text-muted-foreground">Navigation</SidebarGroupLabel>
           <SidebarMenu>
             <SidebarMenuItem>
@@ -383,7 +386,7 @@ function SidebarChatList({
   );
 
   return (
-    <SidebarGroup>
+    <SidebarGroup className={SECTION_CARD}>
       <SidebarGroupLabel className="text-xs font-medium text-muted-foreground flex items-center">
         <MessagesSquare className="size-3.5 mr-1.5" />
         Chats

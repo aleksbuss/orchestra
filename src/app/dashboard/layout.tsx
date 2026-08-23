@@ -13,7 +13,7 @@ export default function DashboardLayout({
   const pathname = usePathname();
   
   // Determine a simple dynamic title based on the route
-  let title = "Nexus Agent";
+  let title = "Orchestra";
   if (pathname.includes("/projects")) title = "Projects";
   if (pathname.includes("/memory")) title = "Memory";
   if (pathname.includes("/skills")) title = "Skills";

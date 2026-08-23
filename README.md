@@ -8,7 +8,7 @@
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-4025%20passing-brightgreen)](#tests)
 [![Post-Mortems](https://img.shields.io/badge/post--mortems-109%20documented-purple)](./POST_MORTEMS.md)
-[![Status](https://img.shields.io/badge/status-alpha-orange)]()
+[![Status](https://img.shields.io/badge/status-v1.0-green)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
 
@@ -484,7 +484,9 @@ The `/api/health` endpoint now surfaces aggregator mode, trace-memory pool size,
 
 ## Status
 
-**Alpha quality.** Architecture is end-to-end functional and exercised across a comprehensive automated test suite. **Not production-grade** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
+**v1.0 — feature-complete for its intended scope:** single-user, self-hosted, BYOK. The architecture is end-to-end functional and exercised across a comprehensive automated test suite (see the badge above for the current count).
+
+**Not hardened** for multi-tenant or untrusted-network deployment — see [`POST_MORTEMS.md`](./POST_MORTEMS.md) for known gaps and the trust model in [`SECURITY.md`](./SECURITY.md).
 
 Solo developer project. PRs welcome; review on a best-effort basis.
 

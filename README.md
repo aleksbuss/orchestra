@@ -6,7 +6,7 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-4025%20passing-brightgreen)](#tests)
+[![Tests](https://img.shields.io/badge/tests-4027%20passing-brightgreen)](#tests)
 [![Post-Mortems](https://img.shields.io/badge/post--mortems-109%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-v1.0-green)]()
 
@@ -176,6 +176,14 @@ ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)
 ```
 
 **"The first key it finds" is literal.** On a fresh install the chat and utility model slots are pointed at whichever provider you actually have a credential for — checked in the API Keys Vault first, then the env vars above, in the order OpenRouter → Anthropic → Google. Nothing to configure. Two things this deliberately does *not* do: it never overrides a model you picked yourself (Settings wins, always), and it leaves embeddings on OpenAI, because OpenRouter has no embeddings API — semantic memory needs an OpenAI key or a local Ollama embedding model. See PM #101.
+
+### Free Mode — great for short tasks, not for long agentic builds
+
+**Free Mode** overlays free OpenRouter `:free` models onto the model slots so you can run Orchestra at $0. It is genuinely capable on **short, self-contained tasks** — a question, a single-file edit, a quick analysis.
+
+It is **not the right tool for a long multi-step build** (a coding sprint over dozens of tool calls). Measured, reproducible failure mode: as the conversation grows, a free brain model **drops the native tool-calling channel** and starts *printing* the tool call as text instead of executing it — so nothing gets written, and near the end of a long build it can loop, mangle tool arguments, or claim success while having done nothing. The trigger is an **accumulated (poisoned) context**, not raw length: it has been observed collapsing at ~19K tokens once the recent window fills with prior tool dumps and printed-markup. A **fresh chat with the same task works**, because it drops that context.
+
+When this happens Orchestra never ships the raw markup — it delivers an honest notice telling you exactly this. For a long build: **turn off Free Mode and use your configured (paid or local) model**, which does not exhibit the collapse; keep individual chats focused; and start a fresh chat rather than pushing one chat past ~90 messages. This is a limitation of the free models themselves, not of the agent loop — see the `POST_MORTEMS.md` entries on the tool-call channel and the honest-notice recovery.
 
 ### Full env reference
 

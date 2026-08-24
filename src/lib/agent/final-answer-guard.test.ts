@@ -21,6 +21,7 @@ import {
   countTrailingLoopBlockSteps,
   isLoopGuardRepeatBlock,
   LOOP_GUARD_REPEAT_MARKER,
+  buildToolMarkupDegradationNotice,
 } from "./agent-response";
 import { isChatDegraded, resetChatDegradation } from "./degradation-telemetry";
 
@@ -229,6 +230,34 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.text).not.toContain("write_text_file");
     expect(res.text).toContain("printed the call as text");
     expect(res.uiNotice).toContain("write_text_file");
+  });
+
+  it("Free-Mode-aware notice NAMES the configured strong model and steers off Free Mode", () => {
+    // The council-endorsed steer (memory: orchestra-free-model-toolcall-limit):
+    // when Free Mode is on, the degraded brain is the FREE overlay, and the
+    // operator's own configured chatModel is the stronger option — name it.
+    const freeSettings = {
+      chatModel: { provider: "openrouter", model: "~deepseek/deepseek-v4-flash-latest", apiKey: "k" },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(freeSettings);
+    // Base phrase pinned elsewhere stays present.
+    expect(notice).toContain("printed the call as text");
+    // Names the configured model, tilde stripped, and the Free-Mode escalation.
+    expect(notice).toContain("deepseek/deepseek-v4-flash-latest");
+    expect(notice).not.toContain("~deepseek");
+    expect(notice).toContain("Free Mode");
+    expect(notice).toContain("fresh chat");
+  });
+
+  it("Off Free Mode the notice keeps the generic steer and names no overlay", () => {
+    const plain = {
+      chatModel: { provider: "openai", model: "gpt-4o", apiKey: "k" },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(plain);
+    expect(notice).toContain("printed the call as text");
+    expect(notice).toContain("stronger one");
+    expect(notice).not.toContain("Free Mode");
   });
 
   it("PM #109 — FLAGS the chat when the forced answer degrades, so the next turn compacts harder", async () => {

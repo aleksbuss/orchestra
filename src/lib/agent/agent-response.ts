@@ -824,12 +824,51 @@ const STEP_LIMIT_PAUSE_NOTICE =
  * `orchestra-free-model-toolcall-limit`). Better an honest, actionable notice
  * than shipping kilobytes of un-executed markup as if it were the answer.
  */
-const TOOL_MARKUP_DEGRADATION_NOTICE =
-  "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
-  "nothing was changed. This is a known limit of some free models once the conversation grows long: a " +
-  "large tool argument makes them drop the tool-calling channel. To get it working: ask for a **smaller, " +
-  "targeted change** (the agent will use `replace_in_file` on a small span), start a **fresh chat** to " +
-  "shorten the context, or switch the chat model to a stronger one.";
+/**
+ * Honest, actionable notice shipped when the (forced) answer is still un-executed
+ * tool markup — never the raw markup (PM #107/#108/#109). The steer is chosen by
+ * the council-endorsed root cause (see memory `orchestra-free-model-toolcall-limit`):
+ * the model is simply too weak for a long agentic build under a poisoned context,
+ * so the highest-value guidance is "use your stronger model", made CONCRETE.
+ *
+ * Free-Mode-aware because that is the exact configuration the operator hits: Free
+ * Mode overlays a FREE model onto the brain slot, and free models are the ones
+ * that drop the tool-calling channel on long builds. In that state the operator's
+ * OWN configured `chatModel` (held unchanged under the overlay) is the stronger
+ * option, so we NAME it and tell them precisely how to reach it. Off Free Mode we
+ * fall back to the generic steer. Pure string builder in the failure branch — no
+ * hot-path logic, no behavioural change to a healthy turn.
+ *
+ * The phrase "printed the call as text" is asserted by `final-answer-guard.test.ts`
+ * — keep it in the base sentence.
+ */
+export function buildToolMarkupDegradationNotice(settings?: AppSettings): string {
+  const base =
+    "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
+    "nothing was changed. This is a known limit of some free models once the conversation grows long: an " +
+    "accumulated context makes them drop the tool-calling channel.";
+
+  if (settings?.freeMode?.enabled) {
+    const strong = settings.chatModel?.model?.replace(/^~/, "");
+    const named = strong
+      ? `your configured model \`${strong}\` is stronger and is NOT the one running right now`
+      : "your configured (non-free) model is stronger and is NOT the one running right now";
+    return (
+      base +
+      " **You are in Free Mode**, which overlays a free model onto the brain slot — that free model, not " +
+      `your configured one, is what degraded here. To finish this build: ${named}, so **turn off Free Mode** ` +
+      "and resend the task in a **fresh chat** (a fresh chat also drops the accumulated context that triggers " +
+      "this). For a quick unblock without switching, ask for a **smaller, targeted change** (the agent will " +
+      "use `replace_in_file` on a small span)."
+    );
+  }
+
+  return (
+    base +
+    " To get it working: ask for a **smaller, targeted change** (the agent will use `replace_in_file` on a " +
+    "small span), start a **fresh chat** to shorten the context, or switch the chat model to a stronger one."
+  );
+}
 
 // ── Loop-abort (2026-07-28, DoubleTake-reviewed) ──────────────────────────────
 // The stable prefix `applyGlobalToolLoopGuard` (tool-guard.ts) emits when it
@@ -1115,7 +1154,7 @@ export async function resolveTurnContinuation(args: {
         promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
       });
       return {
-        text: TOOL_MARKUP_DEGRADATION_NOTICE,
+        text: buildToolMarkupDegradationNotice(settings),
         usage: attempt.usage,
         uiNotice: `[Agent] Forced answer still printed a '${residualName}' tool call as text; delivered an honest failure notice instead of raw markup.`,
       };

@@ -41,6 +41,14 @@ const eslintConfig = [
       // generated files and reports spurious warnings. See QA audit F-17.
       "coverage/**",
       "bundled-skills/**",
+      // ANY custom Next build dir, not just the clean-boot one. Same gap the
+      // `.gitignore` had: enumerating one name means the next value of
+      // `ORCHESTRA_NEXT_DIST_DIR` floods the gate instead. Measured — running a
+      // second server with `.next-login` put 91 generated files into `npm run
+      // lint`, turning 22 warnings into 213 errors.
+      ".next-*/**",
+      // Gitignored local working directory (`/scratch/` in .gitignore).
+      "scratch/**",
       // Vendored third-party code — not ours to lint. Currently matches
       // nothing (the last occupant, a pdf-parse copy, was deleted 2026-08-25);
       // kept so the next vendored drop is ignored by default rather than

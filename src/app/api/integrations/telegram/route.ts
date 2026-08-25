@@ -487,7 +487,37 @@ export async function POST(req: NextRequest) {
   const defaultProjectId = runtime.defaultProjectId || undefined;
   const allowedUserIds = new Set(runtime.allowedUserIds);
 
-  if (!botToken || !webhookSecret) {
+  // AUTHENTICATE FIRST, then report configuration state.
+  //
+  // This handler is exempt from the auth middleware (src/middleware.ts) because
+  // Telegram calls it with a secret-token header instead of a session cookie —
+  // it is the one route any anonymous caller can reach. The "not configured"
+  // 503 used to run BEFORE this check, which made it a config-state oracle: a
+  // stranger POSTing an empty body learned whether the operator had Telegram
+  // set up (503 = no, 401 = yes, wrong secret). Small, but it is exactly the
+  // endpoint where that ordering is worth getting right.
+  //
+  // With no `webhookSecret` configured there is no credential that can be
+  // correct, so every caller is unauthorized — and the operator still learns
+  // why, from the log line below rather than from the HTTP body.
+  const providedSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
+  if (!webhookSecret || !providedSecret || !safeTokenMatch(providedSecret, webhookSecret)) {
+    if (!webhookSecret) {
+      console.warn(
+        JSON.stringify({
+          level: "warn",
+          event: "telegram_webhook_unconfigured",
+          module: "telegram",
+          detail:
+            "Rejected a webhook call: TELEGRAM_WEBHOOK_SECRET is not set, so no caller can authenticate.",
+        })
+      );
+    }
+    return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  // Authenticated. A configuration gap can now be reported honestly.
+  if (!botToken) {
     return Response.json(
       {
         error:
@@ -495,11 +525,6 @@ export async function POST(req: NextRequest) {
       },
       { status: 503 }
     );
-  }
-
-  const providedSecret = req.headers.get("x-telegram-bot-api-secret-token")?.trim();
-  if (!providedSecret || !safeTokenMatch(providedSecret, webhookSecret)) {
-    return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   let botIdForRollback: string | null = null;

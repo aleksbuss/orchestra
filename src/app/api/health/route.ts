@@ -391,30 +391,45 @@ export async function GET() {
   // model is dead and every proposer silently landed on the worker fallback.
   // In-memory + per-process: an empty list after a restart is normal, not proof
   // of health.
-  const health = getModelHealthSnapshot();
-  const openCircuits = health.filter((e) => e.openedAt !== null);
-  if (openCircuits.length > 0) {
+  // Guarded like every other probe in this file. This block and the chat-index
+  // check below were the only top-level calls in a 768-line handler with no
+  // try/catch of their own and no outer one, so a throw in either took the whole
+  // endpoint to 500 — the one thing a health check must not do. This is
+  // HARDENING, not a repair: a single 500 was observed on a live server and
+  // never reproduced across 27 later requests, and no mechanism was identified.
+  // The change is safe regardless of what that was.
+  try {
+    const health = getModelHealthSnapshot();
+    const openCircuits = health.filter((e) => e.openedAt !== null);
+    if (openCircuits.length > 0) {
+      checks.push({
+        name: "model_endpoints",
+        status: "warn",
+        detail:
+          `${openCircuits.length} model endpoint(s) currently SKIPPED by the circuit breaker (proposers substitute a healthy model): ` +
+          openCircuits
+            .map(
+              (e) =>
+                `${e.provider}/${e.model} (${e.consecutiveFailures} consecutive failures, last: ${e.lastFailureKind})`
+            )
+            .join("; ") +
+          ". Free/shared endpoints throttle under parallel fan-out — switch proposerTiers to reliable models, or wait out the cooldown.",
+      });
+    } else {
+      checks.push({
+        name: "model_endpoints",
+        status: "ok",
+        detail:
+          health.length === 0
+            ? "No model dispatches recorded since boot (breaker state is per-process)."
+            : `${health.length} endpoint(s) tracked, none circuit-open.`,
+      });
+    }
+  } catch (err) {
     checks.push({
       name: "model_endpoints",
       status: "warn",
-      detail:
-        `${openCircuits.length} model endpoint(s) currently SKIPPED by the circuit breaker (proposers substitute a healthy model): ` +
-        openCircuits
-          .map(
-            (e) =>
-              `${e.provider}/${e.model} (${e.consecutiveFailures} consecutive failures, last: ${e.lastFailureKind})`
-          )
-          .join("; ") +
-        ". Free/shared endpoints throttle under parallel fan-out — switch proposerTiers to reliable models, or wait out the cooldown.",
-    });
-  } else {
-    checks.push({
-      name: "model_endpoints",
-      status: "ok",
-      detail:
-        health.length === 0
-          ? "No model dispatches recorded since boot (breaker state is per-process)."
-          : `${health.length} endpoint(s) tracked, none circuit-open.`,
+      detail: `Could not read circuit-breaker state (${err instanceof Error ? err.constructor.name : "Error"}).`,
     });
   }
 
@@ -426,31 +441,41 @@ export async function GET() {
   //     sidebar rows that open to nothing. This is the exact signature of the
   //     PM #62 data loss (index listed 41 chats, only 7 files on disk); making
   //     it a visible `warn` is what would have caught that loss immediately.
-  const broken = getBrokenChatFiles();
-  const orphans = await getOrphanIndexEntries();
-  const issues: string[] = [];
-  if (broken.length > 0) {
-    issues.push(
-      `${broken.length} chat file(s) failed to parse on last rebuild (${broken.map((b) => b.file).join(", ")})`
-    );
-  }
-  if (orphans.length > 0) {
-    const sample = orphans.slice(0, 5).join(", ");
-    issues.push(
-      `${orphans.length} index entr${orphans.length === 1 ? "y references a missing chat file" : "ies reference missing chat files"} (${sample}${orphans.length > 5 ? ", …" : ""}) — ghost sidebar rows; reconcile via rebuildChatIndex`
-    );
-  }
-  if (issues.length > 0) {
+  try {
+    const broken = getBrokenChatFiles();
+    const orphans = await getOrphanIndexEntries();
+    const issues: string[] = [];
+    if (broken.length > 0) {
+      issues.push(
+        `${broken.length} chat file(s) failed to parse on last rebuild (${broken.map((b) => b.file).join(", ")})`
+      );
+    }
+    if (orphans.length > 0) {
+      const sample = orphans.slice(0, 5).join(", ");
+      issues.push(
+        `${orphans.length} index entr${orphans.length === 1 ? "y references a missing chat file" : "ies reference missing chat files"} (${sample}${orphans.length > 5 ? ", …" : ""}) — ghost sidebar rows; reconcile via rebuildChatIndex`
+      );
+    }
+    if (issues.length > 0) {
+      checks.push({
+        name: "chat_index_integrity",
+        status: "warn",
+        detail: `${issues.join("; ")}. See PM #30 / PM #62 in POST_MORTEMS.md.`,
+      });
+    } else {
+      checks.push({
+        name: "chat_index_integrity",
+        status: "ok",
+        detail: "Chat index and chat files are consistent.",
+      });
+    }
+  } catch (err) {
     checks.push({
       name: "chat_index_integrity",
       status: "warn",
-      detail: `${issues.join("; ")}. See PM #30 / PM #62 in POST_MORTEMS.md.`,
-    });
-  } else {
-    checks.push({
-      name: "chat_index_integrity",
-      status: "ok",
-      detail: "Chat index and chat files are consistent.",
+      // Generic on purpose, like the other probes: a filesystem error message
+      // can carry the operator's workspace layout, and this endpoint is public.
+      detail: `Could not read chat-index integrity (${err instanceof Error ? err.constructor.name : "Error"}).`,
     });
   }
 

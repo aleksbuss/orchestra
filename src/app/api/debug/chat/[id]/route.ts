@@ -25,7 +25,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { NextRequest } from "next/server";
-import { getChat } from "@/lib/storage/chat-store";
+import { getChat, isValidChatId } from "@/lib/storage/chat-store";
 import { isJobActive } from "@/lib/agent/daemon";
 import { dataPath } from "@/lib/storage/data-dir";
 
@@ -97,6 +97,15 @@ export async function GET(
   ctx: { params: Promise<{ id: string }> }
 ) {
   const { id: chatId } = await ctx.params;
+
+  // The id is a user-supplied path fragment: it becomes `<chatId>.json` inside
+  // `data/chats/`. `chatFilePath` guards it and THROWS on traversal, which
+  // without this check escaped as an unhandled 500 (`..%2f..%2f..%2fetc%2fpasswd`
+  // → 500, empty body). Nothing was ever read outside the root; the fix is to
+  // report the rejection as the client error it is.
+  if (!isValidChatId(chatId)) {
+    return Response.json({ error: "invalid chat id" }, { status: 400 });
+  }
 
   // 1. Disk state — canonical source of truth (PM #5).
   const chat = await getChat(chatId);

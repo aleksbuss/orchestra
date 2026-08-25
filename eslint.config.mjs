@@ -28,9 +28,11 @@ const eslintConfig = [
       // Agent tooling (gitignored). `.claude/worktrees/<name>/` holds a FULL
       // second copy of the repository, so the root-anchored ignores below
       // (`src/lib/vendor/**`, `refactor-wizards.js`) do NOT match their nested
-      // twins — a single worktree floods the gate with 100+ errors from
-      // vendored pdf.js. CI never sees this (the directory is gitignored), so
-      // it breaks only the local gate, and through `prebuild` the local build.
+      // twins — a single worktree floods the gate with 100+ errors. CI never
+      // sees this (the directory is gitignored), so it breaks only the local
+      // gate, and through `prebuild` the local build. (The original offender
+      // was a vendored pdf.js bundle, deleted 2026-08-25; a worktree checked
+      // out at an older commit still carries it.)
       ".claude/**",
       "playwright-report/**",
       "test-results/**",
@@ -39,7 +41,10 @@ const eslintConfig = [
       // generated files and reports spurious warnings. See QA audit F-17.
       "coverage/**",
       "bundled-skills/**",
-      // Vendored third-party code — not ours to lint.
+      // Vendored third-party code — not ours to lint. Currently matches
+      // nothing (the last occupant, a pdf-parse copy, was deleted 2026-08-25);
+      // kept so the next vendored drop is ignored by default rather than
+      // discovered as 100+ lint errors.
       "src/lib/vendor/**",
       // Next.js auto-generated.
       "next-env.d.ts",

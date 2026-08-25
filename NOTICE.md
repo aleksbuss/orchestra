@@ -96,18 +96,17 @@ for the canonical licensing reference.
 
 ## Vendored dependencies
 
-[`src/lib/vendor/pdf-parse/`](./src/lib/vendor/pdf-parse/) contains a vendored
-copy of the [`pdf-parse`](https://www.npmjs.com/package/pdf-parse) npm package,
-originally MIT-licensed (© Modesty Zhang). The vendored copy was modified for
-Next.js compatibility (avoiding a startup-time `require('./test/...')` that
-would otherwise break the build). The original MIT license applies.
-
-**Security note on the bundled pdf.js build:** `pdf-parse` embeds pdf.js
-v1.10.100 (2018). Orchestra uses it exclusively for server-side *text
-extraction* in the RAG loaders — no rendering, no embedded-script evaluation —
-which does not exercise the known rendering-path CVEs in old pdf.js (e.g.
-CVE-2024-4367). Treat ingested PDFs as untrusted input regardless; replacing
-the vendored copy with a maintained extraction path is tracked as tech debt.
+**Removed 2026-08-25 — `src/lib/vendor/pdf-parse/`.** This section used to cover a
+vendored copy of [`pdf-parse`](https://www.npmjs.com/package/pdf-parse) (MIT,
+© Modesty Zhang), which embedded a pdf.js v1.10.100 build from 2018 — 64,171
+lines and 2.1 MB. The note here closed with *"replacing the vendored copy with a
+maintained extraction path is tracked as tech debt"*; that replacement had in fact
+already shipped. PDF text extraction now runs through `pdfjs-dist`
+(`src/lib/memory/loaders/pdf-loader.ts`), and the vendored tree had **zero
+importers** — nothing outside it referenced `pdf-parse`, and nothing imported
+anything under `lib/vendor` at all. Deleted along with the `node-ensure`
+dependency, whose only consumer in the entire tree was a `require` inside that
+dead pdf.js bundle. Treat ingested PDFs as untrusted input regardless.
 
 [`bundled-skills/last30days/scripts/lib/vendor/bird-search/`](./bundled-skills/last30days/scripts/lib/vendor/bird-search/)
 vendors its own `node_modules`, including

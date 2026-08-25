@@ -21,13 +21,34 @@ npm run evals -- --case 01
 npm run evals -- --json
 ```
 
+## What mock mode can and cannot score
+
+A case is only scorable offline if it carries a recorded `mock_response`. The suite
+reports three categories so a partial run can never be read as a full one:
+
+| Category | Meaning | Counts toward pass/fail? |
+|---|---|---|
+| **verified** | Has a `mock_response` and at least one non-`judge` assertion — actually checked. | yes |
+| **vacuous** | Has a `mock_response`, but every assertion is `judge`, which needs an LLM. Passes without checking anything. | passes, but flagged |
+| **skipped** | No `mock_response`. Mock mode cannot score it, so it is **not run** — these are the real-agent-only families (`hard-*`, `audit-*`, `selection-*`, `multi-constraint-*`, `agentic-*`). | no — excluded entirely |
+
+Skipped cases used to be run anyway: the runner fed their assertions its own
+empty-string placeholder and recorded each as a **failure**, which made
+`npm run evals` permanently exit 1 while verifying nothing extra. They are now
+excluded from `totalCases`, `meanScore` and the pass/fail counts.
+
+`complete: false` in the results JSON means something was skipped or vacuous. A
+green exit with `complete: false` means *"nothing that ran failed"*, not *"the
+suite verified everything"*.
+
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | Every case passed |
-| `1` | One or more cases failed |
+| `0` | Every case that ran passed, and at least one was actually verified |
+| `1` | One or more cases failed — **or** zero cases were verified (everything vacuous/skipped) |
 | `2` | One or more case files failed to parse / load |
+| `3` | The configured chat model changed mid-run (results not comparable) |
 
 ## Adding a case
 

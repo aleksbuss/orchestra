@@ -212,6 +212,20 @@ export interface EvalSuiteResult {
   errored: number;
   /** F3 — count of cases that passed vacuously (all assertions skipped). Subset of `passed`. */
   vacuous: number;
+  /**
+   * Cases that were NOT RUN because the current mode cannot score them — no
+   * `mock_response` and `--real` off. They are not failures: the runner would
+   * only have fed its own empty-string placeholder to their assertions. They
+   * are excluded from `totalCases`, `meanScore` and the pass/fail counts, and
+   * reported separately so a partial run can never read as a full one.
+   */
+  skipped: number;
+  /**
+   * True only when every in-scope case was actually scored — nothing skipped
+   * and nothing vacuous. A green exit with `complete: false` means "no case
+   * that ran failed", NOT "the suite verified everything".
+   */
+  complete: boolean;
   /** Count of real-agent cases that returned an empty response (delivery failure, not reasoning). */
   noAnswer: number;
   /**

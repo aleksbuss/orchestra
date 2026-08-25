@@ -6,8 +6,8 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?logo=next.js)](https://nextjs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-4027%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-109%20documented-purple)](./POST_MORTEMS.md)
+[![Tests](https://img.shields.io/badge/tests-4067%20passing-brightgreen)](#tests)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-111%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-v1.0-green)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**
@@ -257,7 +257,8 @@ When this happens Orchestra never ships the raw markup — it delivers an honest
 npm test                  # full unit-test suite (live count in the tests badge above)
 npm run test:coverage     # with v8 coverage
 npm run typecheck         # standalone tsc --noEmit
-npm run verify            # lint + typecheck + tests + build (pre-deploy gate)
+npm run verify            # lint + tests + build (fast loop — does NOT typecheck)
+npm run verify:strict     # lint + typecheck + tests + audit + build (the pre-PR gate)
 npx playwright test       # browser e2e, including the clean-boot suite
 ```
 

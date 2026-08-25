@@ -26,9 +26,7 @@ function isPublicApi(req: NextRequest, pathname: string): boolean {
 }
 
 function shouldBypass(pathname: string): boolean {
-  if (/\.[^/]+$/.test(pathname)) {
-    return true;
-  }
+  // Framework and well-known static paths — never application routes.
   if (
     pathname.startsWith("/_next/static") ||
     pathname.startsWith("/_next/image") ||
@@ -36,6 +34,38 @@ function shouldBypass(pathname: string): boolean {
     pathname === "/robots.txt" ||
     pathname === "/sitemap.xml"
   ) {
+    return true;
+  }
+
+  // Everything under `/api/` and `/dashboard` is an APPLICATION route and is
+  // never exempt, whatever its spelling.
+  //
+  // This clause is the fix for an unauthenticated data disclosure found on
+  // 2026-08-25. The "looks like a static file" test below used to run FIRST and
+  // over the whole path, so any request whose last segment contained a dot
+  // skipped every auth check:
+  //
+  //   GET /api/debug/chat/foo         → 401   (correct)
+  //   GET /api/debug/chat/foo.json    → 200   (auth skipped entirely)
+  //
+  // That is not theoretical. `POST /api/chat` accepts a caller-supplied
+  // `chatId`, so a chat can legitimately be created as `notes.private`; an
+  // anonymous `GET /api/debug/chat/notes.private` then returned its title,
+  // message count, and `lastMessage.contentPreview` — the message text —
+  // from an endpoint whose own header says it "reads chat state, recent logs
+  // (potentially containing sensitive context), and daemon internals — not
+  // something to expose anonymously". Reproduced end-to-end before this change.
+  //
+  // The same spelling trick also reached `/dashboard/*`, and url-encoded
+  // traversal (`..%2f..%2fx`) matched the regex for the same reason: `%2f` is
+  // not a literal `/`, so the "extension" ran to the end of the path.
+  if (pathname.startsWith("/api/") || pathname.startsWith("/dashboard")) {
+    return false;
+  }
+
+  // Root-level assets served out of `public/` (`/logo.png`, `/manifest.json`).
+  // Only reachable now that application routes are excluded above.
+  if (/\.[^/]+$/.test(pathname)) {
     return true;
   }
   return false;

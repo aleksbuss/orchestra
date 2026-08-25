@@ -6,7 +6,6 @@
  */
 import { NextRequest } from "next/server";
 import { getSettings } from "@/lib/storage/settings-store";
-import { PRESETS, PRESET_ORDER, type PresetTier } from "@/lib/agent/presets";
 import {
   assertSafeOutboundUrl,
   UnsafeOutboundUrlError,
@@ -305,38 +304,21 @@ export async function GET(_req: NextRequest) {
     })
   );
 
-  // Check preset readiness
-  const presetDiags: PresetDiagnostic[] = PRESET_ORDER
-    .filter((t) => t !== "custom")
-    .map((tier) => {
-      const preset = PRESETS[tier as Exclude<PresetTier, "custom">];
-      const brainKey = resolveKey(preset.brain.provider);
-      const workerKey = preset.worker.provider === "ollama"
-        ? { key: "ollama", source: "none" as const }
-        : resolveKey(preset.worker.provider);
-
-      const brainReady = !!brainKey.key;
-      const workerReady = preset.worker.provider === "ollama" || !!workerKey.key;
-      const issues: string[] = [];
-
-      if (!brainReady) {
-        issues.push(`Missing API key for brain (${preset.brain.provider})`);
-      }
-      if (!workerReady) {
-        issues.push(`Missing API key for worker (${preset.worker.provider})`);
-      }
-
-      return {
-        tier,
-        label: preset.label,
-        brainProvider: preset.brain.provider,
-        brainKeyReady: brainReady,
-        workerProvider: preset.worker.provider,
-        workerKeyReady: workerReady,
-        ready: brainReady && workerReady,
-        issue: issues.length > 0 ? issues.join("; ") : null,
-      };
-    });
+  // Preset readiness — permanently empty, and that is not a bug to fix here.
+  //
+  // The built-in preset bundles were removed; `presets.ts` is self-labelled
+  // LEGACY and now exports `PRESETS = {}` with `PRESET_ORDER = ["custom"]` and
+  // `type PresetTier = "custom"`. So `PRESET_ORDER.filter(t => t !== "custom")`
+  // is statically `[]` and the ~30-line readiness loop that used to live here
+  // could never execute — worse, if it ever had, it dereferenced
+  // `preset.brain.provider` on a lookup into the empty map and would have
+  // thrown 500 on this route.
+  //
+  // The `presets` response field is KEPT (as an empty array) rather than
+  // removed: it is part of this endpoint's published shape, and dropping the
+  // key is a contract change that belongs with the wider preset removal, not
+  // with deleting unreachable code.
+  const presetDiags: PresetDiagnostic[] = [];
 
   // Environment check
   const envVars: Record<string, boolean> = {

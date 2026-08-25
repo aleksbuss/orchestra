@@ -8,8 +8,18 @@
  * `createModel` calls `createCliLanguageModel` only when the native path
  * failed and the subprocess fallback is enabled.
  *
- * Imports only leaves (scrub-env, project-store's root resolvers, codex.ts) and
- * NOTHING from llm-provider (one-way: llm-provider -> here), so no cycle.
+ * Imports nothing from llm-provider (one-way: llm-provider -> here). This
+ * header used to add "…and project-store's root resolvers, so no cycle" — that
+ * was WRONG, and a static analysis of the module graph is what showed it:
+ * `project-store` is not a leaf, and it closed a five-module ring
+ *
+ *   project-store -> memory/memory -> memory/embeddings -> llm-provider
+ *                 -> cli-runner -> project-store
+ *
+ * which is the same shape that broke every cron route in the production
+ * bundle (PM #111). The one call into `project-store` is now a dynamic import
+ * at its single call site, and `import-cycle-contract.test.ts` keeps the ring
+ * from coming back.
  * Pure helpers are exported for unit testing — this surface was previously
  * untested (the §10 CLI/OAuth/SSE coverage gap).
  */
@@ -26,7 +36,6 @@ import type {
   LanguageModelV3Usage,
 } from "@ai-sdk/provider";
 import type { ModelConfig } from "@/lib/types";
-import { getProjectContentRoot } from "@/lib/storage/project-store";
 import { cliProviderEnv, scrubProcessEnv } from "@/lib/security/scrub-env";
 import { parseCodexOutput, resolveCodexMcpOverrides } from "@/lib/providers/codex";
 
@@ -176,6 +185,8 @@ export async function resolveCliWorkingDirectory(
     return process.cwd();
   }
 
+  // Lazy: a static import here closes a five-module cycle (see the header).
+  const { getProjectContentRoot } = await import("@/lib/storage/project-store");
   const root = path.resolve(await getProjectContentRoot(projectId));
   const rawCurrentPath = (runtime.currentPath || "").trim();
   if (!rawCurrentPath) return root;

@@ -38,6 +38,94 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 111. Every cron route was broken in the production build — a module cycle that `next dev` resolved and Turbopack did not
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1
+**Symptoms:** `/dashboard/cron` loaded, then showed nothing, with two failed requests in the console. Under `npm run start`:
+
+```
+GET /api/projects/<id>/cron/status  → 500  TypeError: (0 , _.ensureCronSchedulerStarted) is not a function
+GET /api/projects/<id>/cron         → 400  {"error":"(0 , f.getCronProjectStatus) is not a function"}
+```
+
+Under `npm run dev`: all green. Nothing in the repo could see it — the unit suite does not build, and the Playwright e2e suite starts a **dev** server. Found by hand, by pointing a browser at a production build.
+**Root Cause:** A five-module import cycle:
+
+```
+cron/service -> agent/agent -> tools/tool -> tools/cron-tool -> cron/service
+```
+
+ESM tolerates this and `next dev` resolves it lazily per module. The production bundle does not: Turbopack groups modules into per-route chunks, and the `/api/projects/[id]/cron*` chunks evaluated `cron/service` and `cron/runtime` **while they were still initialising**, so their exports read as `undefined` at call time. `/api/chat` imports the same `ensureCronSchedulerStarted` and worked fine — different chunk, different evaluation order — which is what makes this class so hard to spot by reading.
+
+A second, still-latent instance of the same class was found by the gate written for this one:
+
+```
+project-store -> memory/memory -> memory/embeddings -> llm-provider -> cli-runner -> project-store
+```
+
+`cli-runner.ts`'s own header asserted the opposite — *"Imports only leaves (… project-store's root resolvers …), so no cycle"*. `project-store` is not a leaf.
+**Resolution — and the first two attempts were WRONG in a way only a production build could show.**
+
+Deferring an edge with `await import(...)` breaks the cycle *and* moves the deferred module's whole subgraph into an async chunk. Do that anywhere inside the `agent`/`daemon` ring and the fire-and-forget background job reads `agent`'s namespace before the chunk resolves:
+
+```
+[Background Daemon Error]: (0 , t.runAgent) is not a function
+```
+
+Both `cron-tool -> cron/runtime` and `cron/runtime -> daemon` fixed the cron routes and broke every background turn. The two symptoms were mutually exclusive across **seven production builds**; the culprit was isolated by bisecting the change set one file at a time, each with its own build and a live background turn.
+
+What actually works is deleting an edge rather than deferring it. `cron-tool.ts` called `ensureCronSchedulerStarted()` defensively, and that call has been redundant since PM #35 moved the scheduler start into `instrumentation-node.ts`, which awaits it on every cold boot. Removing the call removes the edge with **no async boundary at all**.
+
+Final shape — three deferred edges, one deleted call:
+- `cron/service -> agent/agent` — deferred (the heavy edge; `cron/service` is what the cron routes import).
+- `cli-runner -> project-store` and `project-store -> memory/memory` — deferred (the seven-module memory/provider ring).
+- `cron-tool -> cron/runtime` — **deleted**, not deferred.
+
+Verified together on one production build: cron routes `200 {"projectId":"cronprobe","jobs":0}`, a background turn answering `PONG`, `/api/health` still reporting `cron_scheduler: ok — Scheduler started`, and a dashboard sweep with 0 issues across 10 pages.
+**Regression Coverage:** [`src/import-cycle-contract.test.ts`](src/import-cycle-contract.test.ts) — builds the runtime import graph over `src/lib` + `src/app` and fails on any strongly-connected component. No allowlist: the tree is now cycle-free and an exemption here means shipping a module whose exports may be `undefined` in production.
+**Instrument note — the first version of that gate was broken and passed.** It matched imports line by line, so it missed every multi-line `import {\n … } from "…"` block — including the one that closed this very cycle. Mutation-checked by re-adding the static import: the named-edge assertion caught it, the cycle detector did not. Fixed to scan whole files, then re-verified — and the corrected detector immediately found the second cycle above, which the broken one had also been silently passing.
+**Doc Updates:** this entry; the CI-gate table in `CLAUDE.md`; the false claim in `cli-runner.ts`'s header corrected in place.
+**Rule:** **A comment asserting "no cycle" is not evidence; the module graph is.** Cycles are invisible in dev and fatal in a production chunk, so they need a static gate, not review. And when a gate over source text reports "clean", check it against a deliberately broken tree before believing it — a regex that cannot see the codebase's dominant import style reports clean forever.
+
+**Second rule, learned the expensive way: `await import()` is not a free way to break a cycle.** It relocates a subgraph into an async chunk, which is a behaviour change wherever something reads that subgraph without awaiting it — here, a fire-and-forget daemon job. Prefer, in order: (1) delete the edge if the call is redundant, (2) move the shared symbol into a leaf module, (3) only then defer it — and when you defer, defer the edge FURTHEST from any fire-and-forget path, then verify that path on a real production build. `npm run build && npm run start` and exercise the feature; the unit suite never builds and Playwright runs against `next dev`, so neither can see any of this.
+
+---
+
+## 110. A dot in the URL disabled authentication — an anonymous request read chat content out of the debug endpoint
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P0
+**Symptoms:** None observable. No error, no log line, no failing test. `GET /api/debug/chat/foo` returned 401 as designed; `GET /api/debug/chat/foo.json` returned **200** to a caller with no session at all. Found by hand during the 2026-08-25 audit while probing why a url-encoded traversal id produced a 500 instead of a 400 — the 500 was the symptom of a request that should never have reached the handler.
+**Root Cause:** `src/middleware.ts` — `shouldBypass()` ran a "does this look like a static file?" test **first, and over the entire pathname**:
+
+```ts
+if (/\.[^/]+$/.test(pathname)) return true;   // ← skipped ALL auth
+```
+
+The intent was to let `public/` assets (`/logo.png`, `/manifest.json`) through without a session check. The effect was that **any** path whose final segment contained a dot skipped every check below it — the public-API allowlist, the session lookup, the `mustChangeCredentials` gate, all of it. Two consequences:
+
+- Any dynamic API route reached anonymously by putting a dot in the id: `/api/debug/chat/foo.json`, `/api/projects/foo.json`, `/dashboard/projects/foo.json`.
+- Url-encoded traversal matched the same clause, because `%2f` is not a literal `/` — so the "extension" ran to the end of `..%2f..%2fx` and that path bypassed too.
+
+**This was not theoretical, and the exploit needed no unusual setup.** `POST /api/chat` accepts a caller-supplied `chatId`, so a chat can legitimately be created as `notes.private`. Reproduced end to end against a running server:
+
+```
+POST /api/chat  {"message":"CANARY-CHAT-CONTENT-9931","chatId":"notes.private"}   (authenticated)
+GET  /api/debug/chat/notes.private                                                (NO cookie)
+→ 200 {"diskState":{"exists":true,"title":"New Chat","messageCount":1,
+       "lastMessage":{"contentPreview":"CANARY-CHAT-CONTENT-9931", ...}}}
+```
+
+The endpoint's own header says it "reads chat state, recent logs (potentially containing sensitive context), and daemon internals — not something to expose anonymously". It also runs `tailLogsForChat`, which reads and JSON-parses every daily log file — unauthenticated filesystem work on every request.
+
+**Resolution:** `shouldBypass()` now checks the explicit framework/static prefixes first, then returns `false` for anything under `/api/` or `/dashboard` **before** the extension heuristic runs. The heuristic survives only for root-level `public/` assets, which is the case it was written for. Verified live: every previously-200 path now returns 401 (or 307 for the dashboard page), and `/favicon.ico`, `/_next/static/*` and root assets still bypass.
+**Regression Coverage:** `src/middleware.test.ts` — five cases: dotted `/api/` paths 401, encoded traversal 401, dotted dashboard path redirects, static assets still bypass (guards against over-applying the fix), and an authenticated session still reaches a dotted API path (the gate must reject the caller, not the path shape).
+**Doc Updates:** this entry.
+**Rule:** **Authentication decisions are made on an allowlist of paths, never on a pattern in the path.** A "looks like a static file" heuristic is an attacker-controlled string test: the attacker chooses the spelling. Put application-route exclusions BEFORE any such heuristic, and when a guard's input is a URL, remember that percent-encoding means the string you match is not the path the router resolves. Related: PM #14 (auth gate holes), PM #6/#16 (path guards) — and note that the 500 which led here was the *only* outward sign, so treat an unexplained 500 on an authenticated route as a possible sign that the request never went through the gate.
+
+---
+
 ## 109. The printed-markup recovery retried the SAME model at the SAME context — a guaranteed repeat — and two of the three detection sites recorded nothing
 **Date:** 2026-08
 **Status:** RESOLVED (retry now runs at a short context; every site records) — the per-model boundary itself is still UNKNOWN and is what the new telemetry exists to measure

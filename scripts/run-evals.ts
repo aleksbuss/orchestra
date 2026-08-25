@@ -3,6 +3,14 @@
  * Eval-suite CLI (PM #41). Loads every case under `evals/cases/`, runs
  * them, and prints a structured report to stdout.
  *
+ * Three categories exist in mock mode, and the CLI reports all three so a
+ * partial run can never read as a full one:
+ *   VERIFIED — has a `mock_response` and at least one non-judge assertion.
+ *   VACUOUS  — has a `mock_response` but every assertion is `judge`, which
+ *              needs an LLM; scored only under `--real`.
+ *   SKIPPED  — no `mock_response`, so mock mode cannot score it at all.
+ *              These are the real-agent-only families and are NOT failures.
+ *
  * Usage:
  *   npm run evals                       # mock-response cases only (no LLM)
  *   npm run evals -- --real             # use real agent (operator API key)
@@ -285,6 +293,16 @@ async function main(): Promise<void> {
     console.log(
       `${summaryColor}${c.bold}Binary: ${suite.passed}/${suite.totalCases} runs fully passed, ${suite.failed} failed, ${suite.errored} errored${c.reset}`
     );
+    // Lead with what was actually VERIFIED, not with what "passed". A vacuous
+    // case passes without scoring anything and a skipped one never ran, so
+    // `passed` alone overstates the run — the number a reader should take away
+    // is the first one on this line.
+    const verified = suite.passed - suite.vacuous;
+    console.log(
+      `${c.bold}Verified: ${verified}${c.reset} ${c.dim}| vacuous ${suite.vacuous} | skipped ${suite.skipped} | failed ${suite.failed}${
+        suite.complete ? "" : "  ← PARTIAL RUN (complete: false)"
+      }${c.reset}`
+    );
     console.log(
       `${c.dim}Arms: ${suite.arms ?? "(none — production shape)"} | cost $${suite.totalCostUsd.toFixed(4)}${
         suite.costFullyPriced ? "" : " (LOWER BOUND — unpriced calls)"
@@ -295,6 +313,11 @@ async function main(): Promise<void> {
     if (suite.vacuous > 0) {
       console.log(
         `${c.yellow}⚠ ${suite.vacuous} case(s) passed VACUOUSLY (all assertions skipped — judge-only case in mock mode; nothing verified). Run with --real to actually score them.${c.reset}`
+      );
+    }
+    if (suite.skipped > 0) {
+      console.log(
+        `${c.dim}ℹ ${suite.skipped} case(s) SKIPPED — real-agent-only (no recorded mock_response), so mock mode cannot score them. Run with --real to include them.${c.reset}`
       );
     }
     if (suite.noAnswer > 0) {
@@ -322,6 +345,16 @@ async function main(): Promise<void> {
   // Exit code: 2 if load errors, 1 if any failures, 0 if all green.
   if (errors.length > 0) process.exit(2);
   if (suite.failed > 0 || suite.errored > 0) process.exit(1);
+  // Zero cases actually verified is NOT a pass. Without this, a filter typo
+  // (`--case 9x`) or a future change that skips everything would exit 0 while
+  // asserting nothing — the precise failure the `vacuous` flag exists to make
+  // visible, promoted to the exit code so a script cannot miss it.
+  if (suite.passed - suite.vacuous === 0 && suite.totalCases > 0) {
+    console.error(
+      `${c.red}${c.bold}✗ 0 case(s) verified — every run was vacuous or skipped. Nothing was checked.${c.reset}`
+    );
+    process.exit(1);
+  }
   process.exit(0);
 }
 

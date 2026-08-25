@@ -3,7 +3,7 @@ import {
   pickFallbackModel,
   describeFallback,
 } from "@/lib/providers/model-fallback";
-import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
+import { publishChatErrorEvent, publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { saveSettings } from "@/lib/storage/settings-store";
 import { getCurrentTraceId, log } from "@/lib/observability/logger";
 import type { AppSettings } from "@/lib/types";
@@ -73,6 +73,7 @@ export async function attemptModelFallback(
         failedModel: chatModel.model,
         failureKind,
       });
+      await persistNoCandidateNotice(chatId, projectId, chatModel.provider, chatModel.model);
       return;
     }
 
@@ -124,6 +125,70 @@ export async function attemptModelFallback(
     log.warn("agent_fallback_failed", {
       chatId,
       err: fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr)),
+    });
+  }
+}
+
+/**
+ * Leave the user something to read when a turn dies with nowhere to fall back to.
+ *
+ * `agent_fallback_no_candidate` used to be a log line and nothing else. Measured
+ * on 2026-08-25 with Free Mode on and every free endpoint's circuit already
+ * OPEN: a 15-turn run produced **15 user messages and zero assistant messages**
+ * — the chat simply stayed silent, turn after turn. The system was behaving
+ * correctly at every step (it detected the upstream 4xx, tried to fail over,
+ * found no healthy substitute, and refused to invent an answer) and the only
+ * thing missing was telling the person that.
+ *
+ * Silence is the worst possible rendering of that state: it is indistinguishable
+ * from a hang, and it is exactly what a first-time visitor on the free tier
+ * meets when the shared endpoints are exhausted.
+ *
+ * Written only when the turn delivered NOTHING — if the last message is already
+ * an assistant message, some other path (the daemon's own error write, a partial
+ * answer, a degradation notice) has spoken and this must not talk over it.
+ */
+async function persistNoCandidateNotice(
+  chatId: string,
+  projectId: string | null | undefined,
+  provider: string,
+  failedModel: string
+): Promise<void> {
+  try {
+    const { getChat, updateChat } = await import("@/lib/storage/chat-store");
+    const chat = await getChat(chatId);
+    const last = chat?.messages?.[chat.messages.length - 1];
+    if (!chat || !last || last.role !== "user") return;
+
+    await updateChat(chatId, (c) => {
+      c.messages.push({
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content:
+          `**No answer this turn — the model endpoint failed and there was nothing to fall back to.**\n\n` +
+          `\`${provider}/${failedModel}\` returned an error, and every alternative endpoint is ` +
+          `currently circuit-broken (usually: the free tier is exhausted or rate-limited).\n\n` +
+          `Nothing was lost — your message is saved. What helps:\n` +
+          `- wait a few minutes for the endpoints to recover, or\n` +
+          `- turn Free Mode off and use a model you hold a key for, or\n` +
+          `- point the chat model at a different provider in Settings.\n\n` +
+          `_Orchestra does not fabricate an answer when it has no model to produce one._`,
+        createdAt: new Date().toISOString(),
+      });
+      return c;
+    });
+
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId,
+      projectId: projectId ?? null,
+      reason: "[Agent] No fallback candidate — turn produced no answer.",
+    });
+  } catch (err) {
+    // Never let the notice itself break the error path it is reporting on.
+    log.warn("agent_fallback_notice_failed", {
+      chatId,
+      reason: err instanceof Error ? err.message : String(err),
     });
   }
 }

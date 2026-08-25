@@ -35,6 +35,10 @@ vi.mock("@/lib/storage/chat-store", () => ({
   createChat: vi.fn(),
   getChat: vi.fn(),
   saveChat: vi.fn(),
+  // Route-layer path guard. Default-true here: these cases are about the chat
+  // pipeline, not id validation — that has its own coverage in
+  // `chat-store.test.ts` and `chat-id-guard-contract.test.ts`.
+  isValidChatId: vi.fn(() => true),
 }));
 vi.mock("@/lib/cron/runtime", () => ({
   ensureCronSchedulerStarted: vi.fn().mockResolvedValue(undefined),

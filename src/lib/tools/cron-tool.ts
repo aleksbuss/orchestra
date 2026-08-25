@@ -2,7 +2,6 @@ import { tool } from "ai";
 import { z } from "zod";
 import type { AgentContext } from "@/lib/agent/types";
 import { GLOBAL_CRON_PROJECT_ID } from "@/lib/cron/paths";
-import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
 import {
   addCronJob,
   getCronProjectStatus,
@@ -71,7 +70,27 @@ export function createCronTool(context: AgentContext) {
     inputSchema: cronInputSchema,
     execute: async (input) => {
       try {
-        await ensureCronSchedulerStarted();
+        // `ensureCronSchedulerStarted()` used to be called here. It is dropped,
+        // not deferred, and that distinction is the whole fix:
+        //
+        //   1. It is redundant. `instrumentation-node.ts` awaits it on every
+        //      cold boot (PM #35), which is exactly why that hook exists — the
+        //      scheduler no longer depends on request traffic to start. Every
+        //      production server checked during the 2026-08-25 audit reported
+        //      `cron_scheduler: ok` in /api/health before any request.
+        //   2. Importing it dragged `cron/runtime`'s whole subgraph in and
+        //      closed the ring behind PM #111:
+        //        cron/runtime -> daemon -> agent -> agent-tools -> tool
+        //                     -> cron-tool -> cron/runtime
+        //
+        // Making the import dynamic ALSO closed the cycle and built clean — and
+        // broke every background turn in production, because Turbopack then put
+        // `cron/runtime`'s subgraph in an async chunk that the fire-and-forget
+        // daemon raced: `[Background Daemon Error]: (0 , t.runAgent) is not a
+        // function`. Bisected across seven production builds. Deleting a
+        // redundant call removes the edge with no async boundary at all, which
+        // is the only shape that fixes the cron routes AND leaves the daemon
+        // intact.
         const projectId = resolveProjectId(context, input.projectId);
         const raw = input as Record<string, unknown>;
 

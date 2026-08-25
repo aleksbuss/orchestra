@@ -99,19 +99,27 @@ export default defineConfig({
         'src/middleware.ts': { lines: 80, functions: 100, branches: 75, statements: 80 },
 
         // Global floor — tracks MEASURED coverage, not an aspiration.
-        // Measured 2026-06 (QA audit F-14): statements 45.7%, branches 83.4%,
-        // functions 71.1%, lines 45.7%. The previous "≈9.8%" comment + lines:9
-        // floor were stale by ~36 points — coverage grew steadily but the floor
-        // never moved, so it had stopped protecting anything (a regression could
-        // delete a third of the suite's coverage and still pass). Floors now sit
-        // ~3 points under actual: a real regression fails CI, while small
-        // run-to-run jitter (corpus-gated skipIf tests in observability/replay)
-        // does not. RAISE these in any PR that adds tests; a PR that DELETES
-        // tested code without replacing must not be free to lower them.
-        lines: 43,
-        functions: 68,
+        //
+        // Re-measured 2026-08-25 from CI, not from a laptop. Three consecutive
+        // green `test:coverage` runs on `ci.yml` (32760345289, 32759718102,
+        // 32636809154) reported statements 63.66–63.67, branches 83.12–83.14,
+        // functions 83.55–83.56, lines 63.66–63.67 — run-to-run jitter of
+        // ±0.02 points, and a local run agreed to within 0.05. The feared
+        // corpus-gated `skipIf` variance is NOT points-scale here, so a ~3-point
+        // margin is safe rather than optimistic.
+        //
+        // These had drifted 20 points below actual — the exact failure the
+        // previous version of this comment described ("stale by ~36 points …
+        // had stopped protecting anything") and instructed future PRs to
+        // prevent. It recurred anyway: the suite went 3813 → 4027 tests and the
+        // floors never moved, because "RAISE these in any PR" is a convention
+        // and nothing enforces it. Treat that as the standing risk, not as
+        // solved — and when you next raise these, take the number from CI runs
+        // like the ones cited above, not from your machine.
+        lines: 60,
+        functions: 80,
         branches: 80,
-        statements: 43,
+        statements: 60,
       },
     },
   }

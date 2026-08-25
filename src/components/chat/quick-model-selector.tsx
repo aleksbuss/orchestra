@@ -92,7 +92,6 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
   const [loadingModels, setLoadingModels] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
-  const activePreset = useAppStore((s) => s.activePreset);
   const setActivePreset = useAppStore((s) => s.setActivePreset);
 
   // Load current settings on mount
@@ -254,12 +253,17 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
         <span
           className={`size-2 rounded-full bg-gradient-to-r ${getProviderColor(currentProvider)} shrink-0`}
         />
+        {/*
+          Was `activePreset !== "custom" ? \`Preset: ${activePreset}\` : …`.
+          `PresetTier` collapsed to the single literal "custom" when the built-in
+          bundles were removed, so that branch was statically dead and the
+          `Preset: …` label could never render. Flagged as F-23 in the 2026-06 QA
+          audit and left in place; removed now.
+        */}
         <span className="max-w-[120px] truncate">
-          {activePreset !== "custom" 
-            ? `Preset: ${activePreset}`
-            : currentModel
-              ? getModelShortName(currentModel)
-              : getProviderLabel(currentProvider)}
+          {currentModel
+            ? getModelShortName(currentModel)
+            : getProviderLabel(currentProvider)}
         </span>
         <ChevronDown
           className={`size-3 transition-transform duration-200 ${isOpen ? "rotate-180" : ""}`}

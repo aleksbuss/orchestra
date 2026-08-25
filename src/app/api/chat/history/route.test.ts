@@ -14,6 +14,7 @@ vi.mock("@/lib/storage/chat-store", () => ({
   getAllChats: vi.fn(),
   getChat: vi.fn(),
   deleteChat: vi.fn(),
+  isValidChatId: vi.fn(),
 }));
 
 import { GET, DELETE } from "./route";
@@ -21,14 +22,18 @@ import {
   deleteChat,
   getAllChats,
   getChat,
+  isValidChatId,
 } from "@/lib/storage/chat-store";
 
 const mockedAll = vi.mocked(getAllChats);
 const mockedGet = vi.mocked(getChat);
 const mockedDelete = vi.mocked(deleteChat);
+const mockedValidId = vi.mocked(isValidChatId);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: ids are well formed. The traversal cases below flip it.
+  mockedValidId.mockReturnValue(true);
 });
 
 function buildGet(query: string): NextRequest {
@@ -110,5 +115,40 @@ describe("DELETE /api/chat/history", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).success).toBe(true);
     expect(mockedDelete).toHaveBeenCalledWith("c-1");
+  });
+});
+
+describe("a traversal chat id is a 400, not a 500 (non-negotiable #2)", () => {
+  // `getChat` / `deleteChat` resolve `<id>.json` inside `data/chats/` and the
+  // store guard THROWS on traversal. Before the route-layer check, that throw
+  // escaped and Next answered 500 with an empty body — on the DELETE path too.
+  const TRAVERSAL = "..%2f..%2f..%2fetc%2fpasswd";
+
+  // `buildDelete` above is scoped to its own describe block.
+  function del(query: string): NextRequest {
+    return new NextRequest(`http://localhost:3000/api/chat/history${query}`, {
+      method: "DELETE",
+    });
+  }
+
+  it("GET rejects it with 400 and never reaches the store", async () => {
+    mockedValidId.mockReturnValue(false);
+    const res = await GET(buildGet(`?id=${TRAVERSAL}`));
+    expect(res.status).toBe(400);
+    expect(mockedGet).not.toHaveBeenCalled();
+  });
+
+  it("DELETE rejects it with 400 and never reaches the store", async () => {
+    mockedValidId.mockReturnValue(false);
+    const res = await DELETE(del(`?id=${TRAVERSAL}`));
+    expect(res.status).toBe(400);
+    expect(mockedDelete).not.toHaveBeenCalled();
+  });
+
+  it("a well-formed id still reaches the store (the guard is not a blanket block)", async () => {
+    mockedGet.mockResolvedValue({ id: "c-1", messages: [] } as any);
+    const res = await GET(buildGet("?id=c-1"));
+    expect(res.status).toBe(200);
+    expect(mockedGet).toHaveBeenCalledWith("c-1");
   });
 });

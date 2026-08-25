@@ -137,3 +137,26 @@ describe("PM #31 — /api/debug/chat/<id>", () => {
     expect(body.diskState.lastMessage.contentPreview.length).toBe(240);
   });
 });
+
+describe("a traversal id is a 400, not an unhandled 500", () => {
+  // `getChat` resolves `<id>.json` under `data/chats/` and the store guard
+  // throws on traversal. Without the route-layer check that throw escaped and
+  // Next answered 500 with an empty body — observed live against a running
+  // server during the 2026-08-25 audit. Nothing outside the root was ever read;
+  // what was wrong is that a rejected input reported as a server fault.
+  it("returns 400 for an id that escapes the chats directory", async () => {
+    const res = await routeModule.GET(makeReq(), {
+      params: Promise.resolve({ id: "../../../etc/passwd" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/invalid chat id/i);
+  });
+
+  it("still answers 200 for a well-formed id (the guard is not a blanket block)", async () => {
+    const res = await routeModule.GET(makeReq(), {
+      params: Promise.resolve({ id: "perfectly-normal-id" }),
+    });
+    expect(res.status).toBe(200);
+    expect((await res.json()).diskState.exists).toBe(false);
+  });
+});

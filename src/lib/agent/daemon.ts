@@ -343,7 +343,15 @@ async function runBackgroundJob(options: AgentJobPayload, signal: AbortSignal) {
       return;
     }
 
+    // This write exists so a failed background job never leaves the user with
+    // nothing. When something already answered — in practice the "no fallback
+    // candidate" notice from `agent-fallback.ts`, which names the endpoint that
+    // died and what to do about it — that purpose is already served, and adding
+    // a generic "[Background Daemon Error]: No output generated" underneath it
+    // is noise on top of the one message worth reading.
     await updateChat(options.chatId, (chat) => {
+      const last = chat.messages[chat.messages.length - 1];
+      if (last?.role === "assistant") return chat;
       const errorMsg: ChatMessage = {
         id: crypto.randomUUID(),
         role: "assistant",

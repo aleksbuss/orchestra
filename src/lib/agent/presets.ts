@@ -22,9 +22,8 @@ export interface ModelPreset {
 
 export const PRESETS: Record<string, ModelPreset> = {};
 
-export function getPreset(_tier: string): ModelPreset | null {
-  return null;
-}
+// `getPreset()` used to live here. It returned `null` unconditionally and was
+// referenced by nothing — one occurrence in the whole tree, its own declaration.
 
 export function getBrainConfig(_tier: string, fallback: ModelConfig): ModelConfig {
   return fallback;

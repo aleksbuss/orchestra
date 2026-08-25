@@ -11,6 +11,7 @@ import {
 } from "./daemon.testing";
 import { runAgent } from "./agent";
 import { getActiveGoal } from "@/lib/storage/goal-store";
+import { updateChat } from "@/lib/storage/chat-store";
 // `dequeueJob` and `updateChat` are mocked via the `vi.mock(...)` factories
 // below but not referenced by name in any test — pulling them as imports
 // would just tickle TS6133. The mock factories are still required: they
@@ -400,4 +401,55 @@ describe("PM #7 — production setTimeout path (integration; Defect #6 from 2026
     abortJob(chatId);
   });
 
+});
+
+describe("daemon error write — do not pile on top of a real explanation", () => {
+  /**
+   * Both writes exist to stop a failed background job leaving the user with
+   * nothing. When `agent-fallback.ts` has already written its "no fallback
+   * candidate" notice — which names the endpoint that died and what to do about
+   * it — a generic "[Background Daemon Error]: No output generated" underneath
+   * it is noise on top of the one message worth reading. Observed on a real
+   * production build: one turn, two assistant messages.
+   *
+   * Drives the REAL `dispatchAgentJob` and applies whatever updater the daemon
+   * passes to `updateChat` to a real message array — an earlier version of this
+   * test asserted a locally-written copy of the logic and would have passed with
+   * the fix deleted.
+   */
+  beforeEach(() => vi.clearAllMocks());
+
+  async function runFailingJobAgainst(messages: Array<{ id: string; role: string; content: string }>) {
+    vi.mocked(runAgent).mockRejectedValue(new Error("No output generated. Check the stream for errors."));
+    vi.mocked(getActiveGoal).mockResolvedValue(null as never);
+    const chat = { messages };
+    vi.mocked(updateChat).mockImplementation((async (_id: string, fn: (c: unknown) => unknown) => {
+      fn(chat);
+    }) as never);
+
+    await dispatchAgentJob({
+      chatId: "c-dedupe",
+      userMessage: "go",
+      projectId: null,
+      swarmEnabled: false,
+    } as never);
+    await new Promise((r) => setTimeout(r, 30));
+    return chat;
+  }
+
+  it("skips the generic error when an assistant message already ends the chat", async () => {
+    const chat = await runFailingJobAgainst([
+      { id: "u1", role: "user", content: "go" },
+      { id: "a1", role: "assistant", content: "**No answer this turn — …**" },
+    ]);
+    expect(chat.messages).toHaveLength(2);
+    expect(chat.messages.some((m) => m.content.includes("Background Daemon Error"))).toBe(false);
+  });
+
+  it("still writes when the turn left the user with nothing", async () => {
+    const chat = await runFailingJobAgainst([{ id: "u1", role: "user", content: "go" }]);
+    expect(chat.messages).toHaveLength(2);
+    expect(chat.messages[1].role).toBe("assistant");
+    expect(chat.messages[1].content).toContain("Background Daemon Error");
+  });
 });

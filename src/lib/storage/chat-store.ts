@@ -127,6 +127,31 @@ function chatFilePath(chatId: string): string {
   return assertPathInside(CHATS_DIR, `${chatId}.json`);
 }
 
+/**
+ * Route-layer form of the guard above: "would this id be safe as a filename?"
+ *
+ * The comment on `chatFilePath` tells callers to "treat this as a hard error and
+ * 400 the request" — and three route handlers did not, because the throw only
+ * surfaces from deep inside `getChat` / `deleteChat` where there is nothing to
+ * turn it into a status code. Each one returned **500 with an empty body** for a
+ * url-encoded traversal id (`..%2f..%2f..%2fetc%2fpasswd`). No traversal ever
+ * happened — the guard is what threw — but non-negotiable #2 requires the check
+ * at the route layer AS WELL AS pushed down, precisely so a rejection is a 400.
+ *
+ * Exported rather than re-implemented per route so the chats directory stays
+ * known in exactly one place, and so a route can never drift to a weaker check
+ * than the one the storage layer actually enforces.
+ */
+export function isValidChatId(chatId: string): boolean {
+  if (typeof chatId !== "string" || chatId.length === 0) return false;
+  try {
+    chatFilePath(chatId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function flushNow(chatId: string): Promise<void> {
   const entry = pendingFlushes.get(chatId);
   if (!entry) return;

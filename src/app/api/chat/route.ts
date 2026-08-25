@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { isDegradationPolicy } from "@/lib/agent/degradation-policy";
 import { runAgent } from "@/lib/agent/agent";
 import { isValidSkepticOverride, type SkepticModelOverride } from "@/lib/agent/moa";
-import { createChat, getChat, saveChat } from "@/lib/storage/chat-store";
+import { createChat, getChat, isValidChatId, saveChat } from "@/lib/storage/chat-store";
 import { ensureCronSchedulerStarted } from "@/lib/cron/runtime";
 import { dispatchAgentJob } from "@/lib/agent/daemon";
 import { log, withLogContext } from "@/lib/observability/logger";
@@ -85,6 +85,15 @@ export async function POST(req: NextRequest) {
           { error: "Message is required" },
           { status: 400 }
         );
+      }
+
+      // `chatId` arrives in the request BODY and becomes `<chatId>.json` under
+      // `data/chats/`. The store guards it, but by throwing — and below it
+      // reaches `createChat`, a WRITE, as well as `getChat`. Validate at the
+      // route layer so a bad id is a 400 instead of an unhandled 500
+      // (non-negotiable #2 — route layer AND pushed down).
+      if (chatId !== undefined && chatId !== null && !isValidChatId(String(chatId))) {
+        return Response.json({ error: "invalid chat id" }, { status: 400 });
       }
 
       // Create chat if needed

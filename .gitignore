@@ -62,7 +62,12 @@ __pycache__/
 # build dir — two `next dev` processes cannot share `.next/`.
 .e2e-clean-data/
 .e2e-clean-data-backups/
-/.next-clean-boot/
+# ANY custom Next build dir, not just the clean-boot one. `ORCHESTRA_NEXT_DIST_DIR`
+# is how you run a second server without racing `.next/`, and each new value left
+# an untracked build directory behind. Be aware it also makes Next write
+# `"<dir>/types/**/*.ts"` into the TRACKED `tsconfig.json` include array — that
+# part cannot be gitignored, so `git checkout -- tsconfig.json` after using one.
+/.next-*/
 .e2e-clean-boot-manifest.json
 scratch.ts
 /scratch/

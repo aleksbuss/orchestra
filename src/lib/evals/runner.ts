@@ -439,14 +439,33 @@ export async function runSuite(
     return true;
   });
 
+  // A case with no `mock_response` cannot be SCORED without `--real`: runCase
+  // would hand its assertions the empty string, which is the harness's own
+  // placeholder rather than a model output. Counting that as a FAILURE reports
+  // noise as signal, and it is what made the documented `npm run evals`
+  // permanently red — 64 of the 145 committed cases are real-agent-only
+  // (`hard-*`, `audit-*`, `selection-*`, `multi-constraint-*`, `agentic-*`).
+  //
+  // Filtered HERE and not inside runCase on purpose: the per-case contract
+  // ("no mock + no --real → empty response, case failed") is pinned by
+  // `runner.test.ts`, and it stays correct for any case that is actually run.
+  // What was wrong was running them at all in a mode that cannot score them.
+  //
+  // `typeof === "string"` rather than `!== undefined` so a malformed
+  // `"mock_response": null` is treated as absent instead of scored as `null`.
+  const applicable = options.useRealAgent
+    ? filtered
+    : filtered.filter((c) => typeof c.mock_response === "string");
+  const skipped = filtered.length - applicable.length;
+
   const results: CaseResult[] = [];
-  const total = filtered.length * repeats;
+  const total = applicable.length * repeats;
   // Repeat-major order (all cases once, then again): an interleaved schedule
   // spreads each case's repeats across the run, so a mid-run change in upstream
   // conditions (rate limiting, a throttled endpoint warming up) hits every case
   // rather than concentrating in whichever case happened to run then.
   for (let r = 1; r <= repeats; r++) {
-    for (const c of filtered) {
+    for (const c of applicable) {
       const result = await runCase(c, {
         useRealAgent: options.useRealAgent,
         ...(repeats > 1 ? { repeatIndex: r } : {}),
@@ -467,6 +486,11 @@ export async function runSuite(
     failed: results.filter((r) => !r.passed && !r.error).length,
     errored: results.filter((r) => !!r.error).length,
     vacuous: results.filter((r) => r.vacuous).length,
+    skipped: skipped * repeats,
+    // "Was every case in scope actually scored?" A skipped case was never run;
+    // a vacuous one ran but scored nothing. Either way the suite is a PARTIAL
+    // view, and a consumer reading only the exit code must be able to tell.
+    complete: skipped === 0 && results.every((r) => !r.vacuous),
     noAnswer: results.filter((r) => r.noAnswer).length,
     meanScore: mean(results.map((r) => r.score)),
     repeats,

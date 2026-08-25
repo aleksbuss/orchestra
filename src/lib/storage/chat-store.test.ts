@@ -212,4 +212,74 @@ describe("Chat Store", () => {
       await deleteChat(safeId);
     });
   });
+
+  describe("isValidChatId — the route-layer half of the path guard", () => {
+    // The storage guard (`chatFilePath` → `assertPathInside`) THROWS on
+    // traversal, and its own comment tells callers to "treat this as a hard
+    // error and 400 the request". Four route handlers could not, because the
+    // throw only surfaced from deep inside getChat/deleteChat/createChat — each
+    // answered 500 with an empty body instead. This predicate is what lets a
+    // route answer 400, and it must agree with the guard exactly, never be a
+    // weaker hand-rolled check.
+    it("accepts the ids production actually generates", async () => {
+      const { isValidChatId } = await import("@/lib/storage/chat-store");
+      expect(isValidChatId(crypto.randomUUID())).toBe(true);
+      expect(isValidChatId("realrun-qa-sweep-0e3530db")).toBe(true);
+      expect(isValidChatId("c-1")).toBe(true);
+    });
+
+    it("rejects traversal in every form the routes can receive", async () => {
+      const { isValidChatId } = await import("@/lib/storage/chat-store");
+      // Next decodes %2f before the handler sees it, so the guard must reject
+      // the DECODED form — that is what actually reached the store.
+      expect(isValidChatId("../../../etc/passwd")).toBe(false);
+      expect(isValidChatId("a/../../b")).toBe(false);
+      expect(isValidChatId("/etc/passwd")).toBe(false);
+    });
+
+    it("a BARE `..` is accepted, and that is correct — pinned so nobody 'fixes' it", async () => {
+      const { isValidChatId } = await import("@/lib/storage/chat-store");
+      // The guard runs on the FINAL fragment, `${chatId}.json`. For `..` that
+      // is the literal filename `...json`, which lives inside CHATS_DIR — no
+      // traversal, so `false` here would be wrong. Checking the raw id instead
+      // of the suffixed fragment is the tempting mistake this pins against:
+      // it would reject a harmless id while still missing `../x` in any case
+      // where the suffix changes the resolution.
+      expect(isValidChatId("..")).toBe(true);
+    });
+
+    it("rejects the sibling-prefix trick, not just `..`", async () => {
+      const { isValidChatId } = await import("@/lib/storage/chat-store");
+      // PM #6 / PM #16: a naive `resolve + startsWith` without the trailing
+      // path separator lets `<dir>-evil` pass as if it were inside `<dir>`.
+      expect(isValidChatId("../chats-evil/x")).toBe(false);
+    });
+
+    it("rejects empty and non-string input rather than throwing", async () => {
+      const { isValidChatId } = await import("@/lib/storage/chat-store");
+      expect(isValidChatId("")).toBe(false);
+      expect(isValidChatId(undefined as unknown as string)).toBe(false);
+      expect(isValidChatId(null as unknown as string)).toBe(false);
+    });
+
+    it("agrees with the store: an id it accepts is one getChat can handle", async () => {
+      // Ties the predicate to the real thing rather than to a second opinion
+      // about what "valid" means — the drift this whole class of bug lives in.
+      const { isValidChatId, createChat, getChat } = await import(
+        "@/lib/storage/chat-store"
+      );
+      const id = `guard-agrees-${Date.now()}`;
+      expect(isValidChatId(id)).toBe(true);
+      await createChat(id, "Guard", undefined);
+      expect((await getChat(id))?.id).toBe(id);
+    });
+
+    it("agrees with the store: an id it rejects is one getChat THROWS on", async () => {
+      const { isValidChatId, getChat } = await import("@/lib/storage/chat-store");
+      const bad = "../../../etc/passwd";
+      expect(isValidChatId(bad)).toBe(false);
+      await expect(getChat(bad)).rejects.toThrow();
+    });
+  });
+
 });

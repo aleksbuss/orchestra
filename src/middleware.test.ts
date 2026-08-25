@@ -271,3 +271,67 @@ describe("middleware — ORCHESTRA_DISABLE_AUTH escape hatch", () => {
     }
   });
 });
+
+describe("middleware — a dot in the path must NOT skip auth (2026-08-25 disclosure)", () => {
+  /**
+   * `shouldBypass` used to run its "looks like a static file" regex FIRST and
+   * over the whole path, so any request whose last segment contained a dot
+   * skipped every auth check. Reproduced end-to-end against a running server:
+   *
+   *   GET /api/debug/chat/foo         → 401  (correct)
+   *   GET /api/debug/chat/foo.json    → 200  (auth skipped)
+   *
+   * And it was reachable with real data, because `POST /api/chat` takes a
+   * caller-supplied `chatId`: a chat created as `notes.private` was then
+   * readable ANONYMOUSLY through `/api/debug/chat/notes.private`, returning its
+   * title, message count and `lastMessage.contentPreview` — the message text.
+   *
+   * Url-encoded traversal hit the same clause, because `%2f` is not a literal
+   * `/` so the "extension" ran to the end of the path.
+   */
+  it("every /api/ route with a dotted final segment still 401s anonymously", async () => {
+    for (const path of [
+      "/api/debug/chat/foo.json",
+      "/api/debug/chat/notes.private",
+      "/api/debug/chat/x.y",
+      "/api/projects/foo.json",
+      "/api/settings.json",
+    ]) {
+      const res = await middleware(makeRequest(path));
+      expect(res.status, `dotted API path must not bypass: ${path}`).toBe(401);
+    }
+  });
+
+  it("url-encoded traversal does not bypass either", async () => {
+    for (const path of [
+      "/api/debug/chat/x%2f..%2fy",
+      "/api/debug/chat/..%2f..%2f..%2fetc%2fpasswd",
+    ]) {
+      const res = await middleware(makeRequest(path));
+      expect(res.status, `encoded traversal must not bypass: ${path}`).toBe(401);
+    }
+  });
+
+  it("dashboard pages with a dotted segment redirect to login instead of rendering", async () => {
+    const res = await middleware(makeRequest("/dashboard/projects/foo.json"));
+    expect(res.status).toBe(307);
+    expect(res.headers.get("location")).toContain("/login");
+  });
+
+  it("the fix does not break real static assets — the reason the clause exists", async () => {
+    // Root-level `public/` files still bypass; only application routes are
+    // excluded. If this ever fails, the fix was over-applied.
+    for (const path of ["/logo.png", "/manifest.json", "/some-file.css"]) {
+      const res = await middleware(makeRequest(path));
+      expect(res.status, `static asset must still bypass: ${path}`).toBe(200);
+    }
+  });
+
+  it("an authenticated session still reaches a dotted API path", async () => {
+    // The gate must reject the ANONYMOUS caller, not the path shape.
+    const res = await middleware(
+      makeRequest("/api/debug/chat/foo.json", { cookie: await tokenFor() })
+    );
+    expect(res.status).toBe(200);
+  });
+});

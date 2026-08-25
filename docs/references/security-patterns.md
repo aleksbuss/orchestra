@@ -110,6 +110,39 @@ When `settings.privacyMode.enabled` is true, NO user data may leave the box to a
 
 Most internal routes assume a single trusted operator on `localhost`. If you add a route that mutates state or talks to external services, explicitly ask: "what happens if a malicious page in the browser POSTs to this with credentials: 'include'?" If the answer is "data loss" or "billing leak," add an auth check (see [`src/app/api/auth/login/route.ts`](../../src/app/api/auth/login/route.ts) for the session-cookie pattern) or a CSRF token.
 
+#### The bypass list is the dangerous part of the middleware (PM #110)
+
+`middleware.ts` gates everything through one function, so a hole in its
+*exemption* list is a hole in the whole gate. On 2026-08-25 that hole was real:
+`shouldBypass()` tested `/\.[^/]+$/` against the raw pathname **first**, to let
+`public/` assets through — and that meant any path whose final segment contained
+a dot skipped every check below it.
+
+```
+GET /api/debug/chat/foo        → 401   correct
+GET /api/debug/chat/foo.json   → 200   auth skipped entirely
+```
+
+Reachable with real data, because `POST /api/chat` takes a caller-supplied
+`chatId`: a chat created as `notes.private` was then readable **anonymously**
+through `/api/debug/chat/notes.private`, returning its title, message count and
+`lastMessage.contentPreview`. Url-encoded traversal (`..%2f..%2fx`) matched the
+same clause, since `%2f` is not a literal `/` so the "extension" ran to the end.
+
+Two rules follow, and they generalise past this one function:
+
+- **Order matters more than the pattern.** Application-route exclusions
+  (`/api/`, `/dashboard`) must be evaluated BEFORE any heuristic. A heuristic
+  over a URL is a test on a string the attacker chooses.
+- **The string you match is not the path the router resolves.** Percent-encoding,
+  `..` segments and normalization all mean the middleware's view and the
+  handler's view can differ. Where they differ, the handler wins and the gate
+  loses.
+
+Guarded by five cases in [`src/middleware.test.ts`](../../src/middleware.test.ts),
+including one asserting real static assets *still* bypass — so a future
+tightening cannot quietly break asset serving instead.
+
 ### Auth escape hatches (local dev / recovery)
 
 Two operator-facing mechanisms exist so a forgotten password or auth-broken UI does not require manual JSON-surgery on `data/settings/settings.json`. Both are deliberate and tested.

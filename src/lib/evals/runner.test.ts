@@ -247,6 +247,53 @@ describe("PM #41 — runCase without mock_response + useRealAgent=false", () => 
   });
 });
 
+describe("runSuite — an un-scorable case is SKIPPED, not failed", () => {
+  const mocked = {
+    id: "has-mock",
+    description: "scorable in mock mode",
+    input: { message: "m" },
+    mock_response: "Canberra",
+    assertions: [{ type: "contains" as const, value: "Canberra" }],
+  };
+  const unmocked = {
+    id: "no-mock",
+    description: "real-agent only",
+    input: { message: "m" },
+    assertions: [{ type: "contains" as const, value: "anything" }],
+  };
+
+  it("mock mode: the un-mocked case is skipped, not counted as a failure", async () => {
+    const suite = await runSuite([mocked, unmocked]);
+    expect(suite.skipped).toBe(1);
+    expect(suite.failed).toBe(0);
+    expect(suite.totalCases).toBe(1);
+    expect(suite.passed).toBe(1);
+    expect(suite.cases.map((r) => r.id)).toEqual(["has-mock"]);
+  });
+
+  it("a skipped case does not drag meanScore down", async () => {
+    const suite = await runSuite([mocked, unmocked]);
+    expect(suite.meanScore).toBe(1);
+  });
+
+  it("`complete` is false while anything is skipped, true when nothing is", async () => {
+    expect((await runSuite([mocked, unmocked])).complete).toBe(false);
+    expect((await runSuite([mocked])).complete).toBe(true);
+  });
+
+  it("a mock_response of \"\" is a RECORDED empty answer — scored, not skipped", async () => {
+    const suite = await runSuite([{ ...unmocked, id: "empty-mock", mock_response: "" }]);
+    expect(suite.skipped).toBe(0);
+    expect(suite.failed).toBe(1);
+  });
+
+  it("skipped counts scale with --repeat so the number matches the runs not made", async () => {
+    const suite = await runSuite([mocked, unmocked], { repeat: 3 });
+    expect(suite.skipped).toBe(3);
+    expect(suite.totalCases).toBe(3);
+  });
+});
+
 describe("PM #41 — runCase precedence: --real overrides mock_response", () => {
   it("useRealAgent=true scores the real agent, not the recorded mock", async () => {
     const r = await runCase(

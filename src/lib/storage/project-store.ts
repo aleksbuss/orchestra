@@ -2,7 +2,6 @@ import fs from "fs/promises";
 import path from "path";
 import { Project, ProjectSchema } from "@/lib/types";
 import { deleteChatsByProjectId } from "@/lib/storage/chat-store";
-import { clearMemoryCache } from "@/lib/memory/memory";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { assertPathInsideRealpath, safeWriteFile, withFileLock } from "./fs-utils";
 import { getDataDir } from "@/lib/storage/data-dir";
@@ -445,6 +444,18 @@ export async function deleteProject(projectId: string): Promise<boolean> {
     // Remove project's vector memory (dir and in-memory cache)
     const memoryDir = path.join(DATA_DIR, "memory", projectId);
     await fs.rm(memoryDir, { recursive: true, force: true });
+    // Lazy: a static import here closes a seven-module runtime cycle —
+    //
+    //   project-store -> memory/memory -> memory/embeddings -> llm-provider
+    //                 -> providers/codex -> storage/project-mcp -> project-store
+    //
+    // which is the PM #111 shape: `next dev` resolves it, the Turbopack
+    // production bundle evaluates a module mid-initialisation and its exports
+    // read as `undefined`. Observed downstream of this ring as
+    // `[Background Daemon Error]: (0 , t.runAgent) is not a function` on a real
+    // production build. This edge is the odd one out — a project store reaching
+    // into the vector layer — and it runs once, on project deletion.
+    const { clearMemoryCache } = await import("@/lib/memory/memory");
     clearMemoryCache(projectId);
     // Remove project directory (files, .meta, etc.)
     await fs.rm(projectDir, { recursive: true, force: true });

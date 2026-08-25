@@ -1,7 +1,6 @@
 import { createChat, getChat } from "@/lib/storage/chat-store";
 import { getAllProjects, getProject } from "@/lib/storage/project-store";
 import { getTelegramIntegrationRuntimeConfig } from "@/lib/storage/telegram-integration-store";
-import { runAgentText } from "@/lib/agent/agent";
 import {
   ChatBudgetExceededError,
   enforceChatBudget,
@@ -757,6 +756,23 @@ async function executeCronJob(job: CronJob): Promise<RunResult> {
 
     let output: string;
     try {
+      // Imported lazily to break a module cycle the PRODUCTION bundle could not
+      // resolve, while `next dev` could:
+      //
+      //   cron/service → agent/agent → tools/tool → tools/cron-tool → cron/service
+      //
+      // Under Turbopack this left `cron/service` partially initialised inside the
+      // `/api/projects/[id]/cron*` route chunks, so `getCronProjectStatus` and
+      // `ensureCronSchedulerStarted` resolved to `undefined` and every cron route
+      // failed — `TypeError: (0 , f.getCronProjectStatus) is not a function`.
+      // Every cron page in the dashboard was broken under `npm run start` while
+      // `npm run dev` was fine, which is also why no test caught it: the e2e
+      // suite runs against a dev server.
+      //
+      // This is the heavy edge of the cycle — importing the agent pulls the whole
+      // tool graph — and it is used exactly once, on a cold path. Deferring it to
+      // call time costs nothing and lets `cron/service` finish initialising.
+      const { runAgentText } = await import("@/lib/agent/agent");
       output = await runAgentText({
         chatId,
         userMessage: job.payload.message,

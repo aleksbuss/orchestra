@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, Suspense, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { Loader2, LockKeyhole } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +15,6 @@ function normalizeNextPath(value: string | null): string {
 }
 
 function LoginPageClient() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -49,14 +48,32 @@ function LoginPageClient() {
         throw new Error(payload?.error || "Login failed");
       }
 
+      // Hard navigation, deliberately — not `router.replace()`.
+      //
+      // The pair `router.replace(x); router.refresh();` DROPS the navigation.
+      // Measured on a cold route: the POST returns 200 with
+      // `{"success":true}`, the cookie is set, and the browser stays on
+      // `/login`. To the person at the keyboard the login simply did nothing,
+      // so they press Sign In again — which succeeds again, and again leaves
+      // them on the form. That is the "I have to click it three times" report.
+      //
+      // A/B, three cold-route runs each, human-speed typing:
+      //   replace() + refresh()      -> /login, /login, /login
+      //   replace() alone            -> /dashboard/projects  x3
+      //   window.location.assign()   -> /dashboard/projects  x3
+      //
+      // `refresh()` was there to drop the Router Cache so the destination is
+      // not rendered from a payload fetched while unauthenticated. A full
+      // document load does that better: it re-runs middleware with the cookie
+      // that was just set and discards the client cache wholesale. For a
+      // once-per-session transition the extra load is the right trade, and it
+      // removes the race instead of re-timing it.
       if (payload?.mustChangeCredentials) {
-        router.replace("/dashboard/projects?onboarding=1&credentials=1");
-        router.refresh();
+        window.location.assign("/dashboard/projects?onboarding=1&credentials=1");
         return;
       }
 
-      router.replace(nextPath);
-      router.refresh();
+      window.location.assign(nextPath);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {

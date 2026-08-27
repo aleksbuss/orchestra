@@ -4,13 +4,14 @@
  * Gemini 2.5 64k, DeepSeek 8k, …), with the operator's explicit `maxTokens` as
  * an override that is never allowed to exceed the model's true max.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import type { ModelConfig } from "@/lib/types";
 import {
   getModelMaxOutput,
   resolveMaxOutputTokens,
   registerOpenRouterMaxOutputLookup,
   DEFAULT_MAX_OUTPUT,
+  OPENROUTER_RELIABLE_MAX_OUTPUT,
 } from "./model-output-limits";
 
 const cfg = (over: Partial<ModelConfig>): ModelConfig =>
@@ -82,5 +83,59 @@ describe("OpenRouter dynamic source (the live query) wins over the registry", ()
     expect(getModelMaxOutput("openrouter", "anthropic/claude-3.5-sonnet")).toBe(8_192);
     // dynamic only applies to the openrouter provider.
     expect(getModelMaxOutput("openai", "gpt-4o")).toBe(16_384);
+  });
+});
+
+/**
+ * PM #112 — the file used to assume "providers cap the request to their true
+ * max, so an over-estimate degrades gracefully". Measured against
+ * `dots-studio/dots-3-note-preview:free`, whose catalogue entry advertises
+ * `max_completion_tokens: 460800`: 300000 → HTTP 200, 400000 → HTTP 400
+ * (`{"msg":"bad request"}` from AtlasCloud), 460800 → HTTP 400 three times out
+ * of three. Free Mode drops the operator's `maxTokens`, so every Free Mode turn
+ * took the unset branch, asked for 460800, and died before the first token.
+ */
+describe("OpenRouter advertised ceilings are NOT trusted (PM #112)", () => {
+  afterEach(() => {
+    // Leave the module-level hook clean for whatever runs next.
+    registerOpenRouterMaxOutputLookup(() => undefined);
+  });
+
+  it("clamps a catalogue value above the reliable ceiling", () => {
+    registerOpenRouterMaxOutputLookup((id) =>
+      id === "dots-studio/dots-3-note-preview:free" ? 460_800 : undefined
+    );
+    expect(
+      getModelMaxOutput("openrouter", "dots-studio/dots-3-note-preview:free")
+    ).toBe(OPENROUTER_RELIABLE_MAX_OUTPUT);
+  });
+
+  it("leaves a catalogue value BELOW the ceiling exactly as advertised", () => {
+    registerOpenRouterMaxOutputLookup(() => 12_345);
+    expect(getModelMaxOutput("openrouter", "some/model")).toBe(12_345);
+  });
+
+  it("clamps the family-registry path too — same unverified bet, different door", () => {
+    registerOpenRouterMaxOutputLookup(() => undefined);
+    // "o1" resolves to 100_000 in FAMILY_LIMITS.
+    expect(getModelMaxOutput("openrouter", "openai/o1-preview")).toBe(
+      OPENROUTER_RELIABLE_MAX_OUTPUT
+    );
+    // Same model id on the DIRECT provider keeps the curated vendor limit.
+    expect(getModelMaxOutput("openai", "o1-preview")).toBe(100_000);
+  });
+
+  it("is the value actually requested when Free Mode leaves maxTokens unset", () => {
+    registerOpenRouterMaxOutputLookup(() => 460_800);
+    // Free Mode's overlay is provider+model ONLY — this is the exact shape.
+    const freeModeConfig = {
+      provider: "openrouter",
+      model: "dots-studio/dots-3-note-preview:free",
+    } as ModelConfig;
+    const requested = resolveMaxOutputTokens(freeModeConfig);
+    expect(requested).toBe(OPENROUTER_RELIABLE_MAX_OUTPUT);
+    // The measured 400 boundary sits between 300000 and 400000; whatever we
+    // send must stay far below it, not merely below the advertised number.
+    expect(requested).toBeLessThan(300_000);
   });
 });

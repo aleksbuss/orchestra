@@ -46,12 +46,20 @@
  *    everyone. When nothing tool-capable exists we still run — and say so, so
  *    the degradation is visible instead of silent.
  *
- * 3. **Proposers should NOT share one endpoint.** A free endpoint under load
+ * 3. **Slots should NOT share one endpoint — the brain/Router pair included.**
+ *    A free endpoint under load
  *    returns HTTP 200 with an empty body, and the trigger is exactly the shape
  *    MoA generates: 3-5 proposers firing at one shared endpoint through one key.
  *    Pacing bounds the burst in time; spreading the tiers across DIFFERENT free
  *    models spreads it across different upstream quotas, which is the cheaper
  *    fix because it removes the contention instead of queueing behind it.
+ *
+ *    PM #112 — this was written about the proposer fan-out only, and the
+ *    brain/Router pair was left sharing one model because both are "the first
+ *    structured-capable id, sorted". Concentration is not only a throughput
+ *    problem: when that one upstream started rejecting requests, it took the
+ *    brain, the Router and the fallback probe together. The Router now prefers a
+ *    different id, and says so when it cannot get one.
  *
  * NOT A PRESET WRITE: `applyFreeMode` returns a NEW settings object. Nothing is
  * persisted, so a user who flips Free off has their paid configuration back
@@ -106,6 +114,19 @@ export interface FreeModeSelection {
   source: "live-catalogue" | "fallback-list";
   /** How many distinct free endpoints the proposer tiers span (1-3). */
   endpointSpread: number;
+  /**
+   * True when the Router had to reuse the brain's model because no OTHER free
+   * id advertising `structured_outputs` existed.
+   *
+   * PM #112 — constraint 3 below ("proposers should NOT share one endpoint") was
+   * written about the proposer fan-out and silently left the brain/Router pair
+   * out. Both are picked "first structured-capable id, sorted", so they landed
+   * on the SAME model by construction, and one upstream having a bad day took
+   * the whole turn — brain, Router and the fallback probe alike. Preferring a
+   * different Router removes the collision when the pool allows it; this flag
+   * reports the case where it does not.
+   */
+  routerSharesBrainEndpoint: boolean;
   /**
    * False when no free model advertising `structured_outputs` could be found.
    * The run still works, but the Router will use static personas and tournament
@@ -266,6 +287,13 @@ export function selectFreeModels(): FreeModeSelection {
 
   const brain = pickBrain(generalPool, structured);
 
+  // Router on a DIFFERENT endpoint from the brain where the pool allows it
+  // (PM #112). `routerPool[0]` and `pickBrain` both resolve to the first
+  // structured-capable id, so taking [0] unconditionally guaranteed a
+  // collision. Falls back to sharing rather than leaving the slot empty — a
+  // Router on the brain's endpoint still works; no Router does not.
+  const router = routerPool.find((id) => id !== brain) ?? routerPool[0];
+
   // Spread the three proposer tiers across DISTINCT endpoints where possible.
   // Rotating the pool to start AFTER the brain keeps the brain's endpoint out
   // of the first proposer slot, so its own quota is not the first one hammered.
@@ -279,7 +307,7 @@ export function selectFreeModels(): FreeModeSelection {
 
   return {
     chatModel: cfg(brain),
-    utilityModel: cfg(routerPool[0]),
+    utilityModel: cfg(router),
     proposerTiers: {
       fast: cfg(tiers[0]),
       balanced: cfg(tiers[1]),
@@ -287,6 +315,7 @@ export function selectFreeModels(): FreeModeSelection {
     },
     source: live ? "live-catalogue" : "fallback-list",
     endpointSpread: new Set(tiers).size,
+    routerSharesBrainEndpoint: router === brain,
     routerSupportsStructuredOutputs: structured.length > 0,
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
@@ -344,9 +373,12 @@ export function applyFreeMode(settings: AppSettings): {
 
 /** One-line operator-facing summary — logged, and shown in the UI notice. */
 export function describeFreeModeSelection(s: FreeModeSelection): string {
+  const shared = s.routerSharesBrainEndpoint
+    ? " (SHARES the brain's endpoint — no other structured-output free model exists right now, so one bad upstream takes both)"
+    : "";
   const router = s.routerSupportsStructuredOutputs
-    ? `router=${s.utilityModel.model}`
-    : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)`;
+    ? `router=${s.utilityModel.model}${shared}`
+    : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)${shared}`;
   const brain = s.brainSupportsTools
     ? `brain=${s.chatModel.model}`
     : `brain=${s.chatModel.model} (NO tool support — Single Agent mode answers from ` +

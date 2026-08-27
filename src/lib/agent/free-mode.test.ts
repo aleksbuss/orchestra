@@ -359,3 +359,50 @@ describe("dropped ids are named, not just counted", () => {
     expect(describeFreeModeSelection(s)).toContain("vendor/aaa-content-safety:free");
   });
 });
+
+/**
+ * PM #112 — constraint 3 ("slots should NOT share one endpoint") was written
+ * about the proposer fan-out and left the brain/Router pair out. Both resolve to
+ * "the first structured-capable id, sorted", so they landed on the SAME model by
+ * construction. When that upstream started rejecting requests, it took the
+ * brain, the Router and the fallback probe with it.
+ */
+describe("Free Mode — the Router must not sit on the brain's endpoint", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+  });
+
+  it("gives the Router a DIFFERENT model when another structured-capable id exists", () => {
+    seedCatalogue([
+      ["aaa/first:free", ["tools", "structured_outputs"]],
+      ["bbb/second:free", ["tools", "structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    // The brain takes the first tool+structured id; the Router must skip it.
+    expect(s.chatModel.model).toBe("aaa/first:free");
+    expect(s.utilityModel.model).toBe("bbb/second:free");
+    expect(s.routerSharesBrainEndpoint).toBe(false);
+  });
+
+  it("shares rather than leaving the Router empty when it is the ONLY structured id", () => {
+    seedCatalogue([
+      ["aaa/only-structured:free", ["tools", "structured_outputs"]],
+      ["bbb/plain:free", ["tools"]],
+    ]);
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("aaa/only-structured:free");
+    expect(s.utilityModel.model).toBe("aaa/only-structured:free");
+    // A Router on the brain's endpoint still works; no Router does not. But the
+    // concentration must be REPORTED, not inferred from two matching strings.
+    expect(s.routerSharesBrainEndpoint).toBe(true);
+    expect(describeFreeModeSelection(s)).toMatch(/SHARES the brain's endpoint/);
+  });
+
+  it("says nothing about sharing when the slots are already split", () => {
+    seedCatalogue([
+      ["aaa/first:free", ["tools", "structured_outputs"]],
+      ["bbb/second:free", ["tools", "structured_outputs"]],
+    ]);
+    expect(describeFreeModeSelection(selectFreeModels())).not.toMatch(/SHARES/);
+  });
+});

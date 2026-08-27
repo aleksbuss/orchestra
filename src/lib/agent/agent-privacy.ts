@@ -168,6 +168,7 @@ export async function resolveGuardedAgentSettings(): Promise<AppSettings> {
       routerStructuredOutputs: selection.routerSupportsStructuredOutputs,
       brainSupportsTools: selection.brainSupportsTools,
       endpointSpread: selection.endpointSpread,
+      routerSharesBrainEndpoint: selection.routerSharesBrainEndpoint,
       candidates: selection.candidateCount,
     });
     console.log(`[FreeMode] ${describeFreeModeSelection(selection)}`);

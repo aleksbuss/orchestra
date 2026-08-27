@@ -38,6 +38,56 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 112. Free Mode asked for 460 800 output tokens, the endpoint 400'd, and the failover that should have caught it had been dead since it was written
+
+**Date:** 2026-08
+**Status:** RESOLVED
+**Severity:** P1
+**Symptoms:** Every Free Mode turn died before the first token and wrote the same notice into the chat:
+
+> **No answer this turn — the model endpoint failed and there was nothing to fall back to.**
+> `openrouter/dots-studio/dots-3-note-preview:free` returned an error, and every alternative endpoint is currently circuit-broken (usually: the free tier is exhausted or rate-limited).
+
+Three consecutive turns over 22 minutes, ~16-24 s each. The operator read "free tier is exhausted", waited, and retried — which is exactly what the message told them to do and could never have worked.
+
+**Detection:** Not from logs — `data/logs/` was empty and the dev server's stdout was gone. From `data/postmortems/`: `errorClassification.kind: "upstream_4xx"`, `rawError.message: "Provider returned error"`, `settings.chatModel: {provider: "openrouter", model: "dots-studio/dots-3-note-preview:free"}` with **no `maxTokens`**. The missing field was the whole diagnosis.
+
+**Root Cause — three independent defects stacked, each one masking the next.**
+
+**(1) The request was invalid, and Orchestra built it.** `free-mode.ts → cfg()` returns `{provider, model}` only, so the overlay drops the operator's `maxTokens: 16384`. `resolveMaxOutputTokens` then takes its unset branch → `getModelMaxOutput` → the live OpenRouter catalogue's `top_provider.max_completion_tokens`, which for this id is **460 800**. That number went on the wire verbatim. Measured against the live endpoint with the real system prompt and 28 tool schemas (46 KB payload):
+
+```
+max_tokens=262144 → HTTP 200
+max_tokens=300000 → HTTP 200
+max_tokens=400000 → HTTP 400  {"code":400,"msg":"bad request"}  provider: AtlasCloud
+max_tokens=460800 → HTTP 400  (3/3; identical for max_completion_tokens)
+```
+
+`model-output-limits.ts` had stated the opposite as fact — *"Providers cap the request to their true max, so an over-estimate degrades gracefully"* — with nothing behind it. The catalogue describes `top_provider`; the request is served by whichever upstream OpenRouter routes to, and that one publishes nothing. Same class as the reliable-context-window clamp (PM #82/#95), except the OUTPUT side had no clamp at all. The oversized value also inflated `buildTokenGovernor`'s reservation, which is carved out of the input budget.
+
+**(2) The failover never ran — one line, dead since it was written.** `pickFromOpenRouterCatalog` opened with `if (!apiKey) return { modelId: null }`. The caller reads `settings.chatModel.apiKey`, which is empty for every vault-only install and *structurally absent* in Free Mode. `/api/v1/models` is a public endpoint; the key was never a precondition. So the entire OpenRouter fallback path had been a no-op on the two configurations that need it most, and nothing noticed because `model-fallback.test.ts` **asserted the bail as correct behaviour** ("returns null when no API key is provided"). PM #99's family, at a callsite `key-resolution-contract.test.ts` does not reach (it scans `createModel(settings.<slot>)`).
+
+**(3) The message invented the cause.** "every alternative endpoint is currently circuit-broken (usually: the free tier is exhausted or rate-limited)" was hardcoded prose in `persistNoCandidateNotice`. No breaker is consulted on that path. It named the one hypothesis that made the operator wait instead of look — and it was wrong on both counts: nothing was exhausted, and no endpoint had been checked.
+
+**Aggravating:** the brain and the Router were the SAME model. `pickBrain` takes the first tool+structured-capable id, `routerPool[0]` takes the first structured-capable id — the same one, by construction. Free Mode's own constraint 3 ("proposers should NOT share one endpoint") had only ever been applied to the proposer fan-out. And the postmortem's `summarizeError` dropped `statusCode` and `responseBody` from the `AI_APICallError`, so the body that said `{"code":400,"msg":"bad request"}` and named AtlasCloud was discarded on the error path. Reconstructing it took re-running the request by hand against the live API.
+
+**Why it "used to work":** no Orchestra code changed. The number is read live from the catalogue, so an upstream metadata or routing change is enough to arm it. Which change exactly is not recoverable — no historical copy of the cache exists. That is itself the lesson: a value fetched from a vendor at runtime is an input, not a constant, and it needs a bound.
+
+**Resolution:**
+- `OPENROUTER_RELIABLE_MAX_OUTPUT = 32_768` clamps every OpenRouter ceiling — catalogue **and** family-registry, since `openrouter` + `openai/o1-…` resolving to 100 000 is the same unverified bet through a different door. Direct-provider limits are untouched (curated against the vendor's documented cap).
+- `pickFromOpenRouterCatalog` queries the public catalogue anonymously; the key is sent when present and is no longer a precondition. `attemptModelFallback` resolves it through `resolveWorkerKey` so a vault key is found.
+- The notice quotes the upstream (`describeUpstreamFailure` → `HTTP 400 — Provider returned error`), states that the catalogue was searched and came up empty, and asserts no cause it did not check.
+- Free Mode's Router prefers an id other than the brain's, and reports `routerSharesBrainEndpoint` when the pool leaves it no choice.
+- `summarizeError` keeps `statusCode` + `responseBody` (truncated at 2 000 chars); `replay.ts` prefers the recorded values over its synthesized per-kind defaults.
+
+**Regression Coverage:** [`model-output-limits.test.ts`](src/lib/providers/model-output-limits.test.ts) (clamp, both paths, plus the exact Free-Mode config shape), [`model-fallback.test.ts`](src/lib/providers/model-fallback.test.ts) (anonymous catalogue query — the inverted test replaced; `describeUpstreamFailure`), [`agent-fallback.test.ts`](src/lib/agent/agent-fallback.test.ts) (vault-key resolution, keyless search still runs, notice carries the upstream detail and contains no "circuit-broken" claim), [`free-mode.test.ts`](src/lib/agent/free-mode.test.ts) (Router ≠ brain, and the honest flag when it must be), [`postmortem.test.ts`](src/lib/observability/postmortem.test.ts) (status + body captured, truncated, absent when the error has none).
+
+**Doc Updates:** this entry; the false "degrades gracefully" claim deleted from `model-output-limits.ts` and replaced with the measurement; `free-mode.ts` constraint 3 widened to cover the brain/Router pair; the stale "PM files don't store statusCode directly" comment in `replay.ts` corrected.
+
+**Rule:** **A number a vendor hands you at runtime is an input, not a constant — clamp it before you send it.** "The provider will cap it for us" is an assumption; test it or bound it. And two meta-rules from the debugging, both cheaper than the bug was: **a test that asserts a bail-out is correct will keep a dead code path alive forever** — when a fallback has never fired in production, suspect its guard clause before its logic; and **never let an error message name a cause the code did not check.** A confident wrong diagnosis is worse than "unknown error" — it tells the operator which way to walk away from the problem.
+
+---
+
 ## 111. Every cron route was broken in the production build — a module cycle that `next dev` resolved and Turbopack did not
 **Date:** 2026-08
 **Status:** RESOLVED

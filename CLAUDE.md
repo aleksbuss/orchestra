@@ -189,7 +189,8 @@ Violating any of these causes data loss, data egress, RCE, or a silent productio
 17. **`modelSupportsTools(provider, modelId)`** (`src/lib/providers/tool-support.ts`) is the ONLY tool-capability check. Never write `if (provider === "X") { supportsTools = ... }` inline. New non-tool model → add the *narrowest* substring to `NO_TOOL_PATTERNS` plus a positive case in the test.
 18. **A system-limit stop is signalled by the SYSTEM, deterministically** — never rely on the model to self-report hitting a limit; it will dress it up as success.
 19. **Loaders return UTF-8.** New loader tests must include a non-ASCII round-trip and assert no NULL byte / UTF-16 BOM.
-20. **`resolveWorkerKey(config, settings)` before any `createModel`.** `createModel` sees only `config.apiKey` and `process.env` — never the API Keys Vault. A raw `settings.chatModel` / `utilityModel` / `proposerTiers.*` handed to a factory works on YOUR machine (env key) and fails on every vault-only install (PM #99).
+20. **`resolveWorkerKey(config, settings)` before any `createModel`.** `createModel` sees only `config.apiKey` and `process.env` — never the API Keys Vault. A raw `settings.chatModel` / `utilityModel` / `proposerTiers.*` handed to a factory works on YOUR machine (env key) and fails on every vault-only install (PM #99). Same for the fallback probe — read the key through the resolver, never off `settings.chatModel.apiKey` (PM #112).
+20b. **A vendor-advertised limit is an input, not a constant — clamp it before it goes on the wire.** OpenRouter's `max_completion_tokens` describes `top_provider`, not the upstream that actually serves you: `dots-3` advertised 460 800 and 400'd on it, killing every Free Mode turn (PM #112). And Free Mode's overlay carries provider+model ONLY, so any field you assume is set there is at its default — check what that default resolves to.
 
 ### Frontend
 20. **One shared `EventSource` via `useBackgroundSync`.** Never `new EventSource` in a component.

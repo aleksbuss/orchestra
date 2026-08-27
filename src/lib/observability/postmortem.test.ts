@@ -183,6 +183,72 @@ describe("dumpPostmortem — happy path", () => {
     expect(pm?.rawError.orchestraStreamStall).toBe("idle");
   });
 
+  /**
+   * PM #112 — an `AI_APICallError` carries the upstream's status and body, and
+   * the summary dropped both. What survived was
+   * `AI_APICallError: Provider returned error`, which is what a rate limit, an
+   * outage and a rejected request all look like. The discarded body said
+   * `{"code":400,"msg":"bad request"}` and named the serving provider — the
+   * whole diagnosis, thrown away on the error path. Reconstructing it meant
+   * re-running the request by hand against the live API.
+   */
+  it("keeps the upstream statusCode + responseBody from an AI_APICallError", async () => {
+    const apiErr = Object.assign(new Error("Provider returned error"), {
+      name: "AI_APICallError",
+      statusCode: 400,
+      responseBody: '{"code":400,"msg":"bad request","provider":"AtlasCloud"}',
+    });
+
+    await dumpPostmortem({
+      traceId: "T-upstream",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: apiErr,
+    });
+
+    const pm = await loadPostmortem("T-upstream");
+    expect(pm?.rawError.statusCode).toBe(400);
+    expect(pm?.rawError.responseBody).toContain("AtlasCloud");
+  });
+
+  it("truncates a huge response body instead of writing it whole", async () => {
+    const apiErr = Object.assign(new Error("Provider returned error"), {
+      name: "AI_APICallError",
+      statusCode: 500,
+      responseBody: "y".repeat(200_000),
+    });
+
+    await dumpPostmortem({
+      traceId: "T-hugebody",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: apiErr,
+    });
+
+    const pm = await loadPostmortem("T-hugebody");
+    expect(pm?.rawError.responseBody?.length).toBeLessThan(3000);
+    expect(pm?.rawError.responseBody).toMatch(/\[truncated\]$/);
+  });
+
+  it("adds no upstream fields for an error that has none", async () => {
+    await dumpPostmortem({
+      traceId: "T-nostatus",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: new Error("boom"),
+    });
+
+    const pm = await loadPostmortem("T-nostatus");
+    expect(pm?.rawError.statusCode).toBeUndefined();
+    expect(pm?.rawError.responseBody).toBeUndefined();
+  });
+
   it("does NOT invent a stall marker for an ordinary error", async () => {
     await dumpPostmortem({
       traceId: "T-plain",

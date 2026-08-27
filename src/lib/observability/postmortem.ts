@@ -105,9 +105,9 @@ export interface PostmortemFile {
   request: PostmortemRequestSnapshot;
   settings: PostmortemSettingsSnapshot;
   errorClassification: ChatErrorPayload;
-  /** The raw error message + stack — these may contain secrets in cause
-   *  chains, but they live behind the same gitignore that protects every
-   *  user prompt; trade-off documented in the JSDoc above. */
+  /** The raw error message + stack + upstream response — these may contain
+   *  secrets in cause chains, but they live behind the same gitignore that
+   *  protects every user prompt; trade-off documented in the JSDoc above. */
   rawError: {
     message: string;
     stack?: string;
@@ -119,6 +119,21 @@ export interface PostmortemFile {
      * stall as a user cancellation and report false drift (PM #102).
      */
     orchestraStreamStall?: StreamStallKind;
+    /**
+     * PM #112 — the upstream HTTP status and response body from an
+     * `AI_APICallError`. Both used to be dropped, which is what made a
+     * deterministic self-inflicted 400 (`max_tokens` above what the serving
+     * endpoint accepts) indistinguishable from free-tier throttling: the
+     * postmortem preserved only `AI_APICallError: Provider returned error`,
+     * while the body it discarded said `{"code":400,"msg":"bad request"}` and
+     * named the provider. Reconstructing that meant re-running the request by
+     * hand against the live API.
+     *
+     * Body is truncated to MAX_RESPONSE_BODY_CHARS — an upstream can return
+     * megabytes, and the postmortem is written on the error path.
+     */
+    statusCode?: number;
+    responseBody?: string;
   };
   /** Up to MAX_LOG_ENTRIES recent log entries scoped to this trace id. */
   logs: LogEntry[];
@@ -216,6 +231,33 @@ async function readTraceLogs(
   return takeLast(filterLogEntries(all, { traceId }), MAX_LOG_ENTRIES);
 }
 
+/** Upstream bodies can be megabytes; keep the useful head only (PM #112). */
+const MAX_RESPONSE_BODY_CHARS = 2000;
+
+/**
+ * Pull the upstream HTTP status + body off an `AI_APICallError`-shaped error.
+ *
+ * Duck-typed rather than `instanceof`: the AI SDK's error classes are not
+ * re-exported through every provider package, and the same shape arrives from
+ * `@ai-sdk/openai`, `@ai-sdk/anthropic` and the OpenAI-compatible wrapper.
+ */
+function extractUpstreamResponse(err: object): {
+  statusCode?: number;
+  responseBody?: string;
+} {
+  const e = err as Record<string, unknown>;
+  const statusCode =
+    typeof e.statusCode === "number" ? e.statusCode :
+    typeof e.status === "number" ? e.status :
+    undefined;
+  const raw = typeof e.responseBody === "string" ? e.responseBody : undefined;
+  const responseBody =
+    raw && raw.length > MAX_RESPONSE_BODY_CHARS
+      ? `${raw.slice(0, MAX_RESPONSE_BODY_CHARS)}…[truncated]`
+      : raw;
+  return { statusCode, responseBody };
+}
+
 function summarizeError(err: unknown): PostmortemFile["rawError"] {
   if (err instanceof Error) {
     const summary: PostmortemFile["rawError"] = {
@@ -227,6 +269,9 @@ function summarizeError(err: unknown): PostmortemFile["rawError"] {
     if (isStreamStall(err)) {
       summary.orchestraStreamStall = err.orchestraStreamStall;
     }
+    const { statusCode, responseBody } = extractUpstreamResponse(err);
+    if (statusCode !== undefined) summary.statusCode = statusCode;
+    if (responseBody !== undefined) summary.responseBody = responseBody;
     return summary;
   }
   return { message: typeof err === "string" ? err : JSON.stringify(err) };

@@ -28,6 +28,12 @@ const ALL_KINDS: ChatErrorKind[] = [
   "abort",
   "stream_stalled",
   "internal",
+  // Pre-existing gap found while adding turn_recovered below — this fixture
+  // is a hand-written literal, not compiler-enforced against ChatErrorKind.
+  "model_fallback",
+  "turn_recovered",
+  "turn_recovered_with_tools",
+  "recovering",
 ];
 
 describe("styleForKind — every kind has a complete style", () => {
@@ -72,6 +78,25 @@ describe("styleForKind — color semantics", () => {
     const style = styleForKind("model_fallback");
     expect(style.container).toContain("emerald");
     expect(style.label).toMatch(/switched/i);
+    expect(style.label).not.toMatch(/error|failed/i);
+  });
+
+  it("turn_recovered_with_tools is emerald (done) with a label distinct from turn_recovered", () => {
+    const withTools = styleForKind("turn_recovered_with_tools");
+    const textOnly = styleForKind("turn_recovered");
+    expect(withTools.container).toContain("emerald");
+    expect(withTools.label).not.toBe(textOnly.label);
+    expect(withTools.label).not.toMatch(/error|failed/i);
+  });
+
+  it("violet for recovering — in progress, distinct from both amber (fault) and emerald (done)", () => {
+    // PM #122: this fires WHILE the ladder is running, outcome unknown yet.
+    // Must not share emerald with turn_recovered (would read as "already
+    // succeeded") or amber/red with the fault kinds (would read as "broken").
+    const style = styleForKind("recovering");
+    expect(style.container).toContain("violet");
+    expect(style.container).not.toContain("emerald");
+    expect(style.container).not.toContain("red");
     expect(style.label).not.toMatch(/error|failed/i);
   });
 });

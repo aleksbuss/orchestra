@@ -230,8 +230,38 @@ export function tryAcquireProbe(provider: string, model: string): boolean {
  * endpoint failure) — that check needs the signal, which this function has no
  * access to.
  */
+/**
+ * Read an upstream HTTP status off an error, unwrapping `AI_RetryError.lastError`
+ * when the SDK's own retry loop is what exhausted (same shape as `AI_RetryError`
+ * from `node_modules/ai/src/util/retry-error.ts` — no `statusCode` of its own,
+ * the real `AI_APICallError` sits one level down). Same fix as PM #114
+ * (`postmortem.ts`'s `extractUpstreamResponse`), applied here because
+ * `classifyModelFailure` had the identical blind spot: a 429 wrapped in
+ * "Failed after 4 attempts. Last error: Provider returned error" matched
+ * `msg.includes("provider returned error")` below and was classified `"server"`,
+ * never `"throttle"` — so a plain rate limit and a real 5xx were indistinguishable
+ * in the breaker's own telemetry.
+ */
+function upstreamStatusCode(err: unknown): number | undefined {
+  if (!err || typeof err !== "object") return undefined;
+  const e = err as Record<string, unknown>;
+  const direct = typeof e.statusCode === "number" ? e.statusCode : typeof e.status === "number" ? e.status : undefined;
+  if (direct !== undefined) return direct;
+  const lastError = e.lastError;
+  if (lastError && typeof lastError === "object") {
+    const le = lastError as Record<string, unknown>;
+    return typeof le.statusCode === "number" ? le.statusCode : typeof le.status === "number" ? le.status : undefined;
+  }
+  return undefined;
+}
+
 export function classifyModelFailure(err: unknown): ModelFailureKind | null {
   const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+
+  // A real HTTP status beats message-text guessing when one is available.
+  const status = upstreamStatusCode(err);
+  if (status === 429) return "throttle";
+  if (status !== undefined && status >= 500 && status < 600) return "server";
 
   // Ours, not theirs — never penalize the endpoint.
   if (

@@ -22,9 +22,15 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   generateFinalAnswerWithFailover,
   buildFinalAnswerPool,
+  finalAnswerInstruction,
+  compareModelsByBenchmarkScoreDesc,
   UNDELIVERABLE_NOTICE,
 } from "./final-answer-failover";
 import { resetModelHealth, recordModelFailure, isModelCircuitOpen } from "./model-health";
+import {
+  __setOpenRouterBenchmarkScoreForTest,
+  __resetOpenRouterPricingForTests,
+} from "@/lib/cost/openrouter-pricing";
 
 const mockedGenerateText = vi.mocked(generateText);
 
@@ -132,6 +138,19 @@ describe("generateFinalAnswerWithFailover", () => {
     expect(calledModels()).toEqual([UTILITY.model]);
   });
 
+  it("skipBrainRetry — goes straight to the substitute, never re-attempting the brain", async () => {
+    // Post-review Sprint 0: the caller (primary-stream-recovery.ts) already has
+    // fresh, same-turn evidence a same-endpoint retry cannot help. The brain
+    // must not be dialled at all — only the substitute.
+    mockedGenerateText.mockResolvedValueOnce({ text: "substitute answer" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ skipBrainRetry: true }));
+
+    expect(out.text).toBe("substitute answer");
+    expect(calledModels()).toEqual([UTILITY.model]);
+    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+  });
+
   it("NEVER returns a silent empty — an undeliverable turn carries a notice", async () => {
     mockedGenerateText.mockResolvedValue({ text: "" } as never);
 
@@ -196,6 +215,25 @@ describe("generateFinalAnswerWithFailover", () => {
 
     expect(out.text).toBe("");
     expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+  });
+
+  // PM #120 — protake council, unanimous 4/4: every `if (abortSignal?.aborted)
+  // return { text: "", usage }` in this function was silent, the same defect
+  // shape as PM #118's empty-response branch. A cascade stopped by a client
+  // disconnect must leave the same trace a cascade stopped by any other means
+  // does — this test is deliberately the LOG assertion, not a new behavior
+  // assertion (the return value is already covered by the test above).
+  it("logs when the abort gate fires, instead of returning silently", async () => {
+    const controller = new AbortController();
+    mockedGenerateText.mockImplementation((async () => {
+      controller.abort();
+      return { text: "" };
+    }) as never);
+
+    await generateFinalAnswerWithFailover(args({ abortSignal: controller.signal }));
+
+    const warnCalls = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(warnCalls.some((line) => line.includes("recovery aborted"))).toBe(true);
   });
 
   it("an abort is not counted against the endpoint's circuit", async () => {
@@ -328,6 +366,288 @@ describe("buildFinalAnswerPool", () => {
   });
 });
 
+/**
+ * PM #119 — live incident, 2026-08-31: a substitute told (unconditionally)
+ * "you have everything you need from the steps above, write your final
+ * answer" fabricated a fully detailed completed-task report — specific file
+ * edits, specific test output — for a turn where ZERO tool calls had
+ * actually run. Council-reviewed (4take) fix: the instruction must be
+ * conditional on whether real tool activity happened THIS turn, and the
+ * failure-case wording must be an exact required string with no "what's
+ * still needed" slot (independently flagged by two reviewers as itself
+ * inviting a second layer of fabrication).
+ */
+describe("finalAnswerInstruction (PM #119 — anti-fabrication)", () => {
+  it("didWork=true keeps PM #69's original 'steps above' framing", () => {
+    const text = finalAnswerInstruction(true);
+    expect(text).toContain("You have everything you need from the steps above");
+    expect(text).toContain("Do not call any tools");
+  });
+
+  it("didWork=false forbids claiming any action, with an exact required failure string", () => {
+    const text = finalAnswerInstruction(false);
+    expect(text).toContain("You have NOT performed any actions this turn");
+    expect(text).toContain(
+      "I could not complete this — a technical failure occurred before any work was done."
+    );
+    expect(text).toContain("Do not call any tools");
+  });
+
+  it("didWork=false never invites the model to invent next steps", () => {
+    const text = finalAnswerInstruction(false).toLowerCase();
+    // The exact clause the live incident's fabrication resembled — asking the
+    // model to name what's left invites the same kind of confident invention
+    // that produced the original fake completion report.
+    expect(text).not.toContain("still needed");
+    expect(text).not.toContain("what's needed");
+    expect(text).not.toContain("what is needed");
+  });
+});
+
+describe("cascade through the substitute pool (PM #113)", () => {
+  const FRONTIER: ModelConfig = { provider: "openrouter", model: "vendor/frontier:free", apiKey: "k" };
+  const BALANCED: ModelConfig = { provider: "openrouter", model: "vendor/balanced:free", apiKey: "k" };
+  const FAST: ModelConfig = { provider: "openrouter", model: "vendor/fast:free", apiKey: "k" };
+
+  function multiPoolSettings(): AppSettings {
+    const s = settings();
+    s.proposerTiers = { frontier: { ...FRONTIER }, balanced: { ...BALANCED }, fast: { ...FAST } };
+    return s;
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+    // Some tests below override the base createModel mock's implementation.
+    vi.mocked(createModel).mockImplementation(((cfg: { model: string }) => ({ __model: cfg.model })) as never);
+  });
+
+  it("cascades to a 2nd substitute after the 1st stays empty", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "" } as never) // 1st substitute (utility) — empty
+      .mockResolvedValueOnce({ text: "from frontier" } as never); // 2nd substitute — succeeds
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("from frontier");
+    // The brain's two calls go through `args.model` (the "brain-handle" test
+    // double), not `createModel` — only substitutes are built via createModel.
+    expect(calledModels()).toEqual(["brain-handle", "brain-handle", UTILITY.model, FRONTIER.model]);
+    expect(out.notice).toContain(FRONTIER.model);
+  });
+
+  it("cascades through a 3rd substitute when the first two stay empty", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "" } as never) // utility
+      .mockResolvedValueOnce({ text: "" } as never) // frontier
+      .mockResolvedValueOnce({ text: "from balanced" } as never); // balanced — succeeds
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("from balanced");
+    expect(out.notice).toContain(BALANCED.model);
+  });
+
+  it("stops at the FIRST success — a multi-candidate pool does not over-try", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "from utility" } as never); // 1st substitute — succeeds
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("from utility");
+    expect(mockedGenerateText).toHaveBeenCalledTimes(3); // never reaches frontier/balanced/fast
+  });
+
+  it("exhausts the whole pool and reports undeliverable when every candidate stays empty", async () => {
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("");
+    // brain + retry + 4 distinct pool candidates (utility, frontier, balanced, fast).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(6);
+    expect(out.notice).toBe(UNDELIVERABLE_NOTICE);
+  });
+
+  it("dedups an identical candidate instead of trying the same endpoint twice", async () => {
+    const s = multiPoolSettings();
+    // frontier happens to be the same endpoint as utility.
+    s.proposerTiers!.frontier = { ...UTILITY };
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "" } as never) // utility (== frontier, tried once)
+      .mockResolvedValueOnce({ text: "from balanced" } as never); // balanced
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: s }));
+
+    expect(out.text).toBe("from balanced");
+    // If the dedup were missing this would be 5 (utility tried twice).
+    expect(mockedGenerateText).toHaveBeenCalledTimes(4);
+  });
+
+  it("skips a circuit-open candidate without spending a generateText call on it", async () => {
+    for (let i = 0; i < 3; i++) recordModelFailure(UTILITY.provider, UTILITY.model, "empty");
+    expect(isModelCircuitOpen(UTILITY.provider, UTILITY.model)).toBe(true);
+
+    mockedGenerateText.mockResolvedValueOnce({ text: "from frontier" } as never);
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(out.text).toBe("from frontier");
+    // Utility (tripped) is skipped entirely — frontier is the ONLY call.
+    expect(calledModels()).toEqual([FRONTIER.model]);
+  });
+
+  // Post-review (protake council, 2026-08-31) — this branch used to return
+  // silently. Live tonight it was indistinguishable in the logs from "policy
+  // forbade substitution" (which DOES log) and cost real time to disambiguate
+  // during a broad free-tier outage.
+  it("logs when every candidate's circuit is open, naming them", async () => {
+    for (let i = 0; i < 3; i++) recordModelFailure(UTILITY.provider, UTILITY.model, "empty");
+    for (let i = 0; i < 3; i++) recordModelFailure(FRONTIER.provider, FRONTIER.model, "empty");
+    for (let i = 0; i < 3; i++) recordModelFailure(BALANCED.provider, BALANCED.model, "empty");
+    for (let i = 0; i < 3; i++) recordModelFailure(FAST.provider, FAST.model, "empty");
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(out.text).toBe("");
+    expect(mockedGenerateText).not.toHaveBeenCalled(); // brain retry skipped, no candidate attempted
+    const warnCalls = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(warnCalls.some((line) => line.includes(UTILITY.model) && line.includes("circuit is OPEN"))).toBe(true);
+  });
+
+  // 4take council review, 2026-08-31 — live-measured on the real catalogue:
+  // `utilityModel` sat at index 0 (tried FIRST) despite being the WEAKEST of
+  // the four candidates (intelligence 25.7 vs. 41-45 for the proposer tiers),
+  // because it's drawn from a different, narrower pool (`structured_outputs`
+  // capable ids only) that was never reconciled against the general pool's
+  // scores when `buildFinalAnswerPool` assembled the flat 4-slot array.
+  it("tries the STRONGEST candidate first, not whichever settings slot happens to be listed first", async () => {
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        [UTILITY.model, { intelligence: 25.7, agentic: 0, coding: 0 }], // weakest — but listed FIRST in buildFinalAnswerPool
+        [FRONTIER.model, { intelligence: 45.4, agentic: 0, coding: 0 }], // strongest
+        [BALANCED.model, { intelligence: 42.3, agentic: 0, coding: 0 }],
+        [FAST.model, { intelligence: 41.2, agentic: 0, coding: 0 }],
+      ])
+    );
+    try {
+      mockedGenerateText.mockResolvedValueOnce({ text: "from strongest" } as never);
+
+      const out = await generateFinalAnswerWithFailover(
+        args({ settings: multiPoolSettings(), skipBrainRetry: true })
+      );
+
+      expect(out.text).toBe("from strongest");
+      // If ordering were still slot-order (not score-order), this would have
+      // called UTILITY.model first instead.
+      expect(calledModels()).toEqual([FRONTIER.model]);
+    } finally {
+      __resetOpenRouterPricingForTests();
+    }
+  });
+
+  // Live incident, 2026-08-31 — a cascade that visibly tried ONE candidate
+  // then stopped was indistinguishable from 2-3 candidates silently
+  // returning empty text in between: only the THROWN-exception branch of
+  // `attemptOnce` logged. This closes that gap.
+  it("logs an empty-response attempt (not just a thrown one), naming the finishReason", async () => {
+    // Unscored fixtures (no benchmark data seeded in this describe block) keep
+    // the stable assembly order: UTILITY is tried first, FRONTIER second.
+    mockedGenerateText.mockResolvedValueOnce({ text: "", finishReason: "content-filter" } as never);
+    mockedGenerateText.mockResolvedValueOnce({ text: "from frontier" } as never);
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(out.text).toBe("from frontier");
+    const warnCalls = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(
+      warnCalls.some(
+        (line) => line.includes(UTILITY.model) && line.includes("empty response") && line.includes("content-filter")
+      )
+    ).toBe(true);
+  });
+
+  it("a createModel throw for one candidate skips to the next, not the whole cascade", async () => {
+    vi.mocked(createModel).mockImplementation(((cfg: { model: string }) => {
+      if (cfg.model === UTILITY.model) throw new Error("API Key is missing");
+      return { __model: cfg.model };
+    }) as never);
+    mockedGenerateText.mockResolvedValueOnce({ text: "from frontier" } as never);
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(out.text).toBe("from frontier");
+    expect(calledModels()).toEqual([FRONTIER.model]);
+  });
+
+  it("the aggregate cascade budget stops STARTING a new attempt once exceeded", async () => {
+    vi.useFakeTimers();
+    process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS = "1000";
+    mockedGenerateText.mockImplementation((async () => {
+      // Simulate the first substitute attempt itself taking longer than the
+      // budget — the NEXT loop iteration's check must see it as exceeded.
+      vi.advanceTimersByTime(2000);
+      return { text: "" };
+    }) as never);
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(out.text).toBe("");
+    // Only the first substitute was even attempted — budget exceeded before a
+    // second one could start, even though 3 more candidates remained.
+    expect(mockedGenerateText).toHaveBeenCalledTimes(1);
+    // PM #123 — this used to be a silent break. Now it names what got skipped.
+    const warnCalls = vi.mocked(console.warn).mock.calls.map((c) => String(c[0]));
+    expect(warnCalls.some((m) => m.includes("cascade budget") && m.includes("NOT trying 3 remaining"))).toBe(
+      true
+    );
+  });
+
+  it("PM #123 — the default budget survives one full-length (~120s) slow candidate and still tries a second", async () => {
+    // Live incident, 2026-09-02: brain failed fast, the FIRST substitute hung
+    // for its own full ~120s call-deadline, and the (old, 90s) cascade budget
+    // was ALREADY exceeded before a second, perfectly healthy candidate could
+    // even be attempted. This pins the fix: with no env override (the real
+    // default), a single 120s-long attempt must not exhaust the budget.
+    delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+    vi.useFakeTimers();
+    let call = 0;
+    mockedGenerateText.mockImplementation((async () => {
+      call += 1;
+      if (call === 1) {
+        vi.advanceTimersByTime(120_000); // the slow candidate's own call-deadline
+        return { text: "" };
+      }
+      return { text: "from the second candidate" };
+    }) as never);
+
+    const out = await generateFinalAnswerWithFailover(
+      args({ settings: multiPoolSettings(), skipBrainRetry: true })
+    );
+
+    expect(mockedGenerateText).toHaveBeenCalledTimes(2);
+    expect(out.text).toBe("from the second candidate");
+  });
+});
+
 describe("degradation policy (Sprint 4)", () => {
   it("quality mode does NOT substitute — it reports honestly instead", async () => {
     mockedGenerateText.mockResolvedValue({ text: "" } as never);
@@ -373,5 +693,46 @@ describe("degradation policy (Sprint 4)", () => {
 
     expect(out.text).toBe("recovered on retry");
     expect(out.notice).toBeUndefined();
+  });
+});
+
+// Tool-capable-retry work — extracted from an inline `.sort()` comparator so
+// `tool-capable-retry.ts`'s own candidate selection shares this exact
+// ordering instead of a second, driftable copy.
+describe("compareModelsByBenchmarkScoreDesc", () => {
+  beforeEach(() => __resetOpenRouterPricingForTests());
+
+  const m = (model: string): ModelConfig => ({ provider: "openrouter", model });
+
+  it("orders by intelligence, strongest first", () => {
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["a", { intelligence: 20, coding: 0, agentic: 0 }],
+        ["b", { intelligence: 80, coding: 0, agentic: 0 }],
+      ])
+    );
+    expect([m("a"), m("b")].sort(compareModelsByBenchmarkScoreDesc)).toEqual([m("b"), m("a")]);
+  });
+
+  it("ties on intelligence tie-break on agentic, then coding", () => {
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["a", { intelligence: 50, coding: 90, agentic: 10 }],
+        ["b", { intelligence: 50, coding: 10, agentic: 90 }],
+      ])
+    );
+    expect([m("a"), m("b")].sort(compareModelsByBenchmarkScoreDesc)).toEqual([m("b"), m("a")]);
+  });
+
+  it("an unscored id sorts after a scored one", () => {
+    __setOpenRouterBenchmarkScoreForTest(new Map([["scored", { intelligence: 1, coding: 1, agentic: 1 }]]));
+    expect([m("unscored"), m("scored")].sort(compareModelsByBenchmarkScoreDesc)).toEqual([
+      m("scored"),
+      m("unscored"),
+    ]);
+  });
+
+  it("stable (returns 0) when neither side has score data", () => {
+    expect(compareModelsByBenchmarkScoreDesc(m("x"), m("y"))).toBe(0);
   });
 });

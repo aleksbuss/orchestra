@@ -54,7 +54,39 @@ export type ChatErrorKind =
    * UI should render this as an INFO toast, not an error — the chat turn
    * succeeded. The payload's `modelFallback` field carries the details.
    */
-  | "model_fallback";
+  | "model_fallback"
+  /**
+   * Post-review Sprint 0: the primary turn's own model call errored, and
+   * `primary-stream-recovery.ts` delivered a substitute answer for THIS turn
+   * specifically (distinct from `model_fallback`, which changes the DEFAULT
+   * model for FUTURE turns — this changes nothing persisted, one turn only).
+   * Render as an INFO toast, not an error — the chat turn succeeded.
+   */
+  | "turn_recovered"
+  /**
+   * Tool-capable-retry-on-model-swap: the substitute didn't just answer with
+   * text — it re-ran the FULL task WITH tools on a different model and
+   * genuinely completed it (`tool-capable-retry.ts`). Distinct from
+   * `turn_recovered` (a tool-less forced summary/refusal, which structurally
+   * cannot complete a task that needs a tool) — this one actually finished
+   * the work. Render as an INFO toast, not an error.
+   */
+  | "turn_recovered_with_tools"
+  /**
+   * PM #122 — fired the MOMENT the retry/substitute ladder actually starts
+   * (`final-answer-failover.ts`'s call sites), before it is known whether it
+   * will succeed. The ladder runs `generateText`, never `streamText` — zero
+   * chunks reach the client for its entire duration (live-measured: 73s to
+   * 7+ minutes on a degraded free tier) — so `useChat`'s own `status` has
+   * already left `streaming`/`submitted` by the time this fires (the ORIGINAL
+   * stream already errored or finished empty). Without this event the UI's
+   * loading indicator vanishes long before the turn is actually done, and a
+   * real, eventually-successful recovery looks identical to a silent death
+   * for the whole gap. Superseded by `turn_recovered` (success) or the
+   * ordinary error path (failure) once the ladder settles — never terminal
+   * on its own.
+   */
+  | "recovering";
 
 /**
  * Details of an automatic model fallback event. Attached to a `model_fallback`

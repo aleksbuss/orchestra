@@ -24,6 +24,8 @@ import {
   buildToolMarkupDegradationNotice,
 } from "./agent-response";
 import { isChatDegraded, resetChatDegradation } from "./degradation-telemetry";
+import { subscribeUiSyncEvents } from "@/lib/realtime/event-bus";
+import type { UiSyncEvent } from "@/lib/realtime/types";
 
 const responseToolCall = (message: string): ModelMessage => ({
   role: "assistant",
@@ -190,6 +192,42 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     });
     expect(res.text).toBe("FORCED FINAL ANSWER");
     expect(res.uiNotice).toBeUndefined();
+  });
+
+  it("PM #122 — publishes a 'recovering' chat-error event before the forced generation, when chatId is known", async () => {
+    const seen: UiSyncEvent[] = [];
+    const unsubscribe = subscribeUiSyncEvents((e) => seen.push(e));
+    try {
+      await resolveTurnContinuation({
+        ...base,
+        chatId: "chat-pm122-recovering",
+        responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+        finishReason: "other",
+        model: modelReturning("FORCED FINAL ANSWER") as never,
+      });
+    } finally {
+      unsubscribe();
+    }
+    const recovering = seen.find((e) => e.chatError?.kind === "recovering");
+    expect(recovering).toBeDefined();
+    expect(recovering!.chatId).toBe("chat-pm122-recovering");
+    expect(recovering!.chatError!.recoverable).toBe(true);
+  });
+
+  it("PM #122 — does NOT publish 'recovering' without a chatId (nothing to scope the toast to)", async () => {
+    const seen: UiSyncEvent[] = [];
+    const unsubscribe = subscribeUiSyncEvents((e) => seen.push(e));
+    try {
+      await resolveTurnContinuation({
+        ...base,
+        responseMessages: [assistantText("<thinking>I'll just stop here</thinking>")],
+        finishReason: "other",
+        model: modelReturning("FORCED FINAL ANSWER") as never,
+      });
+    } finally {
+      unsubscribe();
+    }
+    expect(seen.find((e) => e.chatError?.kind === "recovering")).toBeUndefined();
   });
 
   it("does NOT ship a printed ACTION tool call as the forced answer — honest notice instead (bug B / free-model markup degradation)", async () => {

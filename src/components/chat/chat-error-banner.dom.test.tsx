@@ -192,4 +192,32 @@ describe("<ChatErrorBanner /> — kind variants render distinct visual styling",
     );
     expect(screen.getByText(/Internal error/i)).toBeInTheDocument();
   });
+
+  it("PM #122 — 'recovering' renders the spinning Loader2 icon, not RefreshCw or AlertTriangle", () => {
+    const { container } = render(
+      <ChatErrorBanner
+        error={{ ...samplePayload, kind: "recovering", recoverable: true }}
+        onDismiss={() => {}}
+      />
+    );
+    expect(screen.getByText(/Model unavailable — trying another/i)).toBeInTheDocument();
+    // Loader2 is the only icon in this component styled with animate-spin —
+    // this pins the ternary actually took the "recovering" branch, not one
+    // of the other two icon branches it sits beside.
+    const spinner = container.querySelector("svg.animate-spin");
+    expect(spinner).not.toBeNull();
+  });
+
+  it("PM #122 — 'recovering' does not get the AlertTriangle fault icon", () => {
+    const { container } = render(
+      <ChatErrorBanner
+        error={{ ...samplePayload, kind: "recovering", recoverable: true }}
+        onDismiss={() => {}}
+      />
+    );
+    // lucide-react names each icon's root <svg> via a lucide-<kebab-name>
+    // class — a stronger check than text alone that the WRONG branch didn't render.
+    expect(container.querySelector("svg.lucide-triangle-alert")).toBeNull();
+    expect(container.querySelector("svg.lucide-refresh-cw")).toBeNull();
+  });
 });

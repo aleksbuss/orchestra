@@ -131,6 +131,9 @@ export interface PostmortemFile {
      *
      * Body is truncated to MAX_RESPONSE_BODY_CHARS — an upstream can return
      * megabytes, and the postmortem is written on the error path.
+     *
+     * PM #114 — also unwrapped from an `AI_RetryError.lastError` when the SDK's
+     * own retry loop is what exhausted, not just a bare `AI_APICallError`.
      */
     statusCode?: number;
     responseBody?: string;
@@ -234,18 +237,11 @@ async function readTraceLogs(
 /** Upstream bodies can be megabytes; keep the useful head only (PM #112). */
 const MAX_RESPONSE_BODY_CHARS = 2000;
 
-/**
- * Pull the upstream HTTP status + body off an `AI_APICallError`-shaped error.
- *
- * Duck-typed rather than `instanceof`: the AI SDK's error classes are not
- * re-exported through every provider package, and the same shape arrives from
- * `@ai-sdk/openai`, `@ai-sdk/anthropic` and the OpenAI-compatible wrapper.
- */
-function extractUpstreamResponse(err: object): {
+/** Read statusCode/responseBody directly off one error-shaped object. */
+function readUpstreamFields(e: Record<string, unknown>): {
   statusCode?: number;
   responseBody?: string;
 } {
-  const e = err as Record<string, unknown>;
   const statusCode =
     typeof e.statusCode === "number" ? e.statusCode :
     typeof e.status === "number" ? e.status :
@@ -256,6 +252,35 @@ function extractUpstreamResponse(err: object): {
       ? `${raw.slice(0, MAX_RESPONSE_BODY_CHARS)}…[truncated]`
       : raw;
   return { statusCode, responseBody };
+}
+
+/**
+ * Pull the upstream HTTP status + body off an `AI_APICallError`-shaped error.
+ *
+ * Duck-typed rather than `instanceof`: the AI SDK's error classes are not
+ * re-exported through every provider package, and the same shape arrives from
+ * `@ai-sdk/openai`, `@ai-sdk/anthropic` and the OpenAI-compatible wrapper.
+ *
+ * PM #114 — when `streamText`'s own retry loop exhausts (the free-tier flake
+ * case PM #112 exists for), the error `onError` actually receives is an
+ * `AI_RetryError`, which has no `statusCode`/`responseBody` of its own — the
+ * real `AI_APICallError` sits one level down at `.lastError`
+ * (`node_modules/ai/src/util/retry-error.ts`). Without this unwrap, PM #112's
+ * capture read as empty on precisely the path it was written to cover.
+ */
+function extractUpstreamResponse(err: object): {
+  statusCode?: number;
+  responseBody?: string;
+} {
+  const direct = readUpstreamFields(err as Record<string, unknown>);
+  if (direct.statusCode !== undefined || direct.responseBody !== undefined) {
+    return direct;
+  }
+  const lastError = (err as Record<string, unknown>).lastError;
+  if (lastError && typeof lastError === "object") {
+    return readUpstreamFields(lastError as Record<string, unknown>);
+  }
+  return {};
 }
 
 function summarizeError(err: unknown): PostmortemFile["rawError"] {

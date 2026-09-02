@@ -86,6 +86,17 @@ interface OpenRouterModelEntry {
   // judge fails, silently costing the swarm the two features that distinguish
   // it from N-sampling. `tools` support does NOT imply `structured_outputs`.
   supported_parameters?: string[] | null;
+  // Measured capability scores. Live-verified shape (2026-08-30, real API
+  // response): `design_arena` (an unrelated per-category ELO array) sits
+  // alongside `artificial_analysis`, which is what Free Mode ranks on. Absent
+  // entirely for a meaningful minority of models (no score, not a zero score).
+  benchmarks?: {
+    artificial_analysis?: {
+      intelligence_index?: number | null;
+      coding_index?: number | null;
+      agentic_index?: number | null;
+    } | null;
+  } | null;
 }
 
 interface OpenRouterListing {
@@ -118,6 +129,11 @@ interface CacheFileShape {
   // persisting it means Free Mode can pick a structured-output-capable Router
   // model on a warm-cache boot with no network fetch.
   supportedParameters?: Record<string, string[]>;
+  // Per-model `artificial_analysis` benchmark scores. Schema v3+ only — see
+  // PRICING_CACHE_SCHEMA. Same optional-for-back-compat posture as the fields
+  // above; a pre-v3 file simply has none, and is epoch-aged so it refetches
+  // instead of running scoreless for up to 24h.
+  benchmarks?: Record<string, { intelligence: number; coding: number; agentic: number }>;
 }
 
 const OPENROUTER_PRICING_URL = "https://openrouter.ai/api/v1/models";
@@ -130,18 +146,19 @@ const CACHE_FILENAME = "openrouter-pricing.json";
 /**
  * Cache-file schema version.
  *
+ * 3 — entries carry `benchmarks` (per-model `artificial_analysis` scores).
  * 2 — entries carry `cacheReadUsdPerMillion`.
  * 1 (or absent) — written before cache-read pricing existed.
  *
- * A v1 file is structurally stale no matter how young it is: without the cache
- * price every prompt token bills at the full input rate, which is the ~8x
- * over-report on swarm turns this version exists to fix. Left to the 24h TTL,
- * the operator would deploy the fix and keep seeing the old numbers for a day.
- * An explicit version is used rather than inferring from the entries, because
- * "no entry has the field" also describes a legitimately seeded in-memory
- * cache and would force a pointless network fetch there.
+ * A file below the current version is structurally stale no matter how young
+ * it is — e.g. a v2 file predates benchmark capture entirely, so Free Mode's
+ * score-based ranking would run with zero scores for up to 24h if the file
+ * were trusted as fresh. An explicit version is used rather than inferring
+ * from the entries, because "no entry has the field" also describes a
+ * legitimately seeded in-memory cache and would force a pointless network
+ * fetch there.
  */
-const PRICING_CACHE_SCHEMA = 2;
+const PRICING_CACHE_SCHEMA = 3;
 
 /**
  * PM #71 — pricing state lives on `globalThis`, NOT module scope. Next.js
@@ -160,6 +177,8 @@ interface PricingStore {
   contextLength: Map<string, number>;
   /** Per-model `supported_parameters`. Keys double as the full model-id list. */
   supportedParameters: Map<string, string[]>;
+  /** Per-model `artificial_analysis` benchmark scores. Absent = no score, not zero. */
+  benchmarks: Map<string, { intelligence: number; coding: number; agentic: number }>;
 }
 const PRICING_STORE_KEY = Symbol.for("orchestra.openrouter-pricing.store");
 function store(): PricingStore {
@@ -170,12 +189,14 @@ function store(): PricingStore {
     maxOutput: new Map(),
     contextLength: new Map(),
     supportedParameters: new Map(),
+    benchmarks: new Map(),
   });
   // Defensive backfill: a store created by an older bundle (dev HMR, where the
   // Symbol.for store survives a reload) may predate a newly-added map field.
   s.maxOutput ??= new Map();
   s.contextLength ??= new Map();
   s.supportedParameters ??= new Map();
+  s.benchmarks ??= new Map();
   return s;
 }
 
@@ -287,6 +308,7 @@ export async function fetchOpenRouterPricing(options: {
   const maxOut = new Map<string, number>();
   const ctxLen = new Map<string, number>();
   const supported = new Map<string, string[]>();
+  const benchmarks = new Map<string, { intelligence: number; coding: number; agentic: number }>();
   for (const entry of entries) {
     if (!entry?.id) continue;
     const id = entry.id.toLowerCase();
@@ -308,6 +330,18 @@ export async function fetchOpenRouterPricing(options: {
     if (typeof cl === "number" && cl > 0) ctxLen.set(id, cl);
     const mo = deriveUsableMaxOutput(entry.top_provider?.max_completion_tokens, cl);
     if (mo !== undefined) maxOut.set(id, mo);
+    // "No evidence, no credit" — only store when intelligence_index is a real
+    // number. A model with `benchmarks: null` (common — roughly a third of the
+    // live catalogue, including today's actual Free Mode brain) simply gets no
+    // entry, exactly like an id with no maxOutput.
+    const ai = entry.benchmarks?.artificial_analysis;
+    if (ai && typeof ai.intelligence_index === "number") {
+      benchmarks.set(id, {
+        intelligence: ai.intelligence_index,
+        coding: typeof ai.coding_index === "number" ? ai.coding_index : 0,
+        agentic: typeof ai.agentic_index === "number" ? ai.agentic_index : 0,
+      });
+    }
     const promptPerToken = parsePrice(entry.pricing?.prompt);
     const completionPerToken = parsePrice(entry.pricing?.completion);
     if (promptPerToken === null || completionPerToken === null) continue;
@@ -325,6 +359,7 @@ export async function fetchOpenRouterPricing(options: {
   store().maxOutput = maxOut;
   store().contextLength = ctxLen;
   store().supportedParameters = supported;
+  store().benchmarks = benchmarks;
   return map;
 }
 
@@ -413,6 +448,22 @@ export async function loadCachedOpenRouterPricing(): Promise<{
     }
     if (sp.size > 0) store().supportedParameters = sp;
   }
+  // Same for per-model benchmark scores. Schema v3+ only — a pre-v3 file has
+  // no `benchmarks` key at all, and `versionedFetchedAt` above already forces
+  // an immediate refetch for it, so leaving the map empty here is correct.
+  if (parsed.benchmarks && typeof parsed.benchmarks === "object") {
+    const bm = new Map<string, { intelligence: number; coding: number; agentic: number }>();
+    for (const [id, v] of Object.entries(parsed.benchmarks)) {
+      if (v && typeof v.intelligence === "number") {
+        bm.set(id.toLowerCase(), {
+          intelligence: v.intelligence,
+          coding: typeof v.coding === "number" ? v.coding : 0,
+          agentic: typeof v.agentic === "number" ? v.agentic : 0,
+        });
+      }
+    }
+    if (bm.size > 0) store().benchmarks = bm;
+  }
   return { pricing: map, fetchedAt: versionedFetchedAt };
 }
 
@@ -445,6 +496,10 @@ export async function saveCachedOpenRouterPricing(
     // Persist capabilities so Free Mode can pick a structured-output-capable
     // Router model on a warm-cache boot, before any network fetch lands.
     supportedParameters: Object.fromEntries(store().supportedParameters),
+    // Persist benchmark scores so Free Mode's score-based ranking survives a
+    // warm-cache boot instead of running scoreless (alphabetical) until the
+    // first network fetch lands.
+    benchmarks: Object.fromEntries(store().benchmarks),
   };
   await safeWriteFile(cachePath, JSON.stringify(payload, null, 2));
 }
@@ -597,6 +652,7 @@ export function __resetOpenRouterPricingForTests(): void {
   store().maxOutput = new Map();
   store().contextLength = new Map();
   store().supportedParameters = new Map();
+  store().benchmarks = new Map();
 }
 
 /**
@@ -680,6 +736,32 @@ export function __setOpenRouterSupportedParametersForTest(
   map: Map<string, string[]>
 ): void {
   store().supportedParameters = new Map(
+    Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
+  );
+}
+
+/**
+ * Per-model `artificial_analysis` benchmark score from the live OpenRouter
+ * `/models` cache. `undefined` means "no score" — either the catalogue hasn't
+ * loaded, or OpenRouter simply doesn't publish one for this model (common:
+ * roughly a third of the live free catalogue, including today's actual Free
+ * Mode brain, `dots-studio/dots-3-note-preview:free`). Callers must not treat
+ * an unscored model as scoring zero — see `sortFreeModelsByScore` in
+ * `free-mode.ts`, which sinks unscored ids to the bottom rather than crediting
+ * them with a fabricated low (or high) number.
+ */
+export function getOpenRouterBenchmarkScore(
+  modelId: string
+): { intelligence: number; coding: number; agentic: number } | undefined {
+  if (!modelId) return undefined;
+  return store().benchmarks.get(modelId.toLowerCase());
+}
+
+/** Test-only: seed the OpenRouter benchmark-score map without a network fetch. */
+export function __setOpenRouterBenchmarkScoreForTest(
+  map: Map<string, { intelligence: number; coding: number; agentic: number }>
+): void {
+  store().benchmarks = new Map(
     Array.from(map.entries()).map(([k, v]) => [k.toLowerCase(), v])
   );
 }

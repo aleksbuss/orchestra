@@ -31,6 +31,7 @@ import {
   getCachedOpenRouterPricing,
   getOpenRouterMaxOutput,
   getOpenRouterContextWindow,
+  getOpenRouterBenchmarkScore,
   isUsableMaxOutput,
   deriveUsableMaxOutput,
   ensureOpenRouterPricingRefreshScheduled,
@@ -40,6 +41,7 @@ import {
   __seedOpenRouterPricingForTests,
   __setOpenRouterMaxOutputForTest,
   __setOpenRouterContextLengthForTest,
+  __setOpenRouterBenchmarkScoreForTest,
 } from "./openrouter-pricing";
 import { getSettings } from "@/lib/storage/settings-store";
 
@@ -181,6 +183,67 @@ describe("PM #49 — fetchOpenRouterPricing", () => {
     expect(getOpenRouterContextWindow("absent/model")).toBeUndefined();
   });
 
+  it("captures per-model artificial_analysis benchmark scores, free models too — real live-verified numbers", async () => {
+    mockFetchOk({
+      data: [
+        {
+          // Real numbers, live-verified against the API 2026-08-30.
+          id: "z-ai/glm-5.2:free",
+          benchmarks: {
+            artificial_analysis: { intelligence_index: 52.6, coding_index: 68.8, agentic_index: 45.7 },
+          },
+        },
+        {
+          // benchmarks present but artificial_analysis absent — no score.
+          id: "vendor/design-arena-only:free",
+          benchmarks: { design_arena: [{ arena: "models", category: "3d", elo: 1175 }] },
+        },
+        {
+          // benchmarks: null entirely — no score (the common case; roughly a
+          // third of the live free catalogue, including today's actual brain).
+          id: "dots-studio/dots-3-note-preview:free",
+          benchmarks: null,
+        },
+        {
+          // no benchmarks key at all — no score.
+          id: "vendor/unscored:free",
+        },
+      ],
+    });
+    await fetchOpenRouterPricing();
+    expect(getOpenRouterBenchmarkScore("z-ai/glm-5.2:free")).toEqual({
+      intelligence: 52.6,
+      coding: 68.8,
+      agentic: 45.7,
+    });
+    // Case-insensitive lookup.
+    expect(getOpenRouterBenchmarkScore("Z-AI/GLM-5.2:free")).toEqual({
+      intelligence: 52.6,
+      coding: 68.8,
+      agentic: 45.7,
+    });
+    expect(getOpenRouterBenchmarkScore("vendor/design-arena-only:free")).toBeUndefined();
+    expect(getOpenRouterBenchmarkScore("dots-studio/dots-3-note-preview:free")).toBeUndefined();
+    expect(getOpenRouterBenchmarkScore("vendor/unscored:free")).toBeUndefined();
+  });
+
+  it("defaults missing coding_index/agentic_index to 0 when intelligence_index is present", async () => {
+    mockFetchOk({
+      data: [
+        {
+          id: "vendor/partial-score:free",
+          benchmarks: { artificial_analysis: { intelligence_index: 40.1 } },
+        },
+      ],
+    });
+    await fetchOpenRouterPricing();
+    expect(getOpenRouterBenchmarkScore("vendor/partial-score:free")).toEqual({
+      intelligence: 40.1,
+      coding: 0,
+      agentic: 0,
+    });
+  });
+
   it("throws on non-200 status (caller handles fallback)", async () => {
     mockFetchStatus(503, "Service Unavailable");
     await expect(fetchOpenRouterPricing()).rejects.toThrow(/503/);
@@ -267,6 +330,33 @@ describe("PM #49 — disk cache round-trip", () => {
     await loadCachedOpenRouterPricing();
     expect(getOpenRouterContextWindow("anthropic/claude-3.5-sonnet")).toBe(250000);
     expect(getOpenRouterContextWindow("meta/free-model")).toBe(8192);
+  });
+
+  it("persists & restores per-model benchmark scores — survives a warm-cache boot", async () => {
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["z-ai/glm-5.2:free", { intelligence: 52.6, coding: 68.8, agentic: 45.7 }],
+        ["nvidia/nemotron-3-ultra-550b-a55b:free", { intelligence: 38.3, coding: 49.3, agentic: 27.5 }],
+      ])
+    );
+    await saveCachedOpenRouterPricing(
+      new Map([["z-ai/glm-5.2:free", { inputUsdPerMillion: 0, outputUsdPerMillion: 0 }]]),
+      new Date("2026-01-01T00:00:00Z")
+    );
+    // Wipe in-memory, then reload from disk (the warm-cache path).
+    __setOpenRouterBenchmarkScoreForTest(new Map());
+    expect(getOpenRouterBenchmarkScore("z-ai/glm-5.2:free")).toBeUndefined();
+    await loadCachedOpenRouterPricing();
+    expect(getOpenRouterBenchmarkScore("z-ai/glm-5.2:free")).toEqual({
+      intelligence: 52.6,
+      coding: 68.8,
+      agentic: 45.7,
+    });
+    expect(getOpenRouterBenchmarkScore("nvidia/nemotron-3-ultra-550b-a55b:free")).toEqual({
+      intelligence: 38.3,
+      coding: 49.3,
+      agentic: 27.5,
+    });
   });
 
   it("loadCachedOpenRouterPricing returns null on corrupt JSON (no throw)", async () => {
@@ -667,10 +757,11 @@ describe("an unusable ceiling is DERIVED from the window, not dropped to the fla
   });
 });
 
-describe("a pre-v2 cache file must not satisfy the freshness check", () => {
-  // Without this, deploying the cache-read pricing fix changes nothing for up
-  // to 24h: the TTL keeps serving a file whose entries have no cache price, so
-  // the operator still sees the ~8x over-report on swarm turns after
+describe("a pre-v3 cache file must not satisfy the freshness check", () => {
+  // Without this, deploying the cache-read pricing fix (v2) or the benchmark
+  // capture (v3) changes nothing for up to 24h: the TTL keeps serving a file
+  // whose entries predate the fix, so the operator sees the old behavior
+  // (over-reported cost, or scoreless/alphabetical Free Mode ranking) after
   // installing the very fix for it.
 
   it("a file with no schemaVersion is treated as epoch-old", async () => {
@@ -681,7 +772,7 @@ describe("a pre-v2 cache file must not satisfy the freshness check", () => {
     // Strip the version the writer stamped, emulating a file written before it existed.
     const file = path.join(tempDir, "cache", "openrouter-pricing.json");
     const raw = JSON.parse(await fs.readFile(file, "utf8"));
-    expect(raw.schemaVersion).toBe(2); // the writer stamps it
+    expect(raw.schemaVersion).toBe(3); // the writer stamps it
     delete raw.schemaVersion;
     await fs.writeFile(file, JSON.stringify(raw));
 

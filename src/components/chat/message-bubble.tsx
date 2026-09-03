@@ -204,6 +204,19 @@ function MarkdownContent({ content }: { content: string }) {
             />
           );
         },
+        table({ children, ...props }) {
+          // GFM tables can be wider than the bubble (mobile viewport is the hard
+          // cap, unlike code blocks the table has no natural line-wrap). Scope
+          // the scroll to the table itself instead of the bubble, mirroring the
+          // overflow-x-auto pattern CodeBlock already uses for <pre>.
+          return (
+            <div className="my-2 max-w-full overflow-x-auto scrollbar-thin">
+              <table className="min-w-full" {...props}>
+                {children}
+              </table>
+            </div>
+          );
+        },
         ul({ children, ...props }) {
           return (
             <ul className="my-2 list-disc pl-6 space-y-1" {...props}>

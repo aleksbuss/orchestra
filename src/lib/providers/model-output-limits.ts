@@ -13,13 +13,50 @@
  *
  * The model's max comes from (a) the live OpenRouter `/models` metadata cache
  * (`max_completion_tokens`) when the provider is OpenRouter — injected at
- * runtime to avoid a cycle — else (b) a static family registry below.
+ * runtime to avoid a cycle — else (b) a static family registry below. On
+ * OpenRouter both are then clamped to `OPENROUTER_RELIABLE_MAX_OUTPUT`: the
+ * advertised ceiling is not the one the serving upstream accepts (PM #112).
  */
 import type { ModelConfig } from "@/lib/types";
 
-/** Generous, model-agnostic fallback when nothing else is known. Providers cap
- *  the request to their true max, so an over-estimate degrades gracefully. */
+/** Generous, model-agnostic fallback when nothing else is known. */
 export const DEFAULT_MAX_OUTPUT = 8192;
+
+/**
+ * Ceiling applied to the OpenRouter catalogue's advertised `max_completion_tokens`.
+ *
+ * PM #112 — the original version of this file assumed "providers cap the request
+ * to their true max, so an over-estimate degrades gracefully". That is FALSE for
+ * at least one upstream. Measured 2026-08-27 against
+ * `dots-studio/dots-3-note-preview:free`, whose catalogue entry advertises
+ * `top_provider.max_completion_tokens: 460800`:
+ *
+ *   max_tokens=262144 → HTTP 200
+ *   max_tokens=300000 → HTTP 200
+ *   max_tokens=400000 → HTTP 400  {"msg":"bad request"} from AtlasCloud
+ *   max_tokens=460800 → HTTP 400  (3/3, deterministic; same for
+ *                                  `max_completion_tokens`)
+ *
+ * OpenRouter surfaces that upstream 400 as `AI_APICallError: Provider returned
+ * error`, which `classifyModelError` reads as `unknown_4xx`. Free Mode drops the
+ * operator's `maxTokens` (its overlay carries provider+model only), so EVERY
+ * Free Mode turn took the unset branch, requested 460800, and died before the
+ * first token — for as long as that id stayed the selected brain.
+ *
+ * Why a flat ceiling instead of probing: the advertised number comes from
+ * `top_provider`, but the request is served by whichever upstream OpenRouter
+ * routes to, and that one publishes nothing. There is no value to read, only a
+ * value to distrust. Same shape as the reliable-context-window clamp (PM
+ * #82/#95) — advertised capacity is a marketing number, the clamp is the safe
+ * default — except this side is OUTPUT tokens, which had no clamp at all.
+ *
+ * 32768 is well above any answer Orchestra actually produces (the operator's own
+ * configured ceiling is 16384) and at or below what mainstream endpoints accept.
+ * It also bounds the token governor's reservation: `buildTokenGovernor` reserves
+ * headroom equal to this number, so an unclamped 460800 would have carved the
+ * reservation out of the input budget too.
+ */
+export const OPENROUTER_RELIABLE_MAX_OUTPUT = 32_768;
 
 /**
  * Static family registry — ordered MOST-SPECIFIC FIRST (the first substring
@@ -87,13 +124,34 @@ export function getModelMaxOutput(
   // OpenRouter: prefer the live `/models` metadata (the "query" — cached).
   if (provider === "openrouter" && openRouterMaxOutputLookup) {
     const dynamic = openRouterMaxOutputLookup(modelId);
-    if (dynamic && dynamic > 0) return dynamic;
+    if (dynamic && dynamic > 0) return clampForOpenRouter(provider, dynamic);
   }
 
   for (const [pattern, max] of FAMILY_LIMITS) {
-    if (id.includes(pattern)) return max;
+    if (id.includes(pattern)) return clampForOpenRouter(provider, max);
   }
   return undefined;
+}
+
+/**
+ * On OpenRouter, never trust a resolved ceiling above
+ * `OPENROUTER_RELIABLE_MAX_OUTPUT` — neither the catalogue's advertised
+ * `max_completion_tokens` nor a family-registry guess. Both describe the model;
+ * the request is served by whichever upstream OpenRouter routes to, and that one
+ * can — and does — 400 on the advertised number (PM #112).
+ *
+ * Applied to the family path too: `openrouter` + `openai/o1-…` resolves to
+ * 100_000 there, which is the same unverified-ceiling bet through a different
+ * door. Direct-provider callsites are untouched — those numbers are curated
+ * against the vendor's own documented limit.
+ */
+function clampForOpenRouter(
+  provider: ModelConfig["provider"],
+  value: number
+): number {
+  return provider === "openrouter"
+    ? Math.min(value, OPENROUTER_RELIABLE_MAX_OUTPUT)
+    : value;
 }
 
 /**

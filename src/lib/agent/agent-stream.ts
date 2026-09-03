@@ -4,6 +4,7 @@ import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
 import { classifyChatError } from "@/lib/observability/classify-error";
 import { getCurrentTraceId, log } from "@/lib/observability/logger";
 import { dumpPostmortem } from "@/lib/observability/postmortem";
+import { updateChat } from "@/lib/storage/chat-store";
 
 /**
  * §10 agent.ts decomposition — the agent-stream error-reporting seam.
@@ -69,6 +70,40 @@ export async function reportTurnError(
     projectId: ctx.projectId,
     payload,
   });
+
+  // Post-review (protake council, 2026-08-31) — the SSE event above is
+  // live-only: a user who isn't watching at the exact moment a turn dies (a
+  // free-tier retry ladder alone can run 20-30s) reloads to their last message
+  // and total silence, indistinguishable from Orchestra never having received
+  // it. `abort` is excluded — a user cancellation is an expected outcome, not a
+  // failure that needs a chat bubble. Best-effort: never let a failed persist
+  // turn this error-reporting path into a throw.
+  if (payload.kind !== "abort") {
+    try {
+      await updateChat(ctx.chatId, (chat) => {
+        const now = new Date().toISOString();
+        chat.messages.push({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            `⚠️ **Turn failed:** ${payload.message}${payload.hint ? `\n\n${payload.hint}` : ""}` +
+            // The hint frequently reads "check the server log for trace id" —
+            // pointless if the trace id isn't actually included (operator had
+            // to fish it out of stdout by hand the first time this shipped).
+            (payload.traceId ? `\n\n\`traceId: ${payload.traceId}\`` : ""),
+          createdAt: now,
+        });
+        chat.updatedAt = now;
+        return chat;
+      });
+    } catch (err) {
+      console.error(
+        "[agent-stream] failed to persist the turn-error message:",
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
+
   const traceId = getCurrentTraceId();
   if (traceId) {
     const dump = dumpPostmortem({

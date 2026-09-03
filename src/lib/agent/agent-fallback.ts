@@ -2,8 +2,10 @@ import {
   classifyModelError,
   pickFallbackModel,
   describeFallback,
+  describeUpstreamFailure,
 } from "@/lib/providers/model-fallback";
 import { publishChatErrorEvent, publishUiSyncEvent } from "@/lib/realtime/event-bus";
+import { resolveWorkerKey } from "@/lib/agent/moa-personas";
 import { saveSettings } from "@/lib/storage/settings-store";
 import { getCurrentTraceId, log } from "@/lib/observability/logger";
 import type { AppSettings } from "@/lib/types";
@@ -59,10 +61,18 @@ export async function attemptModelFallback(
       return;
     }
 
+    // PM #112 / PM #99 family — `chatModel.apiKey` alone is the wrong source.
+    // It is empty for every vault-only install, and in Free Mode the overlay
+    // carries provider+model ONLY, so the field cannot exist at all. Resolve
+    // through the same chokepoint the model factory uses so a vault key is
+    // found; an env-only key still resolves to nothing here, which is fine —
+    // `pickFallbackModel` no longer treats a missing key as a dead end.
+    const keyedChatModel = resolveWorkerKey(chatModel, settings);
+
     const result = await pickFallbackModel({
       provider: chatModel.provider,
       failedModel: chatModel.model,
-      apiKey: chatModel.apiKey || undefined,
+      apiKey: keyedChatModel.apiKey || undefined,
       baseUrl: (chatModel as { baseUrl?: string }).baseUrl,
     });
 
@@ -73,7 +83,13 @@ export async function attemptModelFallback(
         failedModel: chatModel.model,
         failureKind,
       });
-      await persistNoCandidateNotice(chatId, projectId, chatModel.provider, chatModel.model);
+      await persistNoCandidateNotice(
+        chatId,
+        projectId,
+        chatModel.provider,
+        chatModel.model,
+        describeUpstreamFailure(error)
+      );
       return;
     }
 
@@ -147,12 +163,21 @@ export async function attemptModelFallback(
  * Written only when the turn delivered NOTHING — if the last message is already
  * an assistant message, some other path (the daemon's own error write, a partial
  * answer, a degradation notice) has spoken and this must not talk over it.
+ *
+ * PM #112 — the first version of this notice asserted a cause it had never
+ * checked: "every alternative endpoint is currently circuit-broken (usually: the
+ * free tier is exhausted or rate-limited)". No breaker was consulted on this
+ * path, and the real failure was an upstream 400 on a `max_tokens` Orchestra
+ * itself chose. The operator waited for a recovery that could not happen,
+ * because the message told them to. State the upstream's own words and the fact
+ * that no substitute was found — nothing more.
  */
 async function persistNoCandidateNotice(
   chatId: string,
   projectId: string | null | undefined,
   provider: string,
-  failedModel: string
+  failedModel: string,
+  upstreamDetail: string | null
 ): Promise<void> {
   try {
     const { getChat, updateChat } = await import("@/lib/storage/chat-store");
@@ -165,13 +190,17 @@ async function persistNoCandidateNotice(
         id: crypto.randomUUID(),
         role: "assistant",
         content:
-          `**No answer this turn — the model endpoint failed and there was nothing to fall back to.**\n\n` +
-          `\`${provider}/${failedModel}\` returned an error, and every alternative endpoint is ` +
-          `currently circuit-broken (usually: the free tier is exhausted or rate-limited).\n\n` +
+          `**No answer this turn — the model endpoint failed and no substitute was found.**\n\n` +
+          `\`${provider}/${failedModel}\` failed` +
+          (upstreamDetail ? `: ${upstreamDetail}` : ` (no detail from the provider)`) +
+          `.\nOrchestra searched \`${provider}\`'s model list for a tool-capable ` +
+          `replacement and found none it could use.\n\n` +
           `Nothing was lost — your message is saved. What helps:\n` +
-          `- wait a few minutes for the endpoints to recover, or\n` +
-          `- turn Free Mode off and use a model you hold a key for, or\n` +
-          `- point the chat model at a different provider in Settings.\n\n` +
+          `- if that reads as a rate limit or an outage, wait a few minutes and resend;\n` +
+          `- if it reads as a rejected request, the model is likely refusing something ` +
+          `Orchestra sent — check the run's postmortem under \`data/postmortems/\`;\n` +
+          `- turn Free Mode off and use a model you hold a key for, or point the chat ` +
+          `model at a different provider in Settings.\n\n` +
           `_Orchestra does not fabricate an answer when it has no model to produce one._`,
         createdAt: new Date().toISOString(),
       });

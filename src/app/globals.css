@@ -176,6 +176,31 @@
     display: none;
   }
 
+  /* Always-visible thin scrollbar for horizontally-scrollable content inside
+     a message bubble (GFM tables). macOS overlay scrollbars auto-hide until
+     hovered, which makes a correctly-scrollable overflow-x-auto region look
+     like clipped/cut-off text instead of a scroll affordance. */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 3px;
+  }
+
+  .dark .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+  }
+
   /* Shimmer animation for thinking indicator progress bar */
   .animate-shimmer {
     animation: shimmer 2s ease-in-out infinite;

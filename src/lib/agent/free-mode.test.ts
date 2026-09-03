@@ -1,16 +1,19 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   selectFreeModels,
   isGeneralChatModel,
   applyFreeMode,
   isFreeModeEnabled,
   describeFreeModeSelection,
+  sortFreeModelsByScore,
   FREE_ROUTER_FALLBACKS,
 } from "./free-mode";
 import {
   __setOpenRouterSupportedParametersForTest,
+  __setOpenRouterBenchmarkScoreForTest,
   __resetOpenRouterPricingForTests,
 } from "@/lib/cost/openrouter-pricing";
+import { resetModelHealth, recordModelFailure, isModelCircuitOpen } from "@/lib/agent/model-health";
 import type { AppSettings } from "@/lib/types";
 
 /** Minimal settings — only what Free Mode reads or overlays. */
@@ -186,6 +189,131 @@ describe("Free Mode — model selection", () => {
   });
 });
 
+/**
+ * PM #113 — the brain used to be picked by plain alphabetical sort with no
+ * notion of capability. Live-verified real numbers (2026-08-30): a 550B free
+ * model (`nvidia/nemotron-3-ultra-550b-a55b:free`) scores WORSE
+ * (intelligence 38.3) than several smaller free models — this is why the
+ * ranking metric is a measured score, not parameter count.
+ */
+describe("sortFreeModelsByScore — real benchmark data, strongest first", () => {
+  const originalRank = process.env.ORCHESTRA_FREE_MODE_RANK;
+
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+    delete process.env.ORCHESTRA_FREE_MODE_RANK;
+  });
+
+  afterEach(() => {
+    if (originalRank === undefined) delete process.env.ORCHESTRA_FREE_MODE_RANK;
+    else process.env.ORCHESTRA_FREE_MODE_RANK = originalRank;
+  });
+
+  function seedScores(entries: Array<[string, { intelligence: number; coding: number; agentic: number }]>) {
+    __setOpenRouterBenchmarkScoreForTest(new Map(entries));
+  }
+
+  it("ranks by intelligence_index, highest first — real live numbers", () => {
+    seedScores([
+      ["nvidia/nemotron-3-ultra-550b-a55b:free", { intelligence: 38.3, coding: 49.3, agentic: 27.5 }],
+      ["z-ai/glm-5.2:free", { intelligence: 52.6, coding: 68.8, agentic: 45.7 }],
+      ["minimax/minimax-m3:free", { intelligence: 45.4, coding: 58.6, agentic: 36.1 }],
+    ]);
+    const ranked = sortFreeModelsByScore([
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "z-ai/glm-5.2:free",
+      "minimax/minimax-m3:free",
+    ]);
+    // The 550B model does NOT win, despite being the largest — it scores worst.
+    expect(ranked).toEqual([
+      "z-ai/glm-5.2:free",
+      "minimax/minimax-m3:free",
+      "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ]);
+  });
+
+  it("tie-breaks on agentic_index before coding_index (Orchestra is a tool-calling agent)", () => {
+    seedScores([
+      ["v/a:free", { intelligence: 50, coding: 90, agentic: 30 }],
+      ["v/b:free", { intelligence: 50, coding: 40, agentic: 70 }],
+    ]);
+    // Same intelligence; v/b wins on agentic despite a much lower coding score.
+    expect(sortFreeModelsByScore(["v/a:free", "v/b:free"])).toEqual(["v/b:free", "v/a:free"]);
+  });
+
+  it("sinks unscored ids to the bottom — no evidence, no credit — and tie-breaks them alphabetically", () => {
+    seedScores([["v/scored:free", { intelligence: 10, coding: 10, agentic: 10 }]]);
+    expect(sortFreeModelsByScore(["v/z-unscored:free", "v/a-unscored:free", "v/scored:free"])).toEqual([
+      "v/scored:free",
+      "v/a-unscored:free",
+      "v/z-unscored:free",
+    ]);
+  });
+
+  it("with NO scores seeded anywhere, degrades to plain alphabetical (identical to the old behavior)", () => {
+    expect(sortFreeModelsByScore(["v/c:free", "v/a:free", "v/b:free"])).toEqual([
+      "v/a:free",
+      "v/b:free",
+      "v/c:free",
+    ]);
+  });
+
+  it("ORCHESTRA_FREE_MODE_RANK=legacy restores plain alphabetical even with scores seeded", () => {
+    seedScores([["v/weak:free", { intelligence: 1, coding: 1, agentic: 1 }]]);
+    process.env.ORCHESTRA_FREE_MODE_RANK = "legacy";
+    expect(sortFreeModelsByScore(["v/strong:free", "v/weak:free"])).toEqual([
+      "v/strong:free",
+      "v/weak:free",
+    ]);
+  });
+});
+
+describe("Free Mode — score ranking picks the actually-strongest capable brain", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+    delete process.env.ORCHESTRA_FREE_MODE_RANK;
+  });
+
+  it("brain is the highest-scoring tool+structured id, not the alphabetically-first one", () => {
+    seedCatalogue([
+      ["aaa/weak:free", ["tools", "structured_outputs"]],
+      ["zzz/strong:free", ["tools", "structured_outputs"]],
+    ]);
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["aaa/weak:free", { intelligence: 20, coding: 20, agentic: 20 }],
+        ["zzz/strong:free", { intelligence: 80, coding: 80, agentic: 80 }],
+      ])
+    );
+    const s = selectFreeModels();
+    // Alphabetically "aaa/weak" would win under the old behavior — the whole
+    // point of this feature is that it does not.
+    expect(s.chatModel.model).toBe("zzz/strong:free");
+  });
+
+  it("frontier proposer tier gets a stronger-scored model than the fast tier", () => {
+    seedCatalogue([
+      ["v/brain:free", ["tools", "structured_outputs"]],
+      ["v/strongest:free", ["tools"]],
+      ["v/middle:free", ["tools"]],
+      ["v/weakest:free", ["tools"]],
+    ]);
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["v/brain:free", { intelligence: 90, coding: 90, agentic: 90 }],
+        ["v/strongest:free", { intelligence: 70, coding: 70, agentic: 70 }],
+        ["v/middle:free", { intelligence: 50, coding: 50, agentic: 50 }],
+        ["v/weakest:free", { intelligence: 10, coding: 10, agentic: 10 }],
+      ])
+    );
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("v/brain:free");
+    // frontier should be the strongest of the three non-brain models.
+    expect(s.proposerTiers.frontier.model).toBe("v/strongest:free");
+    expect(s.proposerTiers.fast.model).toBe("v/weakest:free");
+  });
+});
+
 describe("Free Mode — applying the overlay", () => {
   beforeEach(() => {
     __resetOpenRouterPricingForTests();
@@ -342,6 +470,59 @@ describe("exclusion is a preference, not a hard filter (council review gaps)", (
   });
 });
 
+/**
+ * PM #116 — protake council round 2 (2026-08-31), triggered by a live 9-hour
+ * sustained repro: the breaker existed but was only ever consulted for
+ * WITHIN-turn substitution, after the doomed top-scored model had already been
+ * picked. A fresh `selectFreeModels()` call for the NEXT turn had no memory of
+ * that model's own recent failures and picked it again — every operator
+ * independently converges on the same globally-throttled "best" free model.
+ */
+describe("PM #116 — a circuit-open id is excluded from selection, not just within-turn substitution", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+    resetModelHealth();
+  });
+  afterEach(() => {
+    resetModelHealth();
+  });
+
+  it("skips a circuit-open top-scored model for both brain AND router", () => {
+    seedCatalogue([
+      ["vendor/aaa-throttled:free", ["tools", "structured_outputs"]],
+      ["vendor/zzz-healthy:free", ["tools", "structured_outputs"]],
+    ]);
+    for (let i = 0; i < 3; i++) recordModelFailure("openrouter", "vendor/aaa-throttled:free", "throttle");
+    expect(isModelCircuitOpen("openrouter", "vendor/aaa-throttled:free")).toBe(true);
+
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("vendor/zzz-healthy:free");
+    expect(s.utilityModel.model).toBe("vendor/zzz-healthy:free");
+    expect(s.excludedUnhealthyIds).toEqual(["vendor/aaa-throttled:free"]);
+    expect(s.healthyPoolEmptied).toBe(false);
+  });
+
+  it("falls back to the raw catalogue when EVERY scored id is circuit-open, and says so — never a silent empty pool", () => {
+    const ids = ["vendor/aaa-throttled:free", "vendor/bbb-also-throttled:free"];
+    seedCatalogue(ids.map((id) => [id, ["tools", "structured_outputs"]]));
+    for (const id of ids) {
+      for (let i = 0; i < 3; i++) recordModelFailure("openrouter", id, "throttle");
+    }
+
+    const s = selectFreeModels();
+    expect(s.healthyPoolEmptied).toBe(true);
+    expect(s.chatModel.model).toContain("vendor/");
+    expect(describeFreeModeSelection(s)).toContain("ABANDONED");
+  });
+
+  it("does not claim a health exclusion on the fallback-list path", () => {
+    const s = selectFreeModels();
+    expect(s.source).toBe("fallback-list");
+    expect(s.excludedUnhealthy).toBe(0);
+    expect(s.healthyPoolEmptied).toBe(false);
+  });
+});
+
 describe("dropped ids are named, not just counted", () => {
   beforeEach(() => __resetOpenRouterPricingForTests());
 
@@ -357,5 +538,52 @@ describe("dropped ids are named, not just counted", () => {
     const s = selectFreeModels();
     expect(s.excludedNonChatIds).toEqual(["vendor/aaa-content-safety:free"]);
     expect(describeFreeModeSelection(s)).toContain("vendor/aaa-content-safety:free");
+  });
+});
+
+/**
+ * PM #112 — constraint 3 ("slots should NOT share one endpoint") was written
+ * about the proposer fan-out and left the brain/Router pair out. Both resolve to
+ * "the first structured-capable id, sorted", so they landed on the SAME model by
+ * construction. When that upstream started rejecting requests, it took the
+ * brain, the Router and the fallback probe with it.
+ */
+describe("Free Mode — the Router must not sit on the brain's endpoint", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+  });
+
+  it("gives the Router a DIFFERENT model when another structured-capable id exists", () => {
+    seedCatalogue([
+      ["aaa/first:free", ["tools", "structured_outputs"]],
+      ["bbb/second:free", ["tools", "structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    // The brain takes the first tool+structured id; the Router must skip it.
+    expect(s.chatModel.model).toBe("aaa/first:free");
+    expect(s.utilityModel.model).toBe("bbb/second:free");
+    expect(s.routerSharesBrainEndpoint).toBe(false);
+  });
+
+  it("shares rather than leaving the Router empty when it is the ONLY structured id", () => {
+    seedCatalogue([
+      ["aaa/only-structured:free", ["tools", "structured_outputs"]],
+      ["bbb/plain:free", ["tools"]],
+    ]);
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("aaa/only-structured:free");
+    expect(s.utilityModel.model).toBe("aaa/only-structured:free");
+    // A Router on the brain's endpoint still works; no Router does not. But the
+    // concentration must be REPORTED, not inferred from two matching strings.
+    expect(s.routerSharesBrainEndpoint).toBe(true);
+    expect(describeFreeModeSelection(s)).toMatch(/SHARES the brain's endpoint/);
+  });
+
+  it("says nothing about sharing when the slots are already split", () => {
+    seedCatalogue([
+      ["aaa/first:free", ["tools", "structured_outputs"]],
+      ["bbb/second:free", ["tools", "structured_outputs"]],
+    ]);
+    expect(describeFreeModeSelection(selectFreeModels())).not.toMatch(/SHARES/);
   });
 });

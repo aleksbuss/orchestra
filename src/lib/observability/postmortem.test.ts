@@ -183,6 +183,108 @@ describe("dumpPostmortem — happy path", () => {
     expect(pm?.rawError.orchestraStreamStall).toBe("idle");
   });
 
+  /**
+   * PM #112 — an `AI_APICallError` carries the upstream's status and body, and
+   * the summary dropped both. What survived was
+   * `AI_APICallError: Provider returned error`, which is what a rate limit, an
+   * outage and a rejected request all look like. The discarded body said
+   * `{"code":400,"msg":"bad request"}` and named the serving provider — the
+   * whole diagnosis, thrown away on the error path. Reconstructing it meant
+   * re-running the request by hand against the live API.
+   */
+  it("keeps the upstream statusCode + responseBody from an AI_APICallError", async () => {
+    const apiErr = Object.assign(new Error("Provider returned error"), {
+      name: "AI_APICallError",
+      statusCode: 400,
+      responseBody: '{"code":400,"msg":"bad request","provider":"AtlasCloud"}',
+    });
+
+    await dumpPostmortem({
+      traceId: "T-upstream",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: apiErr,
+    });
+
+    const pm = await loadPostmortem("T-upstream");
+    expect(pm?.rawError.statusCode).toBe(400);
+    expect(pm?.rawError.responseBody).toContain("AtlasCloud");
+  });
+
+  /**
+   * PM #114 — `streamText`'s own retry loop exhausting throws `AI_RetryError`,
+   * not the bare `AI_APICallError` PM #112's test above covers. `RetryError`
+   * has no `statusCode`/`responseBody` of its own; the real upstream detail
+   * sits one level down at `.lastError` (`node_modules/ai/src/util/retry-
+   * error.ts`). Live-observed: two Free Mode turns both died as
+   * `AI_RetryError: Failed after 4 attempts. Last error: Provider returned
+   * error`, and the resulting postmortem had neither field — PM #112's fix
+   * was a no-op on exactly the retry-exhaustion path it exists for.
+   */
+  it("unwraps statusCode + responseBody from an AI_RetryError's lastError", async () => {
+    const apiErr = Object.assign(new Error("Provider returned error"), {
+      name: "AI_APICallError",
+      statusCode: 429,
+      responseBody: '{"code":429,"msg":"rate limited","provider":"z-ai"}',
+    });
+    const retryErr = Object.assign(
+      new Error("Failed after 4 attempts. Last error: Provider returned error"),
+      { name: "AI_RetryError", reason: "maxRetriesExceeded", errors: [apiErr], lastError: apiErr }
+    );
+
+    await dumpPostmortem({
+      traceId: "T-retrywrap",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: retryErr,
+    });
+
+    const pm = await loadPostmortem("T-retrywrap");
+    expect(pm?.rawError.name).toBe("AI_RetryError");
+    expect(pm?.rawError.statusCode).toBe(429);
+    expect(pm?.rawError.responseBody).toContain("z-ai");
+  });
+
+  it("truncates a huge response body instead of writing it whole", async () => {
+    const apiErr = Object.assign(new Error("Provider returned error"), {
+      name: "AI_APICallError",
+      statusCode: 500,
+      responseBody: "y".repeat(200_000),
+    });
+
+    await dumpPostmortem({
+      traceId: "T-hugebody",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: apiErr,
+    });
+
+    const pm = await loadPostmortem("T-hugebody");
+    expect(pm?.rawError.responseBody?.length).toBeLessThan(3000);
+    expect(pm?.rawError.responseBody).toMatch(/\[truncated\]$/);
+  });
+
+  it("adds no upstream fields for an error that has none", async () => {
+    await dumpPostmortem({
+      traceId: "T-nostatus",
+      chatId: "c-1",
+      request: { userMessage: "test", swarmEnabled: false },
+      settings: sampleSettings(),
+      errorClassification: sampleClassification,
+      err: new Error("boom"),
+    });
+
+    const pm = await loadPostmortem("T-nostatus");
+    expect(pm?.rawError.statusCode).toBeUndefined();
+    expect(pm?.rawError.responseBody).toBeUndefined();
+  });
+
   it("does NOT invent a stall marker for an ordinary error", async () => {
     await dumpPostmortem({
       traceId: "T-plain",

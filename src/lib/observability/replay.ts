@@ -52,38 +52,46 @@ export interface ReplayResult {
 function reconstructErrorForReplay(pm: PostmortemFile): unknown {
   const { rawError, errorClassification } = pm;
 
-  // The classifier specifically detects `AI_APICallError`-shaped values
-  // by `name` and `statusCode`. PM files don't store statusCode directly,
-  // but the original ChatErrorPayload kind tells us what bucket the error
-  // fell into; we synthesize a matching shape.
+  // The classifier specifically detects `AI_APICallError`-shaped values by
+  // `name` and `statusCode`. Files dumped since PM #112 carry the REAL
+  // `statusCode` / `responseBody`, so those are used verbatim; older files
+  // carry neither, and for them the original ChatErrorPayload kind tells us
+  // what bucket the error fell into and we synthesize a matching shape. The
+  // per-kind numbers below are therefore back-compat defaults, not the
+  // preferred source.
   if (errorClassification.kind === "upstream_no_tools") {
     return {
       name: "AI_APICallError",
-      statusCode: 404,
-      responseBody: JSON.stringify({
-        error: { message: "No endpoints found that support tool use." },
-      }),
+      statusCode: rawError.statusCode ?? 404,
+      responseBody:
+        rawError.responseBody ??
+        JSON.stringify({
+          error: { message: "No endpoints found that support tool use." },
+        }),
       message: rawError.message,
     };
   }
   if (errorClassification.kind === "upstream_rate_limit") {
     return {
       name: "AI_APICallError",
-      statusCode: 429,
+      statusCode: rawError.statusCode ?? 429,
+      responseBody: rawError.responseBody,
       message: rawError.message,
     };
   }
   if (errorClassification.kind === "upstream_4xx") {
     return {
       name: "AI_APICallError",
-      statusCode: 400,
+      statusCode: rawError.statusCode ?? 400,
+      responseBody: rawError.responseBody,
       message: rawError.message,
     };
   }
   if (errorClassification.kind === "upstream_5xx") {
     return {
       name: "AI_APICallError",
-      statusCode: 503,
+      statusCode: rawError.statusCode ?? 503,
+      responseBody: rawError.responseBody,
       message: rawError.message,
     };
   }

@@ -18,6 +18,16 @@
  * on the `:free` id suffix via `isFreeTierModel`, so selecting free ids engages
  * every layer automatically. There is no second switch to forget.
  *
+ * RANKING BASIS: the candidate pool is ordered by real OpenRouter benchmark
+ * score (`sortFreeModelsByScore` — `intelligence_index`, then `agentic_index`,
+ * then `coding_index` as tiebreaks; ids with no score sink to the bottom and
+ * tie-break alphabetically), NOT by parameter count. A real 550B free model
+ * (`nvidia/nemotron-3-ultra-550b-a55b:free`) was live-measured scoring WORSE
+ * (intelligence 38.3) than several smaller free models — size is not a proxy
+ * for capability here, so this ranks on the measured thing directly.
+ * `ORCHESTRA_FREE_MODE_RANK=legacy` restores the pre-existing plain
+ * alphabetical sort with no redeploy, if the live ranking looks wrong.
+ *
  * THREE CONSTRAINTS DRIVE THE SELECTION:
  *
  * 1. **The Router needs `structured_outputs`.** Persona generation and the
@@ -46,12 +56,20 @@
  *    everyone. When nothing tool-capable exists we still run — and say so, so
  *    the degradation is visible instead of silent.
  *
- * 3. **Proposers should NOT share one endpoint.** A free endpoint under load
+ * 3. **Slots should NOT share one endpoint — the brain/Router pair included.**
+ *    A free endpoint under load
  *    returns HTTP 200 with an empty body, and the trigger is exactly the shape
  *    MoA generates: 3-5 proposers firing at one shared endpoint through one key.
  *    Pacing bounds the burst in time; spreading the tiers across DIFFERENT free
  *    models spreads it across different upstream quotas, which is the cheaper
  *    fix because it removes the contention instead of queueing behind it.
+ *
+ *    PM #112 — this was written about the proposer fan-out only, and the
+ *    brain/Router pair was left sharing one model because both are "the first
+ *    structured-capable id, sorted". Concentration is not only a throughput
+ *    problem: when that one upstream started rejecting requests, it took the
+ *    brain, the Router and the fallback probe together. The Router now prefers a
+ *    different id, and says so when it cannot get one.
  *
  * NOT A PRESET WRITE: `applyFreeMode` returns a NEW settings object. Nothing is
  * persisted, so a user who flips Free off has their paid configuration back
@@ -61,9 +79,11 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   listOpenRouterModelIds,
   modelSupportsStructuredOutputs,
+  getOpenRouterBenchmarkScore,
 } from "@/lib/cost/openrouter-pricing";
 import { isFreeTierModel } from "@/lib/agent/proposer-pacing";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
+import { isModelCircuitOpen } from "@/lib/agent/model-health";
 
 /**
  * Used when the live catalogue has not loaded (cold boot before the first
@@ -107,6 +127,19 @@ export interface FreeModeSelection {
   /** How many distinct free endpoints the proposer tiers span (1-3). */
   endpointSpread: number;
   /**
+   * True when the Router had to reuse the brain's model because no OTHER free
+   * id advertising `structured_outputs` existed.
+   *
+   * PM #112 — constraint 3 below ("proposers should NOT share one endpoint") was
+   * written about the proposer fan-out and silently left the brain/Router pair
+   * out. Both are picked "first structured-capable id, sorted", so they landed
+   * on the SAME model by construction, and one upstream having a bad day took
+   * the whole turn — brain, Router and the fallback probe alike. Preferring a
+   * different Router removes the collision when the pool allows it; this flag
+   * reports the case where it does not.
+   */
+  routerSharesBrainEndpoint: boolean;
+  /**
    * False when no free model advertising `structured_outputs` could be found.
    * The run still works, but the Router will use static personas and tournament
    * mode will fall back to synthesis — the caller should say so out loud.
@@ -139,6 +172,27 @@ export interface FreeModeSelection {
    * filter exists to prevent — it must be visible, not inferred from a count.
    */
   exclusionEmptiedPool: boolean;
+  /**
+   * PM #116 — how many candidate ids were excluded because their circuit
+   * breaker is currently OPEN (recent endpoint-side failures). Before this,
+   * `selectFreeModels()` ranked and picked with zero memory of a model's own
+   * recent health — the breaker existed but was consulted only for WITHIN-turn
+   * substitution, after the doomed model had already been picked. A fresh
+   * `selectFreeModels()` call for the NEXT turn had no idea the top-scored
+   * model had just failed and picked it again — live-observed hammering the
+   * same shared-pool-throttled model for 9+ sustained hours.
+   */
+  excludedUnhealthy: number;
+  /** WHICH ids were excluded for an open circuit — same rationale as `excludedNonChatIds`. */
+  excludedUnhealthyIds: string[];
+  /**
+   * True when EVERY scored id had an open circuit, so the health filter was
+   * abandoned and the full (unfiltered) catalogue used instead — protake
+   * council review flagged this exact fallback as mandatory: reintroducing the
+   * "silent empty pool" bug class one layer up from where it was fixed
+   * tonight (PM #115) would be worse than the thing being fixed.
+   */
+  healthyPoolEmptied: boolean;
 }
 
 function cfg(model: string): ModelConfig {
@@ -156,6 +210,38 @@ function cfg(model: string): ModelConfig {
 function spread(pool: readonly string[], n: number): string[] {
   if (pool.length === 0) return [];
   return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
+}
+
+/**
+ * Order free model ids by measured capability, strongest first.
+ *
+ * Primary key `intelligence_index` (general capability); `agentic_index` is
+ * the first tiebreak rather than `coding_index` — Orchestra is a tool-calling
+ * agent, not a code-completion tool, so that field is the closer match for
+ * "which model should drive this turn." `coding_index` is the second tiebreak.
+ * An id with no benchmark data (roughly a third of the live free catalogue,
+ * including today's actual brain, `dots-studio/dots-3-note-preview:free`)
+ * sinks to the bottom and tie-breaks alphabetically among other unscored ids —
+ * "no evidence, no credit," the same principle `pickBrain` already uses for
+ * capability gating. Plain compare, not `localeCompare`, for determinism
+ * across runtimes (`spread()`'s "same catalogue -> same assignment" contract).
+ *
+ * `ORCHESTRA_FREE_MODE_RANK=legacy` restores the original plain alphabetical
+ * sort with no redeploy.
+ */
+export function sortFreeModelsByScore(ids: readonly string[]): string[] {
+  if (process.env.ORCHESTRA_FREE_MODE_RANK === "legacy") return [...ids].sort();
+  return [...ids].sort((a, b) => {
+    const sa = getOpenRouterBenchmarkScore(a);
+    const sb = getOpenRouterBenchmarkScore(b);
+    const intelligenceDiff = (sb?.intelligence ?? -1) - (sa?.intelligence ?? -1);
+    if (intelligenceDiff !== 0) return intelligenceDiff;
+    const agenticDiff = (sb?.agentic ?? -1) - (sa?.agentic ?? -1);
+    if (agenticDiff !== 0) return agenticDiff;
+    const codingDiff = (sb?.coding ?? -1) - (sa?.coding ?? -1);
+    if (codingDiff !== 0) return codingDiff;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
 }
 
 /** Free OpenRouter ids are always reached through the `openrouter` provider. */
@@ -236,10 +322,21 @@ export function isGeneralChatModel(id: string): boolean {
 
 export function selectFreeModels(): FreeModeSelection {
   // Sorted so selection is stable across processes — catalogue order is not.
-  const catalogue = listOpenRouterModelIds().filter(isFreeTierModel).sort();
+  const catalogue = sortFreeModelsByScore(listOpenRouterModelIds().filter(isFreeTierModel));
 
   const live = catalogue.length > 0;
-  const chatCapable = catalogue.filter(isGeneralChatModel);
+
+  // PM #116 — exclude a circuit-open id BEFORE ranking/picking, not just at
+  // within-turn substitution time. Same idiom as the chatCapable filter below
+  // (preference, not a hard filter): if every scored id happens to have an
+  // open circuit, fall back to the unfiltered catalogue rather than zeroing
+  // the pool — a temporarily-tripped breaker is not "no free models exist".
+  const healthy = catalogue.filter((id) => !isModelCircuitOpen("openrouter", id));
+  const healthyPoolEmptied = live && catalogue.length > 0 && healthy.length === 0;
+  const workingCatalogue = healthyPoolEmptied ? catalogue : healthy;
+  const excludedUnhealthyIds = catalogue.filter((id) => !workingCatalogue.includes(id));
+
+  const chatCapable = workingCatalogue.filter(isGeneralChatModel);
 
   // The Router pool is drawn from the CHAT-capable set, not the raw catalogue.
   // A moderation classifier can legitimately advertise `structured_outputs` —
@@ -247,7 +344,7 @@ export function selectFreeModels(): FreeModeSelection {
   // selected as Router. That failure is worse than a bad proposer: a dead
   // proposer is dropped and the ensemble degrades, whereas a Router that
   // cannot write personas takes the swarm's role specialisation with it.
-  const structured = (chatCapable.length > 0 ? chatCapable : catalogue).filter(
+  const structured = (chatCapable.length > 0 ? chatCapable : workingCatalogue).filter(
     (id) => modelSupportsStructuredOutputs(id) === true
   );
   const routerPool = structured.length > 0 ? structured : FREE_ROUTER_FALLBACKS;
@@ -262,9 +359,16 @@ export function selectFreeModels(): FreeModeSelection {
   // Mode failing shut because this week's free list happens to look odd would
   // be worse than the thing being fixed.
   const exclusionEmptiedPool = live && chatCapable.length === 0;
-  const generalPool = live ? (exclusionEmptiedPool ? catalogue : chatCapable) : FREE_GENERAL_FALLBACKS;
+  const generalPool = live ? (exclusionEmptiedPool ? workingCatalogue : chatCapable) : FREE_GENERAL_FALLBACKS;
 
   const brain = pickBrain(generalPool, structured);
+
+  // Router on a DIFFERENT endpoint from the brain where the pool allows it
+  // (PM #112). `routerPool[0]` and `pickBrain` both resolve to the first
+  // structured-capable id, so taking [0] unconditionally guaranteed a
+  // collision. Falls back to sharing rather than leaving the slot empty — a
+  // Router on the brain's endpoint still works; no Router does not.
+  const router = routerPool.find((id) => id !== brain) ?? routerPool[0];
 
   // Spread the three proposer tiers across DISTINCT endpoints where possible.
   // Rotating the pool to start AFTER the brain keeps the brain's endpoint out
@@ -279,20 +383,32 @@ export function selectFreeModels(): FreeModeSelection {
 
   return {
     chatModel: cfg(brain),
-    utilityModel: cfg(routerPool[0]),
+    utilityModel: cfg(router),
+    // `rotated` (and so `tiers`) is now score-descending after the brain, not
+    // alphabetical — `tiers[0]` is the strongest of the three, so it goes to
+    // `frontier`, not `fast`. Under the pre-ranking behavior this mapping
+    // didn't matter (the array order carried no meaning); now it does, or the
+    // tier names would lie about which proposer is actually the strongest.
     proposerTiers: {
-      fast: cfg(tiers[0]),
+      frontier: cfg(tiers[0]),
       balanced: cfg(tiers[1]),
-      frontier: cfg(tiers[2]),
+      fast: cfg(tiers[2]),
     },
     source: live ? "live-catalogue" : "fallback-list",
     endpointSpread: new Set(tiers).size,
+    routerSharesBrainEndpoint: router === brain,
     routerSupportsStructuredOutputs: structured.length > 0,
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
-    excludedNonChat: live ? catalogue.length - chatCapable.length : 0,
-    excludedNonChatIds: live ? catalogue.filter((id) => !isGeneralChatModel(id)) : [],
+    // Computed against `workingCatalogue` (post health-filter), not the raw
+    // catalogue — otherwise a circuit-open id would double-count as "excluded
+    // as non-chat" too, conflating two unrelated exclusion reasons.
+    excludedNonChat: live ? workingCatalogue.length - chatCapable.length : 0,
+    excludedNonChatIds: live ? workingCatalogue.filter((id) => !isGeneralChatModel(id)) : [],
     exclusionEmptiedPool,
+    excludedUnhealthy: excludedUnhealthyIds.length,
+    excludedUnhealthyIds,
+    healthyPoolEmptied,
   };
 }
 
@@ -344,9 +460,12 @@ export function applyFreeMode(settings: AppSettings): {
 
 /** One-line operator-facing summary — logged, and shown in the UI notice. */
 export function describeFreeModeSelection(s: FreeModeSelection): string {
+  const shared = s.routerSharesBrainEndpoint
+    ? " (SHARES the brain's endpoint — no other structured-output free model exists right now, so one bad upstream takes both)"
+    : "";
   const router = s.routerSupportsStructuredOutputs
-    ? `router=${s.utilityModel.model}`
-    : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)`;
+    ? `router=${s.utilityModel.model}${shared}`
+    : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)${shared}`;
   const brain = s.brainSupportsTools
     ? `brain=${s.chatModel.model}`
     : `brain=${s.chatModel.model} (NO tool support — Single Agent mode answers from ` +
@@ -357,7 +476,12 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
     (s.excludedNonChat > 0
       ? `, ${s.excludedNonChat} dropped as non-chat (${s.excludedNonChatIds.join(", ")})`
       : "") +
-    (s.exclusionEmptiedPool ? ", ALL looked non-chat so the exclusion was ABANDONED" : "") + `]: ` +
+    (s.exclusionEmptiedPool ? ", ALL looked non-chat so the exclusion was ABANDONED" : "") +
+    (s.excludedUnhealthy > 0
+      ? `, ${s.excludedUnhealthy} dropped as currently unhealthy (${s.excludedUnhealthyIds.join(", ")})`
+      : "") +
+    (s.healthyPoolEmptied ? ", ALL scored ids are currently unhealthy so the health filter was ABANDONED" : "") +
+    `]: ` +
     `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +
     `${s.proposerTiers.fast.model}, ${s.proposerTiers.balanced.model}, ${s.proposerTiers.frontier.model}`

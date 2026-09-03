@@ -5,6 +5,7 @@ vi.mock("@/lib/providers/model-fallback", () => ({
   classifyModelError: vi.fn(),
   pickFallbackModel: vi.fn(),
   describeFallback: vi.fn(() => ({ message: "switched", hint: "fyi" })),
+  describeUpstreamFailure: vi.fn(() => "HTTP 400 — Provider returned error"),
 }));
 vi.mock("@/lib/storage/settings-store", () => ({
   saveSettings: vi.fn(async () => {}),
@@ -97,6 +98,44 @@ describe("attemptModelFallback (§10 agent-fallback seam)", () => {
     expect(log.info).toHaveBeenCalledWith("agent_fallback_no_candidate", expect.anything());
   });
 
+  /**
+   * PM #112 / PM #99 family — the key was read straight off
+   * `settings.chatModel.apiKey`, so a vault-only install (and every Free Mode
+   * run, whose overlay carries provider+model ONLY) handed `pickFallbackModel`
+   * no key at all. `pickFromOpenRouterCatalog` then bailed before its first
+   * request and the turn wrote a "no candidate" notice, having searched nothing.
+   */
+  it("resolves the key from the vault, not just from chatModel.apiKey", async () => {
+    vi.mocked(classifyModelError).mockReturnValue("model_not_found" as never);
+    vi.mocked(pickFallbackModel).mockResolvedValue({ modelId: "" } as never);
+    const vaultOnly = {
+      chatModel: { provider: "openrouter", model: "broken/model" },
+      providerApiKeys: { openrouter: "vault-key" },
+    } as unknown as AppSettings;
+
+    await attemptModelFallback(new Error("404"), vaultOnly, "c1", null);
+
+    expect(pickFallbackModel).toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: "vault-key" })
+    );
+  });
+
+  it("still attempts the search when no key exists anywhere (the catalogue is public)", async () => {
+    vi.mocked(classifyModelError).mockReturnValue("model_not_found" as never);
+    vi.mocked(pickFallbackModel).mockResolvedValue({ modelId: "" } as never);
+    const keyless = {
+      chatModel: { provider: "openrouter", model: "broken/model" },
+    } as unknown as AppSettings;
+
+    await attemptModelFallback(new Error("404"), keyless, "c1", null);
+
+    // The point is that the search RUNS — an env-only key is invisible here and
+    // must not be mistaken for "nothing to try".
+    expect(pickFallbackModel).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "openrouter", apiKey: undefined })
+    );
+  });
+
   it("never throws — an internal failure is swallowed and logged", async () => {
     vi.mocked(classifyModelError).mockReturnValue("model_not_found" as never);
     vi.mocked(pickFallbackModel).mockRejectedValue(new Error("catalog down"));
@@ -146,6 +185,29 @@ describe("no fallback candidate — the user must not be left with silence", () 
     const { messages } = await runNoCandidate("user");
     const appended = messages[messages.length - 1] as { content: string };
     expect(appended.content).toMatch(/does not fabricate/i);
+  });
+
+  /**
+   * PM #112 — the notice used to assert "every alternative endpoint is currently
+   * circuit-broken (usually: the free tier is exhausted or rate-limited)". This
+   * path consults NO circuit breaker, and the real failure was an upstream 400
+   * on a `max_tokens` Orchestra itself picked. The operator followed the
+   * message's advice and waited for a recovery that could never arrive.
+   */
+  it("reports the upstream's own words and never invents a cause it did not check", async () => {
+    const { messages } = await runNoCandidate("user");
+    const appended = messages[messages.length - 1] as { content: string };
+    expect(appended.content).toContain("HTTP 400 — Provider returned error");
+    expect(appended.content).not.toMatch(/circuit[- ]broken/i);
+    expect(appended.content).not.toMatch(/free tier is exhausted/i);
+  });
+
+  it("says so plainly when the provider gave no detail, rather than guessing one", async () => {
+    const { describeUpstreamFailure } = await import("@/lib/providers/model-fallback");
+    vi.mocked(describeUpstreamFailure).mockReturnValueOnce(null);
+    const { messages } = await runNoCandidate("user");
+    const appended = messages[messages.length - 1] as { content: string };
+    expect(appended.content).toMatch(/no detail from the provider/i);
   });
 
   it("stays quiet when something already answered — no talking over a real reply", async () => {

@@ -10,14 +10,22 @@
  * an empty turn with no explanation. That is the single worst delivery failure
  * in the stack, because unlike a dropped proposer it has no survivors.
  *
- * WHAT THIS DOES — three bounded attempts, in order:
+ * WHAT THIS DOES — a bounded ladder, in order:
  *   1. the brain model (PM #69's existing forced answer);
  *   2. ONE retry on the brain after a jittered, abort-aware backoff — unless the
  *      breaker says the endpoint is dead, in which case skip straight to 3;
- *   3. ONE attempt on a healthy substitute model from the operator's own
- *      settings, announced LOUDLY (a substituted answer must never look like a
- *      normal one).
- * If all three come back empty, the caller gets an explicit operator notice
+ *   3. a CASCADE through the substitute pool (`buildFinalAnswerPool` — the
+ *      operator's `utilityModel` + the 3 proposer tiers, ≤4 candidates, deduped
+ *      against each other and the brain), trying each in order until one
+ *      succeeds, skipping circuit-open endpoints, bounded by
+ *      `ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS` (default 90s) so a string of dead
+ *      free endpoints cannot stack unboundedly. Every substitution is announced
+ *      LOUDLY (a substituted answer must never look like a normal one).
+ * PM #113 — step 3 used to try exactly ONE substitute and stop; in Free Mode,
+ * once the pool is ranked by capability (`free-mode.ts`'s `sortFreeModelsByScore`),
+ * this is what makes "if the strong model errors, fall to the next" true for the
+ * whole pool rather than for one candidate.
+ * If nothing in the ladder answers, the caller gets an explicit operator notice
  * instead of silence.
  *
  * WHAT THIS DELIBERATELY DOES NOT DO. It never re-runs the tool-capable stream.
@@ -34,6 +42,7 @@
 import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import type { RawUsage } from "@/lib/cost/accumulator";
+import { getOpenRouterBenchmarkScore } from "@/lib/cost/openrouter-pricing";
 import { createModel } from "@/lib/providers/llm-provider";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { estimateTokenCount } from "@/lib/agent/compressor";
@@ -105,6 +114,31 @@ function retryBackoffMs(): number {
   return Math.round(base * (1 + Math.random() * 0.4));
 }
 
+/**
+ * PM #113 — aggregate wall-clock budget for the substitute CASCADE (attempt 3+).
+ *
+ * Nothing bounded the ladder's total elapsed time before this — each
+ * `attemptOnce` gets its own ~120s call deadline (`callDeadlineSignal`), but
+ * nothing capped how many of those could stack. Read fresh per call, same
+ * posture as `retryBackoffMs` above, so a test (or an operator) can change it
+ * without a restart.
+ */
+function cascadeBudgetMs(): number {
+  // PM #123 — was 90_000. `attemptOnce` bounds EACH candidate with its own
+  // ~120s call deadline (`callDeadlineSignal`, `stream-watchdog.ts`), so a
+  // 90s AGGREGATE budget was smaller than a single candidate's own allowed
+  // runtime — one genuinely slow (not erroring, just hanging) candidate could
+  // burn the whole cascade budget alone, silently truncating a pool that
+  // still had healthy, untried candidates in it. Live incident: brain failed
+  // fast (bad JSON, ~seconds), the FIRST substitute then hit its own 120s
+  // timeout, and the cascade reported total failure with 2 more real
+  // candidates never attempted. 300s is sized off tonight's own successful
+  // cascades (measured live: 270s–427s total, several candidates each
+  // potentially slow) — enough room for multiple full-length attempts, not
+  // just one.
+  return Number(process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? 300_000);
+}
+
 export interface FinalAnswerAttemptArgs {
   model: Parameters<typeof generateText>[0]["model"];
   systemPrompt: string;
@@ -128,6 +162,20 @@ export interface FinalAnswerAttemptArgs {
    * are forced to `speed`).
    */
   degradationPolicy?: DegradationPolicy;
+  /**
+   * Post-review addition (primary-stream recovery, `primary-stream-recovery.ts`).
+   * Skip attempt 1/2 (the brain, plus its one same-endpoint retry) and go
+   * straight to attempt 3 (substitute). Default `undefined` — every existing
+   * caller (PM #69's onFinish path) is unaffected byte-for-byte.
+   *
+   * Set this ONLY when the caller already has fresh, same-turn, POSITIVE
+   * evidence a same-endpoint retry cannot help (a deterministic 4xx, not a
+   * 429/5xx/network blip — those CAN resolve between attempts and should
+   * still get the retry). The caller decides this, not this function — it
+   * has no access to the triggering error, only to the fact that recovery
+   * was requested.
+   */
+  skipBrainRetry?: boolean;
 }
 
 export interface FinalAnswerResult {
@@ -152,6 +200,49 @@ export interface FinalAnswerResult {
  * symptom is not a crash: the failover simply never substitutes, which is the
  * failure mode it exists to prevent.
  */
+/**
+ * The tail instruction for a tool-less "write your final answer now" attempt
+ * — shared by BOTH call sites (`agent-response.ts`'s PM #69 path and
+ * `primary-stream-recovery.ts`'s onError path) so they cannot drift apart the
+ * way they just did (PM #119).
+ *
+ * `didWork` must reflect whether a REAL tool call executed in THIS turn
+ * before the caller ended up here — not whether the conversation's history
+ * happens to contain tool activity from an earlier, unrelated turn.
+ *
+ *  - `true` (PM #69's original case: a full tool loop ran this turn, the
+ *    stream just didn't wrap it in a final response) — "you have everything
+ *    you need from the steps above" is a TRUE premise; the model may
+ *    summarize the real results it can see.
+ *  - `false` (PM #119, 2026-08-31 live incident: the primary stream errored
+ *    before ANY tool call executed this turn) — that premise is FALSE. A
+ *    substitute model handed the unconditional version of this instruction
+ *    confidently fabricated a completed task — specific file edits, specific
+ *    test output — none of which happened. Council-reviewed (4take) rewrite:
+ *    short, imperative, an exact required string for the failure case (no
+ *    "what's still needed" slot — independently flagged by two reviewers as
+ *    itself a fabrication vector: an invented-sounding "next step" is the
+ *    same failure shape as the original incident, one level down).
+ */
+export function finalAnswerInstruction(didWork: boolean): string {
+  if (didWork) {
+    return (
+      "You have everything you need from the steps above. Write your final " +
+      "answer to the user now, in plain prose. Do not call any tools."
+    );
+  }
+  return (
+    "Do not call any tools. You have NOT performed any actions this turn — " +
+    "no files were read or edited, no code was run, no web page was fetched. " +
+    "If the user's request requires any of those, you MUST NOT claim to have " +
+    'done them — respond with exactly: "I could not complete this — a ' +
+    'technical failure occurred before any work was done." You may instead ' +
+    "answer directly from your own knowledge ONLY if the request does not " +
+    "need file access, code execution, or a web lookup to answer correctly " +
+    "— never claim an action you did not take."
+  );
+}
+
 export function buildFinalAnswerPool(settings: AppSettings): ModelConfig[] {
   return [
     settings.utilityModel,
@@ -161,6 +252,26 @@ export function buildFinalAnswerPool(settings: AppSettings): ModelConfig[] {
   ]
     .filter((c): c is ModelConfig => Boolean(c?.model))
     .map((c) => resolveWorkerKey(c, settings));
+}
+
+/**
+ * Strongest-first comparator for a `ModelConfig[]` pool — intelligence, then
+ * agentic, then coding index as tiebreaks; unscored ids sort last, stable
+ * among themselves. Extracted (tool-capable-retry work) so the tool-less
+ * cascade below and `tool-capable-retry.ts`'s own candidate selection share
+ * ONE comparator instead of two copies that could drift — see the cascade's
+ * own 4take-review comment on exactly that drift risk.
+ */
+export function compareModelsByBenchmarkScoreDesc(a: ModelConfig, b: ModelConfig): number {
+  const sa = getOpenRouterBenchmarkScore(a.model);
+  const sb = getOpenRouterBenchmarkScore(b.model);
+  const intelligenceDiff = (sb?.intelligence ?? -1) - (sa?.intelligence ?? -1);
+  if (intelligenceDiff !== 0) return intelligenceDiff;
+  const agenticDiff = (sb?.agentic ?? -1) - (sa?.agentic ?? -1);
+  if (agenticDiff !== 0) return agenticDiff;
+  const codingDiff = (sb?.coding ?? -1) - (sa?.coding ?? -1);
+  if (codingDiff !== 0) return codingDiff;
+  return 0; // stable sort — no score data on either side, keep assembly order
 }
 
 function readUsage(result: unknown): RawUsage | undefined {
@@ -200,7 +311,16 @@ async function attemptOnce(
       if (endpoint) recordModelSuccess(endpoint.provider, endpoint.model);
       return { text, usage: readUsage(result) };
     }
-    // HTTP 200 with an empty body — the free-tier throttle signature.
+    // HTTP 200 with an empty body — the free-tier throttle signature. Was the
+    // ONE unlogged failure path in this function (2026-08-31 live incident —
+    // a cascade that visibly tried one candidate and stopped could not be
+    // told apart from a genuine loop bug, because 2-3 silently-empty
+    // candidates in between look IDENTICAL to "never attempted" in the logs).
+    // Every other failure branch here already warns; this one now does too.
+    console.warn(
+      `[Agent] Final-answer attempt on ${endpoint ? `${endpoint.provider}/${endpoint.model}` : "the brain model"} ` +
+        `returned an empty response (finishReason=${result.finishReason ?? "unknown"}) — trying the next candidate.`
+    );
     if (endpoint) recordModelFailure(endpoint.provider, endpoint.model, "empty");
     return { text: "", usage: readUsage(result) };
   } catch (error) {
@@ -217,6 +337,31 @@ async function attemptOnce(
 }
 
 /**
+ * PM #120 — the LAST of the five silent-return classes found in this file
+ * tonight (protake council, unanimous 4/4): `if (abortSignal?.aborted) return
+ * { text: "", usage }` appears FIVE times in this function and none of them
+ * logged. Same defect shape as PM #118's empty-response branch — a cascade
+ * that stops here because the caller's HTTP request disconnected is
+ * indistinguishable in the logs from one that tried every candidate and
+ * failed, or from a genuine code bug that never entered the loop at all.
+ * `req.signal` (the source of this signal — `src/app/api/chat/route.ts`)
+ * reports aborted on more than deliberate user navigation: a proxy/platform
+ * idle timeout, or (unconfirmed, worth instrumenting for) the primary
+ * stream's own teardown closing a shared controller. Logging, not a
+ * behavior change — a user abort correctly must not count as an endpoint
+ * failure or force a substitute the client is no longer waiting for; this
+ * only makes that decision visible instead of guessed-at after the fact.
+ */
+function logRecoveryAborted(phase: string, startedAt: number): void {
+  console.warn(
+    `[Agent] Final answer — recovery aborted (${phase}, ${Date.now() - startedAt}ms since ` +
+      `recovery started). The caller's request signal is aborted — client disconnect, a ` +
+      `proxy/platform timeout, or (unconfirmed) primary-stream teardown. Stopping rather than ` +
+      `substituting for a request nobody is waiting on.`
+  );
+}
+
+/**
  * Produce the turn's final answer with bounded retry + cross-model failover.
  *
  * Returns `text: ""` ONLY when every attempt failed — and then always with a
@@ -226,6 +371,7 @@ export async function generateFinalAnswerWithFailover(
   args: FinalAnswerAttemptArgs
 ): Promise<FinalAnswerResult> {
   const { brainConfig, abortSignal } = args;
+  const recoveryStartedAt = Date.now();
   // PM #109 follow-up — bound the context ONCE, up front, and reuse it for every
   // attempt. Prune-once (not per-attempt) is right for THIS pool: in Free Mode
   // every substitute is itself a free model, so there is no larger-window
@@ -242,16 +388,20 @@ export async function generateFinalAnswerWithFailover(
     if (u) usage = u;
   };
 
-  // ── Attempt 1 — the brain, unless its breaker already says it is dead ──────
+  // ── Attempt 1 — the brain, unless its breaker already says it is dead, or ──
+  // the caller already has fresh evidence a same-endpoint retry cannot help.
   const brainTripped = brainConfig
     ? isModelCircuitOpen(brainConfig.provider, brainConfig.model)
     : false;
 
-  if (!brainTripped) {
+  if (!brainTripped && !args.skipBrainRetry) {
     const first = await attemptOnce(args.model, args, brainConfig);
     fold(first?.usage);
     if (first?.text) return { text: first.text, usage };
-    if (abortSignal?.aborted) return { text: "", usage };
+    if (abortSignal?.aborted) {
+      logRecoveryAborted("after brain attempt 1", recoveryStartedAt);
+      return { text: "", usage };
+    }
 
     // ── Attempt 2 — one retry on the brain after a backoff ──────────────────
     // Skipped when attempt 1 just tripped the breaker: retrying a known-dead
@@ -261,20 +411,37 @@ export async function generateFinalAnswerWithFailover(
       : false;
     if (!nowTripped) {
       await abortableSleep(retryBackoffMs(), abortSignal);
-      if (abortSignal?.aborted) return { text: "", usage };
+      if (abortSignal?.aborted) {
+        logRecoveryAborted("during brain retry backoff", recoveryStartedAt);
+        return { text: "", usage };
+      }
       const second = await attemptOnce(args.model, args, brainConfig);
       fold(second?.usage);
       if (second?.text) return { text: second.text, usage };
-      if (abortSignal?.aborted) return { text: "", usage };
+      if (abortSignal?.aborted) {
+        logRecoveryAborted("after brain attempt 2", recoveryStartedAt);
+        return { text: "", usage };
+      }
     }
-  } else {
+  } else if (brainTripped) {
     console.warn(
       `[Agent] Final answer — circuit OPEN on ${brainConfig!.provider}/${brainConfig!.model}; ` +
         `going straight to a substitute model.`
     );
+  } else if (brainConfig) {
+    console.warn(
+      `[Agent] Final answer — skipping the same-endpoint retry on ${brainConfig.provider}/${brainConfig.model} ` +
+        `(the triggering error was not evidence of a transient condition); going straight to a substitute model.`
+    );
   }
 
-  // ── Attempt 3 — a healthy substitute from the operator's own settings ──────
+  // ── Attempt 3+ — cascade through the substitute pool ────────────────────────
+  // PM #113 — this used to try exactly ONE substitute (a `.find()`) and give up.
+  // Walks the pool in order instead (still ≤4 entries: `utilityModel` + the 3
+  // proposer tiers — NOT the full free catalogue), skipping circuit-open and
+  // duplicate candidates, stopping at the first success or a bounded aggregate
+  // budget. "If the strong one errors, fall to the next" is only true
+  // end-to-end once this doesn't stop after one.
   const policy: DegradationPolicy = args.degradationPolicy ?? "speed";
   const endpointLabel = brainConfig
     ? `${brainConfig.provider}/${brainConfig.model}`
@@ -283,20 +450,50 @@ export async function generateFinalAnswerWithFailover(
     return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
   }
 
-  // Pick the first pool model that is not itself tripped and is not the brain.
-  //
-  // Deliberately NOT gated on the brain's breaker: the breaker's threshold
-  // governs CROSS-TURN skipping, but here we have direct first-hand evidence
-  // that this endpoint just failed to answer twice in a row, THIS turn. Waiting
-  // for the global threshold before substituting would mean shipping a blank
-  // turn to the user while a healthy model sits unused.
+  // Dedup by endpoint identity — `buildFinalAnswerPool` has none, so a slot
+  // that happens to coincide with another (or with the brain) would otherwise
+  // waste a cascade step repeating an id already known to fail.
   const brainKey = `${brainConfig.provider}/${brainConfig.model}`;
-  const substitute = buildFinalAnswerPool(args.settings).find(
-    (c) =>
-      `${c.provider}/${c.model}` !== brainKey && !isModelCircuitOpen(c.provider, c.model)
-  );
-  if (!substitute) {
-    // Nothing healthier to try (empty pool, or everything tripped).
+  const seen = new Set<string>([brainKey]);
+  const candidates = buildFinalAnswerPool(args.settings)
+    .filter((c) => {
+      const key = `${c.provider}/${c.model}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    // 4take council review, 2026-08-31 — `buildFinalAnswerPool` returns
+    // `[utilityModel, frontier, balanced, fast]` in FIXED slot order.
+    // `frontier`/`balanced`/`fast` are already strength-ordered against each
+    // other (PM #113 — they're `spread()` off the same score-sorted pool),
+    // but `utilityModel` is picked from a DIFFERENT, narrower pool
+    // (`structured_outputs`-capable ids only — a JSON-reliability property,
+    // not a proxy for raw capability) and was never reconciled against the
+    // others when this list was assembled. Live-measured: `utilityModel` at
+    // intelligence 25.7 landed at index 0, ahead of a 45.4-scored candidate —
+    // the "try smarter models first" cascade tried the WEAKEST one first.
+    // Same comparator as `sortFreeModelsByScore` (free-mode.ts) — same SHAPE,
+    // but this one is shared with `tool-capable-retry.ts` via the named
+    // export above (`compareModelsByBenchmarkScoreDesc`), not inlined twice.
+    .sort(compareModelsByBenchmarkScoreDesc);
+
+  // Deliberately NOT gated on the brain's breaker threshold: the breaker
+  // governs CROSS-TURN skipping, but here we have direct first-hand evidence
+  // that this endpoint just failed to answer (twice, unless skipBrainRetry)
+  // THIS turn. Waiting for the global threshold before substituting would
+  // mean shipping a blank turn while a healthy model sits unused.
+  const hasHealthyCandidate = candidates.some((c) => !isModelCircuitOpen(c.provider, c.model));
+  if (!hasHealthyCandidate) {
+    // Nothing healthier to try (empty pool, or everything tripped). Every OTHER
+    // early-return branch in this function logs; this one silently didn't —
+    // cost real disambiguation time chasing a "swarm never invokes subagents"
+    // report that was actually every candidate's breaker open at once during a
+    // broad free-tier outage (protake council review, 2026-08-31).
+    console.warn(
+      `[Agent] Final answer — ${endpointLabel} delivered nothing and every ` +
+        `substitute candidate's circuit is OPEN (${candidates.length} candidate(s): ` +
+        `${candidates.map((c) => `${c.provider}/${c.model}`).join(", ") || "none configured"}).`
+    );
     return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
   }
 
@@ -306,39 +503,71 @@ export async function generateFinalAnswerWithFailover(
   if (!allowsModelSubstitution(policy)) {
     console.warn(
       `[Agent] Final answer — ${endpointLabel} delivered nothing and degradation policy is ` +
-        `"${policy}"; NOT substituting ${substitute.provider}/${substitute.model}.`
+        `"${policy}"; NOT substituting (${candidates.length} candidate(s) available).`
     );
     return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, true) };
   }
-  console.warn(
-    `[Agent] Final answer — ${brainConfig.provider}/${brainConfig.model} delivered nothing; ` +
-      `substituting ${substitute.provider}/${substitute.model} to answer this turn.`
-  );
 
-  let substituteModel;
-  try {
-    substituteModel = createModel(substitute, {
-      projectId: args.projectId,
-      currentPath: args.currentPath,
-    });
-  } catch (error) {
+  const budgetMs = cascadeBudgetMs();
+  const cascadeStartedAt = Date.now();
+
+  for (const substitute of candidates) {
+    if (abortSignal?.aborted) {
+      logRecoveryAborted(`before trying substitute ${substitute.provider}/${substitute.model}`, recoveryStartedAt);
+      return { text: "", usage };
+    }
+    if (isModelCircuitOpen(substitute.provider, substitute.model)) continue;
+    // Don't START a new attempt past budget — one already in flight (inside
+    // attemptOnce) keeps its own ~120s call deadline regardless of this check.
+    if (Date.now() - cascadeStartedAt > budgetMs) {
+      // PM #123 — this used to be a silent `break`: the cascade reported
+      // total failure and nothing recorded WHY it stopped short of trying
+      // every candidate. Same defect shape as PM #118/#120 — log the branch.
+      const remaining = candidates
+        .slice(candidates.indexOf(substitute))
+        .map((c) => `${c.provider}/${c.model}`);
+      console.warn(
+        `[Agent] Final answer — cascade budget (${budgetMs}ms) exceeded after ` +
+          `${Date.now() - cascadeStartedAt}ms; NOT trying ${remaining.length} remaining ` +
+          `candidate(s): ${remaining.join(", ")}.`
+      );
+      break;
+    }
+
     console.warn(
-      `[Agent] Could not build the substitute model ${substitute.provider}/${substitute.model}: ` +
-        (error instanceof Error ? error.message : String(error))
+      `[Agent] Final answer — ${brainConfig.provider}/${brainConfig.model} delivered nothing; ` +
+        `trying substitute ${substitute.provider}/${substitute.model}.`
     );
-    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
-  }
 
-  const third = await attemptOnce(substituteModel, args, substitute);
-  fold(third?.usage);
-  if (third?.text) {
-    return {
-      text: third.text,
-      usage,
-      notice:
-        `[Agent] ${brainConfig.provider}/${brainConfig.model} returned an empty response — ` +
-        `this answer was written by ${substitute.provider}/${substitute.model} instead.`,
-    };
+    let substituteModel;
+    try {
+      substituteModel = createModel(substitute, {
+        projectId: args.projectId,
+        currentPath: args.currentPath,
+      });
+    } catch (error) {
+      console.warn(
+        `[Agent] Could not build the substitute model ${substitute.provider}/${substitute.model}: ` +
+          (error instanceof Error ? error.message : String(error))
+      );
+      continue; // e.g. vault key missing for THIS candidate — try the next one.
+    }
+
+    const attempt = await attemptOnce(substituteModel, args, substitute);
+    fold(attempt?.usage);
+    if (attempt?.text) {
+      return {
+        text: attempt.text,
+        usage,
+        notice:
+          `[Agent] ${brainConfig.provider}/${brainConfig.model} returned an empty response — ` +
+          `this answer was written by ${substitute.provider}/${substitute.model} instead.`,
+      };
+    }
+    if (abortSignal?.aborted) {
+      logRecoveryAborted(`after substitute ${substitute.provider}/${substitute.model}`, recoveryStartedAt);
+      return { text: "", usage };
+    }
   }
 
   return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };

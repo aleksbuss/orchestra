@@ -16,7 +16,7 @@
  * toast pattern that already lives here. A future second consumer would
  * be a fine reason to promote it to `components/ui/` later.
  */
-import { AlertTriangle, Copy, X, RefreshCw } from "lucide-react";
+import { AlertTriangle, Copy, X, RefreshCw, Loader2 } from "lucide-react";
 import { useState } from "react";
 import type {
   ChatErrorKind,
@@ -49,6 +49,34 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
         container: "bg-emerald-500/10 border-emerald-500/20 text-emerald-200",
         icon: "text-emerald-600 dark:text-emerald-400",
         label: "Switched model",
+      };
+    case "turn_recovered":
+      // INFO-level, same treatment as model_fallback — the turn succeeded.
+      // Distinct label: this turn specifically was substituted, not the
+      // default model going forward.
+      return {
+        container: "bg-emerald-500/10 border-emerald-500/20 text-emerald-200",
+        icon: "text-emerald-600 dark:text-emerald-400",
+        label: "Answered by a different model",
+      };
+    case "turn_recovered_with_tools":
+      // INFO-level, same emerald family as turn_recovered — but this one
+      // actually completed the task (ran real tools), not just answered
+      // with text. Distinct label so the operator can tell the two apart.
+      return {
+        container: "bg-emerald-500/10 border-emerald-500/20 text-emerald-200",
+        icon: "text-emerald-600 dark:text-emerald-400",
+        label: "Task redone by a different model",
+      };
+    case "recovering":
+      // PM #122 — IN PROGRESS, not yet an outcome. Violet (not amber/red, not
+      // the emerald "it worked") so it reads as "still working", matching
+      // `ThinkingIndicator`'s own palette — this banner exists for exactly the
+      // gap where that indicator has already disappeared.
+      return {
+        container: "bg-violet-500/10 border-violet-500/20 text-violet-200",
+        icon: "text-violet-600 dark:text-violet-400",
+        label: "Model unavailable — trying another",
       };
     case "upstream_no_tools":
       // Actionable — user MUST switch model. Amber draws attention without
@@ -133,7 +161,11 @@ export function ChatErrorBanner({ error, onDismiss }: ChatErrorBannerProps) {
     >
       <div className={`flex items-start gap-3 rounded-xl border px-4 py-2.5 ${style.container}`}>
         <div className="flex items-center justify-center size-7 rounded-full bg-current/10 shrink-0 mt-0.5">
-          {error.kind === "model_fallback" ? (
+          {error.kind === "recovering" ? (
+            <Loader2 className={`size-3.5 animate-spin ${style.icon}`} />
+          ) : error.kind === "model_fallback" ||
+            error.kind === "turn_recovered" ||
+            error.kind === "turn_recovered_with_tools" ? (
             <RefreshCw className={`size-3.5 ${style.icon}`} />
           ) : (
             <AlertTriangle className={`size-3.5 ${style.icon}`} />

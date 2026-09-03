@@ -11,9 +11,10 @@ import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
-import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
+import { generateFinalAnswerWithFailover, finalAnswerInstruction } from "@/lib/agent/final-answer-failover";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
 import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
+import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
 
 export function asRecord(value: unknown): Record<string, unknown> | null {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
@@ -1092,6 +1093,23 @@ export async function resolveTurnContinuation(args: {
     // `generateFinalAnswerWithFailover` never replays the TOOL-CAPABLE stream —
     // every attempt is tool-less, so a retry can waste a generation but can
     // never repeat a side effect.
+    //
+    // PM #122 — same UX gap as `primary-stream-recovery.ts`: this ladder is
+    // `generateText`-only, so it emits zero chunks for its whole duration and
+    // the client's loading indicator is already gone (the original stream
+    // already finished, just with no deliverable answer) by the time this
+    // runs. Without a chatId there's no chat to scope the event to.
+    if (chatId) {
+      publishChatErrorEvent({
+        chatId,
+        projectId,
+        payload: {
+          kind: "recovering",
+          message: `The configured model didn't answer — trying an alternate model. This can take a while on a degraded free tier.`,
+          recoverable: true,
+        },
+      });
+    }
     const attempt = await generateFinalAnswerWithFailover({
       model,
       systemPrompt,
@@ -1112,14 +1130,19 @@ export async function resolveTurnContinuation(args: {
         ...neutralizeHallucinatedHistory([...baseMessages, ...responseMessages]),
         {
           role: "user",
-          content:
-            "You have everything you need from the steps above. Write your " +
-            "final answer to the user now, in plain prose. Do not call any tools.",
+          content: finalAnswerInstruction(true),
         },
       ]),
       providerOptions,
       settings,
-      abortSignal,
+      // PM #121 — not the raw `abortSignal` param. Same reasoning as the
+      // `onError` call site in `agent.ts`: this branch only runs once the
+      // turn has already completed without a genuine client abort (an abort
+      // exits via the SDK's own `onAbort`, never reaches "no answer was
+      // delivered" here), and `req.signal` was observed to flip `aborted`
+      // independently of client action during a downstream recovery window.
+      // `undefined` still gets a real deadline bound inside the ladder.
+      abortSignal: undefined,
       brainConfig,
       projectId,
       currentPath,

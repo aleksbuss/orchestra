@@ -17,6 +17,7 @@ import { detectToolSupport } from "@/lib/agent/agent-tool-capability";
 import { createStreamWatchdog, turnDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { handleStreamAbort, createPartialTextBuffer } from "@/lib/agent/agent-abort";
+import { recoverPrimaryStreamFailure } from "@/lib/agent/primary-stream-recovery";
 import { foldTurnUsage, type RawUsage } from "@/lib/cost/accumulator";
 import {
   buildSystemPrompt,
@@ -908,6 +909,15 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
     // PM #98 — `onAbort`'s `steps` holds only COMPLETED steps, so the text the
     // user was actually watching is never in it. Buffer the deltas instead.
     const partialText = createPartialTextBuffer();
+    // PM #119 — did THIS stream actually execute a tool call before it died?
+    // `onError` gets no step/tool history of its own (AI SDK v5 passes only
+    // `{error}`), and `messages` (the stream's INPUT) is not a substitute — a
+    // long-running chat's `messages` almost always contains tool activity from
+    // OLD, already-resolved turns, which would make any "did messages contain
+    // a tool result" check true almost always, telling recovery nothing about
+    // THIS turn. A fresh boolean, set only by THIS stream's own onChunk, is
+    // the one honest signal available.
+    let toolCallOccurredThisStream = false;
     // Run the agent with streaming
     const result = streamText({
     model,
@@ -933,8 +943,10 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       // A tool call means execution — which emits no chunks and carries its own
       // timeout (up to 10 minutes for `install-orchestrator`) — is about to
       // start. Counting that silence as a stall would abort healthy work.
-      if (chunk.type === "tool-call") watchdog.pauseForToolExecution();
-      else watchdog.noteActivity();
+      if (chunk.type === "tool-call") {
+        watchdog.pauseForToolExecution();
+        toolCallOccurredThisStream = true;
+      } else watchdog.noteActivity();
       if (chunk.type === "text-delta") partialText.append(chunk.text);
     },
     onStepFinish: async (event) => {
@@ -1366,8 +1378,62 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         settings,
       });
     },
-    onError: ({ error }) => {
+    onError: async ({ error }) => {
       watchdog.settle();
+      // Post-review Sprint 0 — try to recover THIS turn before falling back to
+      // the plain error-and-log path below. `recoverPrimaryStreamFailure` never
+      // throws and only reports `recovered: true` once a substitute answer is
+      // durably persisted into the chat; every `recovered: false` case (visible
+      // partial content already streamed, degradation policy forbids
+      // substitution, nothing left to try) falls through to the pre-existing
+      // behavior below, unchanged.
+      const recovery = await recoverPrimaryStreamFailure({
+        error,
+        model,
+        brainConfig: resolvedModelConfig,
+        systemPrompt,
+        messages,
+        providerOptions,
+        settings,
+        // PM #121 — NOT `options.abortSignal` (raw `req.signal`). The AI SDK
+        // routes a genuine client abort to `onAbort`, never `onError`
+        // (confirmed from `node_modules/ai/dist/index.mjs`: the stream's read
+        // loop calls `abort()` — firing `onAbort` and closing the controller —
+        // whenever `isAbortError2(error) && abortSignal.aborted`; only a
+        // non-abort error reaches `controller.error()`, which is what feeds
+        // `onError`). So by construction, execution reaching THIS line has
+        // already ruled out a genuine client cancellation for this turn.
+        // `req.signal` was observed live to flip `aborted: true` ~42ms into a
+        // recovery attempt that started here — independent of any user
+        // action (PM #120's logging caught it) — most likely the primary
+        // stream's own error teardown touching the same signal. Threading
+        // that contaminated signal into the ladder killed the substitute
+        // cascade on nearly every occurrence. `undefined` here still gets a
+        // real deadline bound: `callDeadlineSignal`/`abortableSleep` apply
+        // `AbortSignal.timeout(...)` regardless of the base signal.
+        abortSignal: undefined,
+        degradationPolicyOverride: options.degradationPolicy,
+        isBackground: options.isBackground,
+        chatId: options.chatId,
+        projectId: options.projectId,
+        currentPath: options.currentPath,
+        partialText: partialText.text(),
+        toolCallOccurred: toolCallOccurredThisStream,
+        tools,
+        swarmEnabled: options.swarmEnabled !== false,
+        maxToolSteps: MAX_TOOL_STEPS_PER_TURN,
+      });
+      // Discovered while building the tool-capable retry above: `onFinish`
+      // (below) and the outer synchronous `catch` (setup-code failures) both
+      // call `mcpCleanup`, but `onError` never did — every turn that failed
+      // here leaked its MCP transports (stdio child process / HTTP session)
+      // for the life of the server process. Runs after any tool-capable
+      // retry is done with the connection, and covers both outcomes.
+      if (mcpCleanup) {
+        try { await mcpCleanup(); } catch { /* non-critical, mirrors onFinish */ }
+      }
+      if (recovery.recovered) return;
+
       // Called when the stream itself errors (network cut, provider timeout,
       // upstream 404, etc.) — fires even when SSE disconnects mid-stream, so we
       // guarantee DAG cleanup here. The classify → structured log → chat-error
@@ -1377,8 +1443,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       // PM #17 — publish the structured error FIRST (synchronously, inside
       // reportTurnError), THEN kick off the background model-fallback. Fallback
       // is fire-and-forget and async, so its own `model_fallback` event always
-      // lands AFTER the error event the UI must render immediately. We do NOT
-      // retry the current turn (double LLM cost + complex stream replay).
+      // lands AFTER the error event the UI must render immediately.
       void reportTurnError(
         error,
         {

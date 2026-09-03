@@ -60,6 +60,22 @@ const modelOut = vi.hoisted(() => ({
   genText: undefined as string | undefined,
   steps: undefined as unknown[] | undefined,
   stepCursor: 0,
+  /**
+   * Post-review Sprint 0 — when set, `doStream` REJECTS instead of returning
+   * a stream at all. This is the shape the real production postmortems show
+   * (`AI_APICallError` thrown from inside the AI SDK's OWN retry wrapper
+   * around `doStream`, before any stream object exists) and it is a
+   * DIFFERENT SDK code path from a `{type:"error"}` PART inside an
+   * otherwise-returned stream: a rejected `doStream()` can only ever reach
+   * `onError` (there is no stream for the transform pipeline to later
+   * synthesize an implicit `finish` from), whereas an in-band error PART
+   * reaches BOTH `onError` (immediately, for the part) AND `onFinish`
+   * (afterward, synthesized when the stream closes with no explicit finish
+   * part) — confirmed by reading `node_modules/ai/dist/index.mjs`'s stream
+   * transform. Only the FORMER exercises `primary-stream-recovery.ts` in
+   * isolation from the pre-existing PM #69 onFinish path.
+   */
+  streamThrows: undefined as string | undefined,
 }));
 
 /** Build the provider-level chunk sequence for one scripted step. */
@@ -116,6 +132,11 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
             warnings: [],
           }) as unknown as LanguageModelV3GenerateResult,
         doStream: async () => {
+          if (modelOut.streamThrows) {
+            const err = new Error(modelOut.streamThrows) as Error & { statusCode?: number };
+            err.statusCode = 400; // matches the real AI_APICallError shape (postmortem evidence)
+            throw err;
+          }
           // Scripted multi-step mode: one entry per agent step. Past the end we
           // repeat the last entry so a runaway loop terminates on a "stop"
           // rather than hanging the test.
@@ -261,6 +282,7 @@ function resetHarness() {
   modelOut.steps = undefined;
   modelOut.stepCursor = 0;
   modelOut.genText = undefined;
+  modelOut.streamThrows = undefined;
   foldCalls.sources.length = 0;
   watchdogCalls.stepBoundaries = 0;
   chatStoreFaults.failNextUpdateChat = 0;
@@ -436,6 +458,140 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
     } finally {
       modelOut.genText = undefined; // don't leak into other tests
     }
+  });
+});
+
+/**
+ * Post-`protake`-review Sprint 0 — `onError` recovery, end-to-end against the
+ * real `streamText` machinery (only `createModel` is mocked). A regression in
+ * the wiring between `agent.ts`'s `onError` and `primary-stream-recovery.ts`
+ * would be invisible to `primary-stream-recovery.test.ts` alone, since that
+ * suite mocks `generateFinalAnswerWithFailover` itself — this proves the real
+ * import, the real argument shapes, and the real chat-store persistence path
+ * all actually connect.
+ */
+describe("agent integration — onError recovery (mock model)", () => {
+  it("a doStream rejection is recovered and the substitute's answer is persisted", async () => {
+    // Matches the real production shape: `doStream()` itself rejects, before
+    // any stream exists. Only `onError` can fire for this — see the
+    // `streamThrows` doc comment above `modelOut` for why `{steps:[{fail}]}`
+    // would NOT isolate this code path (that shape also fires onFinish via
+    // the pre-existing PM #69 path, which would pass regardless of this
+    // module's own logic).
+    //
+    // Tool-capable-retry work — `settings.json`'s `utilityModel`
+    // (openai/gpt-4o-mini) is a distinct, tool-supporting, healthy id, so
+    // `toolCallOccurred=false` here now means `attemptToolCapableRetry`
+    // fires FIRST and (via this same mocked `doGenerate`) succeeds before
+    // `generateFinalAnswerWithFailover` is ever reached — this test still
+    // proves the real onError→recovery→persistence wiring end-to-end, just
+    // through the new first-in-line path. The tool-less-ladder-specific
+    // wiring this test used to uniquely cover now has its own test below.
+    modelOut.streamThrows = "Provider returned error";
+    modelOut.genText = "RECOVERED_BY_SUBSTITUTE";
+    const chatId = `integ-recover-${Date.now()}`;
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat, flushAllPendingChats } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "integ-recover");
+
+    const result = await runAgent({ chatId, userMessage: "ping", swarmEnabled: false });
+    await drain(result);
+
+    let chat = null as Awaited<ReturnType<typeof getChat>> | null;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      chat = await getChat(chatId);
+      if (chat?.messages.some((m) => m.role === "assistant" && m.content.includes("RECOVERED_BY_SUBSTITUTE"))) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    await flushAllPendingChats();
+
+    const assistantText = (chat?.messages ?? [])
+      .filter((m) => m.role === "assistant")
+      .map((m) => m.content)
+      .join("\n");
+    expect(assistantText).toContain("RECOVERED_BY_SUBSTITUTE");
+  });
+
+  it("with no tool-capable candidate available, falls through to the tool-less ladder (real generateFinalAnswerWithFailover wiring)", async () => {
+    // `selectToolCapableRetryCandidate` additionally filters on
+    // `modelSupportsTools` — a filter `buildFinalAnswerPool`/the tool-less
+    // ladder does NOT apply. So swapping `utilityModel` to a tool-INCAPABLE
+    // id (matches `NO_TOOL_PATTERNS`) — rather than tripping its circuit,
+    // which would starve BOTH ladders equally, since they share the same
+    // pool — isolates exactly the tool-less-ladder wiring this suite
+    // originally covered. `getSettings()` reads the file fresh every call
+    // (verified from source, no cache), so the swap takes effect
+    // immediately; restored in `finally` so it never bleeds into another
+    // test in this file.
+    const settingsPath = path.join(tmpDir, "settings", "settings.json");
+    const original = await fs.readFile(settingsPath, "utf-8");
+    const swapped = JSON.parse(original);
+    swapped.utilityModel = { provider: "openai", model: "gemma-tool-blind", apiKey: "k" };
+    await fs.writeFile(settingsPath, JSON.stringify(swapped));
+    try {
+      modelOut.streamThrows = "Provider returned error";
+      modelOut.genText = "RECOVERED_BY_TOOLLESS_LADDER";
+      const chatId = `integ-recover-toolless-${Date.now()}`;
+      const { runAgent } = await import("./agent");
+      const { createChat, getChat, flushAllPendingChats } = await import("@/lib/storage/chat-store");
+      await createChat(chatId, "integ-recover-toolless");
+
+      const result = await runAgent({ chatId, userMessage: "ping", swarmEnabled: false });
+      await drain(result);
+
+      let chat = null as Awaited<ReturnType<typeof getChat>> | null;
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        chat = await getChat(chatId);
+        if (chat?.messages.some((m) => m.role === "assistant" && m.content.includes("RECOVERED_BY_TOOLLESS_LADDER"))) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      await flushAllPendingChats();
+
+      const assistantText = (chat?.messages ?? [])
+        .filter((m) => m.role === "assistant")
+        .map((m) => m.content)
+        .join("\n");
+      expect(assistantText).toContain("RECOVERED_BY_TOOLLESS_LADDER");
+    } finally {
+      await fs.writeFile(settingsPath, original);
+    }
+  });
+
+  it("degradationPolicy=quality does NOT recover — the pre-existing error path runs untouched", async () => {
+    modelOut.streamThrows = "Provider returned error";
+    modelOut.genText = "SHOULD_NOT_APPEAR";
+    const chatId = `integ-noreco-${Date.now()}`;
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "integ-noreco");
+
+    const result = await runAgent({
+      chatId,
+      userMessage: "ping",
+      swarmEnabled: false,
+      degradationPolicy: "quality",
+    });
+    await drain(result);
+    // No polling loop here — asserting an ABSENCE, so give the async onError
+    // handler a moment to run rather than racing it.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const chat = await getChat(chatId);
+    const assistantText = (chat?.messages ?? [])
+      .filter((m) => m.role === "assistant")
+      .map((m) => m.content)
+      .join("\n");
+    expect(assistantText).not.toContain("SHOULD_NOT_APPEAR");
+    // Post-review (protake council, 2026-08-31) — `reportTurnError` now persists
+    // a durable failure notice (the fix for "a dead turn and a turn that never
+    // ran look identical on reload"), so the pre-existing error path no longer
+    // leaves the chat silent. Proving the turn fell through to that path is now
+    // POSITIVE evidence (the notice landed) rather than absence-of-evidence
+    // (nothing landed) — strictly stronger, and consistent with never claiming
+    // a substitute answered.
+    expect(assistantText).toContain("Turn failed");
   });
 });
 

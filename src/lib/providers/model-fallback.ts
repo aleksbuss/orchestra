@@ -126,6 +126,44 @@ export function classifyModelError(err: unknown): FailureKind {
   return "unknown";
 }
 
+/** Longest upstream detail we will paste into a chat message. */
+const MAX_FAILURE_DETAIL_CHARS = 200;
+
+/**
+ * A short, operator-readable rendering of an upstream failure —
+ * `"HTTP 400 — Provider returned error"`.
+ *
+ * PM #112 — the "no fallback candidate" notice used to assert a cause it had
+ * not checked ("every alternative endpoint is currently circuit-broken"), so an
+ * upstream 400 caused by OUR OWN over-large `max_tokens` read to the operator as
+ * free-tier exhaustion and sent them off waiting for a recovery that was never
+ * coming. Report what the upstream actually said instead of guessing.
+ *
+ * Returns `null` when there is nothing more informative than the failure kind,
+ * so the caller can omit the clause rather than print an empty one.
+ */
+export function describeUpstreamFailure(err: unknown): string | null {
+  const { statusCode } = extractErrorShape(err);
+  // Read the text fields DIRECTLY rather than reusing `extractErrorShape`'s
+  // message: that one falls back to `String(err)`, which renders a plain object
+  // as the literal "[object Object]". Fine as a classifier input, useless — and
+  // actively confusing — pasted into a chat message.
+  const e = typeof err === "object" && err !== null ? (err as Record<string, unknown>) : {};
+  const message =
+    typeof err === "string" ? err :
+    typeof e.message === "string" ? e.message :
+    typeof e.responseBody === "string" ? e.responseBody :
+    "";
+  const text = message.replace(/\s+/g, " ").trim();
+  const clipped =
+    text.length > MAX_FAILURE_DETAIL_CHARS
+      ? `${text.slice(0, MAX_FAILURE_DETAIL_CHARS)}…`
+      : text;
+  if (statusCode && clipped) return `HTTP ${statusCode} — ${clipped}`;
+  if (statusCode) return `HTTP ${statusCode}`;
+  return clipped || null;
+}
+
 function extractErrorShape(err: unknown): ErrorShape {
   if (typeof err !== "object" || err === null) {
     return { message: String(err) };
@@ -175,7 +213,11 @@ export interface FallbackInput {
   provider: string;
   /** The model id that just failed — must NOT be returned as the fallback. */
   failedModel: string;
-  /** API key for live catalog queries (OpenRouter). Optional for static chains. */
+  /**
+   * API key for live catalog queries (OpenRouter). OPTIONAL everywhere: the
+   * OpenRouter catalogue is public, so its absence enriches nothing and blocks
+   * nothing (PM #112). Static chains never needed it.
+   */
   apiKey?: string;
   /** For Ollama: where the local daemon lives. */
   baseUrl?: string;
@@ -258,15 +300,23 @@ async function pickFromOpenRouterCatalog(
   input: FallbackInput
 ): Promise<FallbackResult> {
   const { failedModel, apiKey, signal } = input;
-  if (!apiKey) {
-    // No key → no catalog; nothing we can do here.
-    return { modelId: null, source: "openrouter_catalog" };
-  }
 
+  // PM #112 — this used to `return { modelId: null }` whenever `apiKey` was
+  // falsy, which made the whole OpenRouter fallback path DEAD for the two
+  // configurations that matter most: a key held only in `.env.local` (the caller
+  // reads `settings.chatModel.apiKey`, which env keys never populate) and Free
+  // Mode (whose overlay carries provider+model ONLY, so the field cannot exist).
+  // The turn then wrote a "no candidate" notice blaming exhausted endpoints,
+  // having never made a request.
+  //
+  // `/api/v1/models` is a PUBLIC catalogue — verified 2026-08-27, HTTP 200 with
+  // no Authorization header — so the key is an enrichment, not a precondition.
+  // Send it when we have one (a keyed request may see models gated to the
+  // account) and query anonymously when we do not.
   let res: Response;
   try {
     res = await fetch("https://openrouter.ai/api/v1/models", {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
       signal: combineSignals(signal, AbortSignal.timeout(OPENROUTER_FETCH_TIMEOUT_MS)),
     });
   } catch {

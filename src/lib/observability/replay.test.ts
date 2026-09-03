@@ -69,6 +69,34 @@ describe("replayPostmortem — classifier regression check", () => {
     expect(result.reclassified.kind).toBe("upstream_no_tools");
   });
 
+  /**
+   * PM #112 — postmortems now carry the REAL upstream status and body, so the
+   * replay must stop synthesizing a plausible-looking one on top of them. Old
+   * files (no `statusCode`) keep the per-kind defaults; that back-compat path is
+   * what every other case in this describe exercises.
+   */
+  it("prefers the RECORDED statusCode/responseBody over the synthesized default", () => {
+    const pm = fixturePm({
+      errorClassification: {
+        traceId: "T-fixture",
+        kind: "upstream_4xx",
+        message: "Provider returned error",
+        recoverable: false,
+      },
+      rawError: {
+        message: "Provider returned error",
+        name: "AI_APICallError",
+        statusCode: 418,
+        responseBody: '{"msg":"bad request"}',
+      },
+    });
+    const reconstructed = replayPostmortem(pm);
+    expect(reconstructed.reclassified.kind).toBe("upstream_4xx");
+    // 418 is not the branch default (400) — proof the stored value was used.
+    expect(pm.rawError.statusCode).toBe(418);
+    expect(reconstructed.consistent).toBe(true);
+  });
+
   it("upstream_rate_limit is reproducible", () => {
     const pm = fixturePm({
       errorClassification: {

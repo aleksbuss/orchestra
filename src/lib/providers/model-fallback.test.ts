@@ -23,6 +23,7 @@ import {
   classifyModelError,
   pickFallbackModel,
   describeFallback,
+  describeUpstreamFailure,
 } from "./model-fallback";
 
 let fetchSpy: any;
@@ -124,14 +125,30 @@ describe("pickFallbackModel — static chains", () => {
 });
 
 describe("pickFallbackModel — OpenRouter catalog", () => {
-  it("returns null when no API key is provided (can't query the catalog)", async () => {
+  /**
+   * PM #112 — this test used to assert the OPPOSITE ("returns null when no API
+   * key is provided, can't query the catalog") and so pinned the defect in
+   * place. `/api/v1/models` is public; the early return made the entire
+   * OpenRouter fallback path dead for env-only keys and for Free Mode, whose
+   * overlay carries provider+model and therefore never has an `apiKey` at all.
+   */
+  it("queries the catalog ANONYMOUSLY when no API key is provided", async () => {
+    fetchSpy.mockResolvedValue(
+      new Response(
+        JSON.stringify({ data: [{ id: "meta-llama/llama-3-70b-instruct" }] }),
+        { status: 200 }
+      )
+    );
+
     const result = await pickFallbackModel({
       provider: "openrouter",
       failedModel: "openai/gpt-4o",
     });
-    expect(result.modelId).toBeNull();
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(fetchSpy.mock.calls[0][1]).toMatchObject({ headers: undefined });
+    expect(result.modelId).toBe("meta-llama/llama-3-70b-instruct");
     expect(result.source).toBe("openrouter_catalog");
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("queries OpenRouter /models with Authorization header", async () => {
@@ -370,5 +387,50 @@ describe("describeFallback — user-facing notification text", () => {
     expect(message).toMatch(/Pricing may differ/i);
     expect(message).toMatch(/doesn't support tool calls/i);
     expect(hint).toMatch(/Settings/i);
+  });
+});
+
+/**
+ * PM #112 — the "no fallback candidate" chat notice used to assert a cause it
+ * had never checked ("every alternative endpoint is currently circuit-broken").
+ * The real failure was a deterministic upstream 400 caused by Orchestra's own
+ * `max_tokens`, and the operator read the message as free-tier exhaustion and
+ * waited. This helper is what lets the notice quote the upstream instead.
+ */
+describe("describeUpstreamFailure — say what the upstream said", () => {
+  it("renders status + message for an AI_APICallError shape", () => {
+    expect(
+      describeUpstreamFailure({
+        name: "AI_APICallError",
+        statusCode: 400,
+        message: "Provider returned error",
+      })
+    ).toBe("HTTP 400 — Provider returned error");
+  });
+
+  it("accepts `status` as well as `statusCode`", () => {
+    expect(describeUpstreamFailure({ status: 429, message: "slow down" })).toBe(
+      "HTTP 429 — slow down"
+    );
+  });
+
+  it("collapses whitespace so a multi-line body stays one readable line", () => {
+    expect(
+      describeUpstreamFailure({ statusCode: 400, message: "bad\n  request\n" })
+    ).toBe("HTTP 400 — bad request");
+  });
+
+  it("truncates a long body rather than pasting it whole into the chat", () => {
+    const out = describeUpstreamFailure({
+      statusCode: 400,
+      message: "x".repeat(5000),
+    });
+    expect(out!.length).toBeLessThan(300);
+    expect(out).toMatch(/…$/);
+  });
+
+  it("degrades to status-only, then to null — never to an invented cause", () => {
+    expect(describeUpstreamFailure({ statusCode: 502, message: "" })).toBe("HTTP 502");
+    expect(describeUpstreamFailure({})).toBeNull();
   });
 });

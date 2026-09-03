@@ -174,6 +174,35 @@ describe("model-health circuit breaker", () => {
       expect(classifyModelFailure(new Error("ECONNRESET"))).toBe("unreachable");
     });
 
+    // Live-observed 2026-08-30/31: an `AI_RetryError` wrapping four exhausted
+    // attempts against a rate-limited free endpoint carried the message
+    // "Failed after 4 attempts. Last error: Provider returned error" — matching
+    // the "server" branch above via text alone, even though the real cause
+    // (unwrapped from `.lastError`) was a 429. The breaker's own telemetry was
+    // silently lying about why every free model kept tripping.
+    it("prefers a real statusCode over message-text guessing — 429 is throttle even when the message says 'provider returned error'", () => {
+      const err = Object.assign(new Error("Provider returned error"), { statusCode: 429 });
+      expect(classifyModelFailure(err)).toBe("throttle");
+    });
+
+    it("unwraps AI_RetryError.lastError to find the real statusCode", () => {
+      const apiErr = Object.assign(new Error("Provider returned error"), { statusCode: 429 });
+      const retryErr = Object.assign(
+        new Error("Failed after 4 attempts. Last error: Provider returned error"),
+        { name: "AI_RetryError", lastError: apiErr }
+      );
+      expect(classifyModelFailure(retryErr)).toBe("throttle");
+    });
+
+    it("a real 5xx statusCode still classifies as server", () => {
+      const err = Object.assign(new Error("Provider returned error"), { statusCode: 502 });
+      expect(classifyModelFailure(err)).toBe("server");
+    });
+
+    it("falls back to message-text matching when there is no statusCode at all (unchanged behavior)", () => {
+      expect(classifyModelFailure(new Error("Provider returned error"))).toBe("server");
+    });
+
     it("does NOT count OUR faults — an over-long prompt or a full semaphore queue", () => {
       expect(
         classifyModelFailure(new Error("This model's maximum context length is 8192 tokens"))

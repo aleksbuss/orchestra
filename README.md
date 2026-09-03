@@ -135,6 +135,7 @@ flowchart TD
     R -.-> CB
     FAN -.-> CB
     AGG -.-> CB
+    TQ -.-> CB
     CRIT -.-> CB
     REV -.-> CB
 ```

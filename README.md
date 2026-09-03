@@ -98,31 +98,48 @@ If you only look at one thing here, make it [`POST_MORTEMS.md`](./POST_MORTEMS.m
 Every Swarm-mode turn flows through this pipeline. The key thing to understand: the ensemble's output is **never the terminal answer** — every path converges on **one final tool-capable stream** (the same `streamText` a non-swarm turn uses), which produces the response, streams it, and can call tools. By default the swarm's synthesis happens **inside** that stream (the "inline-synthesis collapse" — one brain generation per turn); the standalone aggregator only runs on the opt-in paths.
 
 ```mermaid
-flowchart LR
-    U[User message] --> R[Router DPG<br/>utility-model]
-    R -->|requiresSwarm=false<br/>trivial prompt| FS
-    R -->|requiresSwarm=true<br/>+ force-injected Skeptic| P1[Proposer 1]
-    R --> P2[Proposer 2]
-    R --> P3[Proposer N]
-    R --> PS[Skeptic<br/>guaranteed · operator-pinnable model]
-    P1 --> DD{Disagreement<br/>detector<br/>cosine &gt; 0.35}
-    P2 --> DD
-    P3 --> DD
-    PS --> DD
-    DD -->|DEFAULT: drafts + conflict marker<br/>injected into system prompt| FS[Final tool-capable stream<br/>brain-model · streams · calls tools]
-    DD -->|0–1 drafts survive ·<br/>degraded → single agent, surfaced| FS
-    DD -->|reflection ON ·<br/>inlineSynthesis:false| AGG[Standalone aggregator<br/>brain-model]
-    DD -->|tournament mode| TQ[Tournament<br/>K judges · Borda · verbatim winner]
-    AGG --> REF{Reflection<br/>enabled?}
-    REF -->|critic flags issue| REV[Revisor<br/>brain-model]
-    REF -->|disabled / clean| FS
-    REV --> FS
-    TQ -->|winner injected as reference| FS
+flowchart TD
+    U[User message] --> R[Router / DPG<br/>utility-model · generateObject]
+    R -->|requiresSwarm=false<br/>AND no Force-Swarm| FS[Final tool-capable stream<br/>brain-model · streams · calls tools]
+    R -->|requiresSwarm=true<br/>OR Force-Swarm| FAN[Fan-out: parallel proposers<br/>+ Skeptic, force-injected if DPG omitted it]
+
+    FAN --> SURV{Drafts survived?}
+    SURV -->|0| DEG[Degraded to single agent<br/>NO Skeptic audit · surfaced as UI alert<br/>nothing injected into FS]
+    SURV -->|1| S1[Single draft used verbatim<br/>injected into FS as reference]
+    SURV -->|2+| DD[Disagreement check<br/>embed + pairwise cosine DISTANCE<br/>&gt; 0.35 threshold sets conflict marker]
+
+    DEG --> FS
+    S1 --> FS
+
+    DD --> GATE{aggregatorMode ·<br/>inlineSynthesis · reflection}
+    GATE -->|DEFAULT: synthesis AND<br/>inlineSynthesis AND reflection OFF| INL[Inline-synthesis collapse<br/>drafts + marker handed to FS<br/>ONE brain generation]
+    GATE -->|synthesis AND<br/>NOT inlineSynthesis, OR reflection ON| AGG[Standalone aggregator<br/>brain-model · generateText]
+    GATE -->|tournament| TQ[Tournament<br/>K judges · Borda count]
+
+    INL --> FS
+    TQ -->|winner| TW[Verbatim winner<br/>injected into FS as reference]
+    TW --> FS
+    TQ -.->|all judges failed| AGG
+
+    AGG --> RGATE{Reflection<br/>enabled?}
+    RGATE -->|off| REFOUT[Consensus injected<br/>into FS as reference]
+    RGATE -->|on, Deep Audit| CRIT[Critic<br/>Skeptic model, else brain · reflectOnResponse]
+    CRIT -->|clean| REFOUT
+    CRIT -->|critique| REV[Revisor<br/>brain-model · reviseWithCritique<br/>max 3 rounds]
+    REV -->|cannot_fix, converged,<br/>or cap hit| REFOUT
+    REV -.->|else: next round| CRIT
+    REFOUT --> FS
+
     FS --> OUT[Final response]
     OUT --> CB[Cost banner<br/>tokens + USD]
+    R -.-> CB
+    FAN -.-> CB
+    AGG -.-> CB
+    CRIT -.-> CB
+    REV -.-> CB
 ```
 
-> **Inline-synthesis collapse (default since 2c, 2026-06).** On the default synthesis path the swarm does **not** run a separate aggregator generation. `runMoAEnsemble` hands the raw drafts (plus the disagreement marker) up to `runAgent`, which injects them into the **system prompt** of the final tool-capable stream — so that one stream synthesizes the experts inline, **one brain generation per turn instead of two**, and can call tools mid-synthesis. Backed by an N=8 live A/B: quality held, latency −31%, completion tokens −16%. The collapse fires only with **≥2 successful drafts** and `aggregatorMode === "synthesis"`. The **standalone aggregator** (its own brain generation, injected back into the final stream as reference context) runs instead whenever reflection is enabled or `aggregator.inlineSynthesis: false`; **tournament** mode replaces synthesis with judge-ranking. If only 0–1 drafts survive, there is no synthesis at all — the lone draft (or a failure note) is passed straight up and injected as reference. When **zero** proposers survive, the swarm collapses to a single agent and that degradation is now **surfaced** to the operator (a distinct signal from the Router's deliberate bypass), so a silently-degraded turn can't masquerade as a healthy one. Either way the Router's `requiresSwarm=false` bypass also defers to the same final stream — no proposers, no redundant pre-generation.
+> **Inline-synthesis collapse (default since 2c, 2026-06).** On the default synthesis path the swarm does **not** run a separate aggregator generation. `runMoAEnsemble` hands the raw drafts (plus the disagreement marker) up to `runAgent`, which injects them into the **system prompt** of the final tool-capable stream — so that one stream synthesizes the experts inline, **one brain generation per turn instead of two**, and can call tools mid-synthesis. Backed by an N=8 live A/B: quality held, latency −31%, completion tokens −16%. The collapse fires only with **≥2 successful drafts** and `aggregatorMode === "synthesis"`. The **standalone aggregator** (its own brain generation, injected back into the final stream as reference context) runs instead whenever reflection is enabled or `aggregator.inlineSynthesis: false`; **tournament** mode replaces synthesis with judge-ranking. If exactly **one** draft survives, there is no synthesis either — that lone draft is passed straight up and injected as reference context, unreviewed (the Skeptic was just one of the competing proposers). If **zero** proposers survive, nothing is passed up at all: the swarm collapses to a single agent with no consensus and no Skeptic audit, and that degradation is now **surfaced** to the operator (a distinct signal from the Router's deliberate bypass) instead of silently masquerading as a healthy turn. Either way the Router's `requiresSwarm=false` bypass also defers to the same final stream — no proposers, no redundant pre-generation.
 
 ![The Swarm Activity panel, live — for a locking question the Router spun up a Database Architect, Concurrency Engineer, Performance Optimizer, and a code-guaranteed QA Auditor / Skeptic, then synthesized their drafts](docs/assets/orchestra-swarm-activity.png)
 
@@ -136,9 +153,9 @@ Each stage maps to a [`POST_MORTEMS.md`](./POST_MORTEMS.md) entry that documents
 | **Force-injected Skeptic** | Post-validates DPG output, injects the Adversarial Critic if missing — **unconditionally** (even on a "trivial" verdict, so a Force-Swarm-over-bypass turn still gets it). The Skeptic **model** is operator-pinnable, with a per-request override | PM #37 (prompt-as-contract is unreliable) + PM #90/#91 (guarantee the persona wherever the swarm can fan out; let the operator own the critic model) |
 | **Parallel proposers** | 3-5 LLM calls fanned out via `Promise.all` with stagger + per-proposer timeout | Latency cost is parallel, not serial; 1 slow proposer doesn't block the others |
 | **Disagreement detector** | Pairwise cosine distance over draft embeddings; emits a "surface the conflict" marker | PM #39 — academic frameworks call silent smoothing "sycophantic consensus"; threshold 0.35 catches divergent recommendations. The marker rides along to whichever synthesis path runs (inline or standalone aggregator) |
-| **Synthesis (default: inline)** | Drafts + marker injected into the final stream's system prompt; that stream synthesizes the experts itself | PM #40 synthesis rules ported into the injected directive. Default since Sprint 2c — **one brain generation**, synthesizer can call tools mid-synthesis. Fires only with ≥2 drafts; with 0–1 the lone draft / failure note is passed straight through |
+| **Synthesis (default: inline)** | Drafts + marker injected into the final stream's system prompt; that stream synthesizes the experts itself | PM #40 synthesis rules ported into the injected directive. Default since Sprint 2c — **one brain generation**, synthesizer can call tools mid-synthesis. Fires only with ≥2 drafts. With exactly 1, that draft passes through verbatim as reference (unreviewed). With 0, nothing passes through — the swarm degrades to a single agent instead |
 | **Standalone aggregator** | Separate brain generation over the drafts (togethercomputer/MoA reference prompt), injected back as reference context | Runs on the non-inline branch — reflection ON or `inlineSynthesis: false` — the paths the inline collapse deliberately excludes |
-| **Tournament** (opt-in) | K judges Borda-rank the drafts; the verbatim winning draft is injected as reference | PM #52 — for "one correct answer" tasks (bug-fix, API design, lookup), picking the best draft beats blending. Skips reflection; not yet collapsed into the stream |
+| **Tournament** (opt-in) | K judges Borda-rank the drafts; the verbatim winning draft is injected as reference | PM #52 — for "one correct answer" tasks (bug-fix, API design, lookup), picking the best draft beats blending. Skips reflection; falls back to the standalone aggregator if every judge fails; not yet collapsed into the stream |
 | **Reflection critic + revisor** | Generator-Critic-Revisor (Reflexion pattern), opt-in | PM #38 — was dead code before; now wired through with cost attribution. Inherently multi-pass, so it forces the standalone-aggregator path |
 | **Final tool-capable stream** | The single `streamText` that produces, streams, and tool-calls the answer for **every** turn (swarm or not) | The ensemble output is never terminal — convergence here keeps tools, RAG memory, and PM #61 persistence/unwrap on one path |
 | **Cost banner** | Per-chat tokens + USD shown in chat header | PM #36 — operator awareness without hard caps; friends sharing the instance see spend |

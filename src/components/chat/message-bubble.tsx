@@ -3,10 +3,33 @@
 import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { visit } from "unist-util-visit";
 import { AudioLines } from "lucide-react";
 import { CodeBlock } from "./code-block";
 import { ToolOutput } from "./tool-output";
 import type { UIMessage } from "ai";
+import type { Root } from "mdast";
+
+/**
+ * Models emit literal `<br>` inside GFM table cells to force a line break
+ * without a real newline (a newline would terminate the table row). There is
+ * no rehype-raw in this pipeline, so without this transform those tags show
+ * up as literal "<br>" text. Converting only mdast `html` nodes that are
+ * exactly a <br> tag (case-insensitive, with/without the trailing slash)
+ * fixes that without adding a general raw-HTML parser/sanitizer for one
+ * token — protake council review flagged rehype-raw + rehype-sanitize as a
+ * needlessly wide attack surface for this.
+ */
+function remarkLiteralBreaks() {
+  return (tree: Root) => {
+    visit(tree, "html", (node, index, parent) => {
+      if (index === undefined || !parent) return;
+      if (/^<br\s*\/?>$/i.test(node.value.trim())) {
+        parent.children[index] = { type: "break" };
+      }
+    });
+  };
+}
 
 /** Strip model-internal reasoning blocks from streamed text before rendering. */
 function stripThinkingTags(text: string): string {
@@ -49,7 +72,7 @@ function MessageBubbleImpl({ message }: MessageBubbleProps) {
   const textContent = message.parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
     .map((p) => p.text)
-    .join("");
+    .join("\n\n");
 
   // Extract tool parts
   const toolParts = message.parts.filter(
@@ -169,7 +192,7 @@ function MessageBubbleImpl({ message }: MessageBubbleProps) {
             <AudioLines className="size-4" />
           </div>
           <div className="glass-panel shadow-md backdrop-blur-3xl rounded-[24px] rounded-tl-[6px] px-5 py-4 max-w-[90%] sm:max-w-[85%] text-[15px] leading-relaxed min-w-0 overflow-hidden break-words">
-            <div className="prose prose-base dark:prose-invert max-w-none text-inherit [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+            <div className="text-inherit [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
               <MarkdownContent content={visibleTextContent} />
             </div>
           </div>
@@ -182,9 +205,18 @@ function MessageBubbleImpl({ message }: MessageBubbleProps) {
 function MarkdownContent({ content }: { content: string }) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkLiteralBreaks]}
       components={{
-        code({ className, children, ...props }) {
+        // Every override below destructures `node` out before spreading the
+        // rest onto a real DOM element. react-markdown injects `node` (the
+        // underlying HAST element) into EVERY custom component's props —
+        // undocumented in the JSX but confirmed in its own type defs
+        // (node_modules/react-markdown/lib/index.d.ts). Spreading it straight
+        // through (the pattern this file used before) renders a literal
+        // node="[object Object]" attribute on the live DOM element — caught
+        // by inspecting the real rendered output, not just reading the types.
+        code({ className, children, node, ...props }) {
+          void node;
           const match = /language-(\w+)/.exec(className || "");
           const isInline = !match;
           if (isInline) {
@@ -204,11 +236,21 @@ function MarkdownContent({ content }: { content: string }) {
             />
           );
         },
-        table({ children, ...props }) {
+        table({ children, node, ...props }) {
+          void node;
           // GFM tables can be wider than the bubble (mobile viewport is the hard
           // cap, unlike code blocks the table has no natural line-wrap). Scope
           // the scroll to the table itself instead of the bubble, mirroring the
           // overflow-x-auto pattern CodeBlock already uses for <pre>.
+          //
+          // min-w-full alone does NOT make this scrollable: table-layout:auto
+          // with normal white-space lets the browser satisfy the container
+          // width by wrapping every cell down to its min-content (the longest
+          // word), so a prose-heavy table just crushes into unreadable narrow
+          // columns instead of ever overflowing — there's nothing for
+          // overflow-x-auto to scroll. The per-cell min-width below (see
+          // th/td) forces a real column floor so wide tables actually exceed
+          // the wrapper and scroll, while narrow tables are unaffected.
           return (
             <div className="my-2 max-w-full overflow-x-auto scrollbar-thin">
               <table className="min-w-full" {...props}>
@@ -217,21 +259,43 @@ function MarkdownContent({ content }: { content: string }) {
             </div>
           );
         },
-        ul({ children, ...props }) {
+        th({ children, node, ...props }) {
+          void node;
+          return (
+            <th
+              className="border-b border-border/60 px-3 py-2 min-w-[9rem] align-bottom text-left font-semibold"
+              {...props}
+            >
+              {children}
+            </th>
+          );
+        },
+        td({ children, node, ...props }) {
+          void node;
+          return (
+            <td className="border-b border-border/40 px-3 py-2 min-w-[9rem] align-top" {...props}>
+              {children}
+            </td>
+          );
+        },
+        ul({ children, node, ...props }) {
+          void node;
           return (
             <ul className="my-2 list-disc pl-6 space-y-1" {...props}>
               {children}
             </ul>
           );
         },
-        ol({ children, ...props }) {
+        ol({ children, node, ...props }) {
+          void node;
           return (
             <ol className="my-2 list-decimal pl-6 space-y-1" {...props}>
               {children}
             </ol>
           );
         },
-        li({ children, ...props }) {
+        li({ children, node, ...props }) {
+          void node;
           return (
             <li className="marker:text-muted-foreground" {...props}>
               {children}

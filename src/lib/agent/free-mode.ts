@@ -146,6 +146,14 @@ export interface FreeModeSelection {
    */
   routerSupportsStructuredOutputs: boolean;
   /**
+   * PM #128 — true when at least one KNOWN sub-8B id was dropped from the Router
+   * candidates by the size floor. Surfaced so the reason a small model did NOT
+   * become the swarm judge is visible, not inferred: the floor is the guard that
+   * still holds on a week the whole structured pool is unscored and the sort is
+   * therefore alphabetical.
+   */
+  routerFloorDroppedSmall: boolean;
+  /**
    * False when no free model known to support tool calling could be found, so
    * the brain slot had to be filled with one that cannot. The run still works,
    * but Single Agent mode drops to plain chat: no web search, no file access,
@@ -210,6 +218,35 @@ function cfg(model: string): ModelConfig {
 function spread(pool: readonly string[], n: number): string[] {
   if (pool.length === 0) return [];
   return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
+}
+
+/**
+ * Smallest parameter count (in billions) a model may have and still be trusted
+ * as the Router. The Router runs `generateObject` to decide `requiresSwarm` and
+ * to write the expert personas; a micro-model (measured: `liquid/lfm-2.5-2.6b`)
+ * lacks the judgment and returns `requiresSwarm:false` on genuinely hard tasks,
+ * silently disabling the swarm. 8B is the boundary — it excludes the sub-8B ids
+ * that reach the pool while keeping the 9B+ models the fallback list relies on.
+ */
+const ROUTER_MIN_PARAM_B = 8;
+
+/**
+ * Best-effort parameter count (in billions) parsed from a model id, or
+ * `undefined` when the id carries no size token. Returns the LARGEST `<N>b`
+ * found so a MoE id reads as its TOTAL, not its active count
+ * (`nemotron-3-super-120b-a12b` → 120, never 12) — under-counting would wrongly
+ * exclude a large model from the Router. The trailing `(?![a-z0-9])` keeps `b`
+ * as a size suffix ("2.6b", "120b") and not the first letter of a word.
+ * `undefined` (unknown size) is never excluded — "no evidence, no exclusion",
+ * the same posture as the structured/tools capability filters.
+ */
+function estimateParamCountB(id: string): number | undefined {
+  let max: number | undefined;
+  for (const m of id.toLowerCase().matchAll(/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/g)) {
+    const n = parseFloat(m[1]);
+    if (!Number.isNaN(n) && (max === undefined || n > max)) max = n;
+  }
+  return max;
 }
 
 /**
@@ -363,12 +400,30 @@ export function selectFreeModels(): FreeModeSelection {
 
   const brain = pickBrain(generalPool, structured);
 
+  // PM #128 — floor the Router pool at a minimum size. When every structured-
+  // capable free id is unscored (the live case: 0/5 carry an
+  // `artificial_analysis` intelligence score), `sortFreeModelsByScore` falls to
+  // its ALPHABETICAL tiebreak, which seated `liquid/lfm-2.5-2.6b` (2.6B) as the
+  // swarm judge over `nvidia/…-120b` by the letter. Drop KNOWN sub-8B ids so a
+  // micro-model can never be Router — but SOFT: an id with no parseable size is
+  // kept, and if the floor would empty the pool, fall back to the unfiltered
+  // pool rather than leave the slot empty (a bad catalogue week must not
+  // deadlock the Router — protake council). This is defence-in-depth behind the
+  // score-ingestion fix (PM #128): with real scores the strong id wins the sort;
+  // the floor is what still protects the slot on a week the scores are absent.
+  const routerFloored = routerPool.filter((id) => {
+    const params = estimateParamCountB(id);
+    return params === undefined || params >= ROUTER_MIN_PARAM_B;
+  });
+  const routerFloorDroppedSmall = routerFloored.length < routerPool.length;
+  const routerCandidates = routerFloored.length > 0 ? routerFloored : routerPool;
+
   // Router on a DIFFERENT endpoint from the brain where the pool allows it
   // (PM #112). `routerPool[0]` and `pickBrain` both resolve to the first
   // structured-capable id, so taking [0] unconditionally guaranteed a
   // collision. Falls back to sharing rather than leaving the slot empty — a
   // Router on the brain's endpoint still works; no Router does not.
-  const router = routerPool.find((id) => id !== brain) ?? routerPool[0];
+  const router = routerCandidates.find((id) => id !== brain) ?? routerCandidates[0];
 
   // Spread the three proposer tiers across DISTINCT endpoints where possible.
   // Rotating the pool to start AFTER the brain keeps the brain's endpoint out
@@ -398,6 +453,7 @@ export function selectFreeModels(): FreeModeSelection {
     endpointSpread: new Set(tiers).size,
     routerSharesBrainEndpoint: router === brain,
     routerSupportsStructuredOutputs: structured.length > 0,
+    routerFloorDroppedSmall,
     brainSupportsTools: supportsTools(brain),
     candidateCount: catalogue.length,
     // Computed against `workingCatalogue` (post health-filter), not the raw
@@ -452,6 +508,19 @@ export function applyFreeMode(settings: AppSettings): {
         ...settings.proposerTiers,
         ...selection.proposerTiers,
       },
+      // PM #127 — carry the tiers this overlay just displaced, so the fan-out's
+      // failover pool can still NAME them (and, with `allowPaidFallback`, use
+      // them) once every free candidate is quarantined. Without this the
+      // operator's own working fallback vanished before the pool was built.
+      // Re-applying the overlay to already-overlaid settings would record the
+      // FREE tiers as the "displaced" ones and lose the operator's originals,
+      // so the first capture wins (PM #127 audit).
+      freeModeDisplacedTiers: settings.freeModeDisplacedTiers ?? {
+        fast: settings.proposerTiers?.fast,
+        balanced: settings.proposerTiers?.balanced,
+        frontier: settings.proposerTiers?.frontier,
+        skeptic: settings.proposerTiers?.skeptic,
+      },
     },
     selection,
     suppressedByPrivacyMode: false,
@@ -481,6 +550,7 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
       ? `, ${s.excludedUnhealthy} dropped as currently unhealthy (${s.excludedUnhealthyIds.join(", ")})`
       : "") +
     (s.healthyPoolEmptied ? ", ALL scored ids are currently unhealthy so the health filter was ABANDONED" : "") +
+    (s.routerFloorDroppedSmall ? `, a KNOWN sub-${ROUTER_MIN_PARAM_B}B id was floored out of the Router pool` : "") +
     `]: ` +
     `${brain}, ${router}, ` +
     `proposers across ${s.endpointSpread} endpoint(s): ` +

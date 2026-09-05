@@ -187,6 +187,63 @@ describe("Free Mode — model selection", () => {
       expect(Object.keys(c).sort()).toEqual(["model", "provider"]);
     }
   });
+
+  // ── PM #128 — the scoreless-pool → alphabetical Router bug ────────────────
+  // Live, every structured-capable free id was UNSCORED (0/5 carried an
+  // artificial_analysis intelligence score), so `sortFreeModelsByScore` fell to
+  // its alphabetical tiebreak and seated a 2.6B (`liquid/lfm-2.5-2.6b`) as the
+  // swarm Router ahead of a 120B — which returned requiresSwarm:false on hard
+  // tasks and silently disabled the swarm.
+
+  it("floors a KNOWN sub-8B id out of the Router slot even when it sorts first (PM #128)", () => {
+    // All three structured+tools and ALL unscored → the sort is purely
+    // alphabetical. This is the exact production pool (brain=dots-3, and without
+    // the floor router=lfm-2.6b because `liquid/…` sorts right after it).
+    seedCatalogue([
+      ["dots-studio/dots-3-note-preview:free", ["tools", "structured_outputs"]],
+      ["liquid/lfm-2.5-2.6b:free", ["tools", "structured_outputs"]],
+      ["nvidia/nemotron-3-super-120b-a12b:free", ["tools", "structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    expect(s.utilityModel.model).not.toBe("liquid/lfm-2.5-2.6b:free");
+    // the 120B is the only KNOWN-large structured id that is not the brain
+    expect(s.utilityModel.model).toBe("nvidia/nemotron-3-super-120b-a12b:free");
+    expect(s.routerFloorDroppedSmall).toBe(true);
+    expect(describeFreeModeSelection(s)).toContain("floored out of the Router pool");
+  });
+
+  it("does not empty the Router pool when EVERY structured id is sub-8B — soft floor (PM #128)", () => {
+    // A HARD floor would leave no Router on a bad catalogue week; the soft floor
+    // falls back to the unfiltered pool rather than deadlock the slot.
+    seedCatalogue([
+      ["liquid/lfm-2.5-2.6b:free", ["tools", "structured_outputs"]],
+      ["vendor/tiny-3b:free", ["tools", "structured_outputs"]],
+    ]);
+    const s = selectFreeModels();
+    expect(s.utilityModel.model).toMatch(/:free$/);
+    expect(s.routerSupportsStructuredOutputs).toBe(true);
+  });
+
+  it("seats the benchmark-scored ids over unscored ones once the null-intelligence fix lands them a score (PM #128)", () => {
+    seedCatalogue([
+      ["dots-studio/dots-3-note-preview:free", ["tools", "structured_outputs"]],
+      ["z-ai/glm-5.2:free", ["tools", "structured_outputs"]],
+      ["nvidia/nemotron-3-super-120b-a12b:free", ["tools", "structured_outputs"]],
+    ]);
+    // What the fixed ingestion produces from the live catalogue: agentic/coding
+    // present, intelligence defaulted 0; dots-3 stays genuinely unscored.
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["z-ai/glm-5.2:free", { intelligence: 0, coding: 68.8, agentic: 39.7 }],
+        ["nvidia/nemotron-3-super-120b-a12b:free", { intelligence: 0, coding: 37.7, agentic: 4.2 }],
+      ])
+    );
+    const s = selectFreeModels();
+    // brain = strongest structured+tools = glm-5.2 (agentic 39.7 > 4.2);
+    // router = next = nemotron-120b. dots-3 (unscored) takes NEITHER slot.
+    expect(s.chatModel.model).toBe("z-ai/glm-5.2:free");
+    expect(s.utilityModel.model).toBe("nvidia/nemotron-3-super-120b-a12b:free");
+  });
 });
 
 /**
@@ -585,5 +642,53 @@ describe("Free Mode — the Router must not sit on the brain's endpoint", () => 
       ["bbb/second:free", ["tools", "structured_outputs"]],
     ]);
     expect(describeFreeModeSelection(selectFreeModels())).not.toMatch(/SHARES/);
+  });
+});
+
+/**
+ * PM #127 — the overlay used to REPLACE `proposerTiers` outright, so the
+ * operator's own (usually paid, usually working) tiers were gone before the
+ * fan-out built its failover pool from them. When every free candidate was
+ * refused there was nothing left to substitute to. The displaced originals are
+ * now carried, so the pool can at minimum NAME them.
+ */
+describe("PM #127 — the overlay preserves the tiers it displaces", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+    seedCatalogue([
+      ["v/a:free", ["structured_outputs"]],
+      ["v/b:free", ["tools"]],
+      ["v/c:free", ["tools"]],
+    ]);
+  });
+
+  it("carries the operator's paid tiers into freeModeDisplacedTiers", () => {
+    const base = settings({
+      freeMode: { enabled: true },
+      proposerTiers: {
+        fast: { provider: "openrouter", model: "deepseek/deepseek-chat" },
+        balanced: { provider: "openrouter", model: "deepseek/deepseek-chat" },
+        frontier: { provider: "openrouter", model: "anthropic/claude-sonnet-4.6" },
+      },
+    });
+    const out = applyFreeMode(base);
+
+    // The live tiers are free…
+    expect(out.settings.proposerTiers?.fast?.model).toMatch(/:free$/);
+    // …and the displaced paid originals survive alongside them.
+    expect(out.settings.freeModeDisplacedTiers?.fast?.model).toBe("deepseek/deepseek-chat");
+    expect(out.settings.freeModeDisplacedTiers?.frontier?.model).toBe(
+      "anthropic/claude-sonnet-4.6"
+    );
+  });
+
+  it("still does not mutate the caller's settings", () => {
+    const base = settings({
+      freeMode: { enabled: true },
+      proposerTiers: { fast: { provider: "openrouter", model: "paid/one" } },
+    });
+    applyFreeMode(base);
+    expect(base.proposerTiers?.fast?.model).toBe("paid/one");
+    expect(base.freeModeDisplacedTiers).toBeUndefined();
   });
 });

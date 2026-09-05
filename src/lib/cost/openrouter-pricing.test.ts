@@ -244,6 +244,43 @@ describe("PM #49 — fetchOpenRouterPricing", () => {
     });
   });
 
+  it("stores agentic/coding even when intelligence_index is null (PM #128 — the scoreless-pool → alphabetical bug)", async () => {
+    mockFetchOk({
+      data: [
+        {
+          // Live shape 2026-09-05: OpenRouter publishes agentic/coding but a
+          // NULL intelligence for these. The old gate (intelligence-only)
+          // discarded the WHOLE entry, so the model came back unscored and lost
+          // the Free Mode sort by alphabet — a 2.6B beat a 120B on the letter.
+          id: "z-ai/glm-5.2:free",
+          benchmarks: { artificial_analysis: { intelligence_index: null, coding_index: 68.8, agentic_index: 39.7 } },
+        },
+        {
+          id: "nvidia/nemotron-3-super-120b-a12b:free",
+          benchmarks: { artificial_analysis: { intelligence_index: null, coding_index: 37.7, agentic_index: 4.2 } },
+        },
+        // No artificial_analysis block at all → still genuinely unscored.
+        { id: "dots-studio/dots-3-note-preview:free", benchmarks: null },
+      ],
+    });
+    await fetchOpenRouterPricing();
+    // Present agentic/coding survive; the missing intelligence axis defaults to 0
+    // (a known axis outranks a total unknown, which stays undefined → -1).
+    expect(getOpenRouterBenchmarkScore("z-ai/glm-5.2:free")).toEqual({
+      intelligence: 0,
+      coding: 68.8,
+      agentic: 39.7,
+    });
+    expect(getOpenRouterBenchmarkScore("nvidia/nemotron-3-super-120b-a12b:free")).toEqual({
+      intelligence: 0,
+      coding: 37.7,
+      agentic: 4.2,
+    });
+    // The fix widens the gate to "any index present", NOT "credit everyone": a
+    // model with no artificial_analysis block is still unscored.
+    expect(getOpenRouterBenchmarkScore("dots-studio/dots-3-note-preview:free")).toBeUndefined();
+  });
+
   it("throws on non-200 status (caller handles fallback)", async () => {
     mockFetchStatus(503, "Service Unavailable");
     await expect(fetchOpenRouterPricing()).rejects.toThrow(/503/);

@@ -330,14 +330,29 @@ export async function fetchOpenRouterPricing(options: {
     if (typeof cl === "number" && cl > 0) ctxLen.set(id, cl);
     const mo = deriveUsableMaxOutput(entry.top_provider?.max_completion_tokens, cl);
     if (mo !== undefined) maxOut.set(id, mo);
-    // "No evidence, no credit" — only store when intelligence_index is a real
-    // number. A model with `benchmarks: null` (common — roughly a third of the
-    // live catalogue, including today's actual Free Mode brain) simply gets no
-    // entry, exactly like an id with no maxOutput.
+    // Store a benchmark entry when ANY artificial_analysis index is a real
+    // number — not only `intelligence_index` (PM #128). OpenRouter ships
+    // `intelligence_index: null` for a number of current models while STILL
+    // publishing `agentic_index`/`coding_index` (measured live 2026-09-05:
+    // `z-ai/glm-5.2:free` = agentic 39.7 / coding 68.8, `nvidia/nemotron-3-super-
+    // 120b-a12b:free` = agentic 4.2 / coding 37.7, both with a null intelligence).
+    // Gating the whole entry on intelligence discarded that real capability
+    // signal, so every structured-capable free model came back UNSCORED and
+    // `sortFreeModelsByScore` fell through to its ALPHABETICAL tiebreak — which
+    // seated a 2.6B (`liquid/lfm-2.5-2.6b`) as the swarm Router ahead of a 120B
+    // purely because `l` sorts before `n`. A missing sub-index still defaults to
+    // 0 (a model with a KNOWN axis outranks a total unknown, which stays absent
+    // → ranked -1 by the comparator); "no evidence, no credit" still holds for a
+    // model with NO `artificial_analysis` block at all.
     const ai = entry.benchmarks?.artificial_analysis;
-    if (ai && typeof ai.intelligence_index === "number") {
+    if (
+      ai &&
+      (typeof ai.intelligence_index === "number" ||
+        typeof ai.agentic_index === "number" ||
+        typeof ai.coding_index === "number")
+    ) {
       benchmarks.set(id, {
-        intelligence: ai.intelligence_index,
+        intelligence: typeof ai.intelligence_index === "number" ? ai.intelligence_index : 0,
         coding: typeof ai.coding_index === "number" ? ai.coding_index : 0,
         agentic: typeof ai.agentic_index === "number" ? ai.agentic_index : 0,
       });
@@ -743,12 +758,15 @@ export function __setOpenRouterSupportedParametersForTest(
 /**
  * Per-model `artificial_analysis` benchmark score from the live OpenRouter
  * `/models` cache. `undefined` means "no score" — either the catalogue hasn't
- * loaded, or OpenRouter simply doesn't publish one for this model (common:
- * roughly a third of the live free catalogue, including today's actual Free
- * Mode brain, `dots-studio/dots-3-note-preview:free`). Callers must not treat
- * an unscored model as scoring zero — see `sortFreeModelsByScore` in
- * `free-mode.ts`, which sinks unscored ids to the bottom rather than crediting
- * them with a fabricated low (or high) number.
+ * loaded, or OpenRouter publishes NO `artificial_analysis` block for this model
+ * (common: a meaningful minority of the free catalogue, including the free brain
+ * `dots-studio/dots-3-note-preview:free`). PM #128 — an entry EXISTS when any of
+ * the three indices is published, so a model with a null `intelligence_index`
+ * but a real `agentic_index`/`coding_index` returns a score (missing axes are 0,
+ * so a known axis still outranks a total unknown). Callers must not treat a
+ * genuinely unscored model as scoring zero — see `sortFreeModelsByScore` in
+ * `free-mode.ts`, which sinks the truly-absent ids to the bottom rather than
+ * crediting them with a fabricated number.
  */
 export function getOpenRouterBenchmarkScore(
   modelId: string

@@ -46,8 +46,22 @@
  * same posture as `ORCHESTRA_DISABLE_AUTH`) makes every call a no-op.
  */
 
-/** Why a model attempt was counted as a failure. Telemetry only — all kinds weigh the same. */
-export type ModelFailureKind = "empty" | "throttle" | "server" | "unreachable";
+/**
+ * Why a model attempt was counted as a failure.
+ *
+ * The first four are TRANSIENT — the endpoint may recover, which is exactly what
+ * the "N consecutive failures, then a short cooldown, then a half-open probe"
+ * policy below is built for. `"unusable"` is NOT: the provider refused to serve
+ * this model to this account/app at all (PM #127), so there is nothing to wait
+ * for and no reason to spend a probe every 5 minutes. It therefore carries its
+ * own policy — see `policyFor`.
+ */
+export type ModelFailureKind =
+  | "empty"
+  | "throttle"
+  | "server"
+  | "unreachable"
+  | "unusable";
 
 export interface ModelHealthEntry {
   provider: string;
@@ -56,6 +70,19 @@ export interface ModelHealthEntry {
   /** Epoch ms when the circuit tripped, or `null` when healthy. */
   openedAt: number | null;
   lastFailureKind: ModelFailureKind | null;
+  /**
+   * The kind that actually TRIPPED the circuit, which is NOT always
+   * `lastFailureKind` (PM #127 audit).
+   *
+   * A fan-out is parallel: several proposers hit the same endpoint at once and
+   * can report DIFFERENT kinds. `lastFailureKind` is last-writer-wins telemetry,
+   * so a sibling proposer's timeout arriving after a 403 used to silently
+   * downgrade a 24h quarantine to the 5-minute transient schedule — exactly the
+   * shape of the incident this fix exists for. The cooldown must follow the
+   * reason the endpoint was quarantined, and it only ever escalates: a
+   * permanent kind upgrades an open circuit, a transient one never demotes it.
+   */
+  openedByKind: ModelFailureKind | null;
   lastFailureAt: number | null;
   totalFailures: number;
   totalSuccesses: number;
@@ -74,6 +101,19 @@ const DEFAULT_THRESHOLD = 3;
  * often is the right trade.
  */
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
+
+/**
+ * Cooldown for a `"unusable"` refusal — a provider-side entitlement decision,
+ * not an availability blip.
+ *
+ * 24h, not "forever": a vendor allowlist is a business setting that can change
+ * (the operator may register the app, the model may leave preview), so a
+ * permanent ban would need an invalidation path nobody would remember to call.
+ * Note the store is in-memory on a `globalThis` singleton, so in practice this
+ * is "for the life of the process" on a machine that restarts more often than
+ * daily — the TTL matters for long-lived servers.
+ */
+const DEFAULT_UNUSABLE_COOLDOWN_MS = 24 * 60 * 60_000;
 
 const HEALTH_STORE_KEY = Symbol.for("orchestra.model-health.store");
 
@@ -102,6 +142,32 @@ function cooldownMs(): number {
   return numericEnv("ORCHESTRA_MODEL_CIRCUIT_COOLDOWN_MS", DEFAULT_COOLDOWN_MS);
 }
 
+/**
+ * How a failure KIND is policed. One store and one `recordModelFailure` — the
+ * kind selects the numbers, rather than a second parallel registry with its own
+ * bookkeeping to drift out of sync.
+ *
+ * `"unusable"` trips on the FIRST failure: waiting for three identical
+ * deterministic refusals just buys three dead proposers instead of one.
+ */
+function policyFor(kind: ModelFailureKind): { threshold: number; cooldownMs: number } {
+  if (kind === "unusable") {
+    return {
+      threshold: 1,
+      cooldownMs: numericEnv(
+        "ORCHESTRA_MODEL_UNUSABLE_COOLDOWN_MS",
+        DEFAULT_UNUSABLE_COOLDOWN_MS
+      ),
+    };
+  }
+  return { threshold: failureThreshold(), cooldownMs: cooldownMs() };
+}
+
+/** True for failure kinds that no amount of retrying can fix. */
+export function isPermanentFailureKind(kind: ModelFailureKind | null): boolean {
+  return kind === "unusable";
+}
+
 /** Stable identity for a (provider, model) endpoint. Exported for logs/tests. */
 export function modelHealthKey(provider: string, model: string): string {
   return `${provider}/${model}`;
@@ -117,6 +183,7 @@ function entryFor(provider: string, model: string): ModelHealthEntry {
     consecutiveFailures: 0,
     openedAt: null,
     lastFailureKind: null,
+    openedByKind: null,
     lastFailureAt: null,
     totalFailures: 0,
     totalSuccesses: 0,
@@ -147,17 +214,31 @@ export function recordModelFailure(
   entry.lastFailureAt = Date.now();
   entry.probeInFlight = false;
 
+  const policy = policyFor(kind);
+
   if (entry.openedAt !== null) {
-    // A half-open probe just failed → restart the cooldown from now.
+    // A half-open probe (or a sibling proposer in the same fan-out) just
+    // failed → restart the cooldown from now. The quarantine REASON only ever
+    // escalates: a permanent refusal upgrades an open circuit, but a transient
+    // failure arriving afterwards must not demote a permanent one back onto
+    // the 5-minute schedule (PM #127 audit — reachable whenever a parallel
+    // fan-out reports mixed kinds against one endpoint).
     entry.openedAt = Date.now();
+    if (isPermanentFailureKind(kind)) entry.openedByKind = kind;
     return;
   }
-  if (entry.consecutiveFailures >= failureThreshold()) {
+  if (entry.consecutiveFailures >= policy.threshold) {
     entry.openedAt = Date.now();
+    entry.openedByKind = kind;
+    const forSeconds = Math.round(policy.cooldownMs / 1000);
     console.warn(
-      `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
-        `${entry.consecutiveFailures} consecutive failures (last: ${kind}). ` +
-        `Skipping this endpoint for ${Math.round(cooldownMs() / 1000)}s.`
+      kind === "unusable"
+        ? `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
+            `the provider REFUSED to serve this model to this account/app. ` +
+            `No retry can fix it; quarantining for ${forSeconds}s and substituting.`
+        : `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
+            `${entry.consecutiveFailures} consecutive failures (last: ${kind}). ` +
+            `Skipping this endpoint for ${forSeconds}s.`
     );
   }
 }
@@ -169,6 +250,10 @@ export function recordModelSuccess(provider: string, model: string): void {
   const wasOpen = entry.openedAt !== null;
   entry.consecutiveFailures = 0;
   entry.openedAt = null;
+  // The endpoint answered, so whatever quarantined it no longer applies —
+  // clear the reason too, or a later transient trip would inherit the old
+  // permanent cooldown.
+  entry.openedByKind = null;
   entry.probeInFlight = false;
   entry.totalSuccesses += 1;
   if (wasOpen) {
@@ -205,7 +290,11 @@ export function tryAcquireProbe(provider: string, model: string): boolean {
   const entry = store().get(modelHealthKey(provider, model));
   if (!entry || entry.openedAt === null) return true; // not tripped — free to dispatch
   if (entry.probeInFlight) return false;
-  if (Date.now() - entry.openedAt < cooldownMs()) return false;
+  // The cooldown follows the kind that TRIPPED the circuit — a permanent
+  // refusal must not be re-probed on the 5-minute transient schedule.
+  if (Date.now() - entry.openedAt < policyFor(entry.openedByKind ?? "empty").cooldownMs) {
+    return false;
+  }
 
   entry.probeInFlight = true;
   console.warn(
@@ -242,6 +331,50 @@ export function tryAcquireProbe(provider: string, model: string): boolean {
  * never `"throttle"` — so a plain rate limit and a real 5xx were indistinguishable
  * in the breaker's own telemetry.
  */
+/**
+ * The exact vendor phrase for OpenRouter's registered-app gate. Kept as ONE
+ * multi-word constant so the fallback below can never be widened by accident.
+ */
+const HARNESS_GATE_PHRASE = "only available on agentic harnesses";
+
+/**
+ * Is there POSITIVE evidence that a 403 is about THIS MODEL rather than the
+ * account?
+ *
+ * The PM #127 audit's strongest finding: the rationale for `401 → null` ("every
+ * endpoint on that key fails identically, so blaming one model teaches the
+ * breaker nothing") applies just as well to an account-scoped 403 — a suspended
+ * account, a WAF rule, a provider-wide block. Classifying a BARE 403 as a
+ * permanent model fault at threshold 1 would quarantine every healthy model in
+ * the pool, one at a time, for 24h — reproducing the exact false-positive class
+ * this whole "positive evidence only" rule exists to prevent, and doing it in a
+ * single turn once same-turn substitution walks the pool.
+ *
+ * So a 403 is only model-scoped when the provider SAYS it is. OpenRouter does,
+ * twice over: a structured `metadata.failed_routing_step` in the response body
+ * (`"Gate Free Endpoints by Agentic Harness"`), and the phrase in the message.
+ * Anything else stays `null` — a breaker must open on evidence, not on a
+ * status code that has several unrelated meanings.
+ */
+function hasModelScopedRefusalEvidence(err: unknown, msg: string): boolean {
+  if (msg.includes(HARNESS_GATE_PHRASE)) return true;
+  if (!err || typeof err !== "object") return false;
+  const bodies: unknown[] = [];
+  const e = err as Record<string, unknown>;
+  bodies.push(e.responseBody, e.data);
+  const lastError = e.lastError;
+  if (lastError && typeof lastError === "object") {
+    const le = lastError as Record<string, unknown>;
+    bodies.push(le.responseBody, le.data);
+  }
+  return bodies.some((b) => {
+    const text = typeof b === "string" ? b : b ? JSON.stringify(b) : "";
+    // The routing-funnel field names the gate that rejected us; its presence
+    // on a 403 is the provider stating this was a per-endpoint decision.
+    return text.toLowerCase().includes("failed_routing_step");
+  });
+}
+
 function upstreamStatusCode(err: unknown): number | undefined {
   if (!err || typeof err !== "object") return undefined;
   const e = err as Record<string, unknown>;
@@ -263,6 +396,41 @@ export function classifyModelFailure(err: unknown): ModelFailureKind | null {
   if (status === 429) return "throttle";
   if (status !== undefined && status >= 500 && status < 600) return "server";
 
+  // 401 is OUR credential, not the model's fault — every endpoint on that key
+  // would fail identically, so penalising this one model teaches the breaker
+  // nothing and would quarantine the whole provider one model at a time.
+  if (status === 401) return null;
+
+  // 403/404 are the PERMANENT class (PM #127). 403: the provider refuses to
+  // serve this model to this account/app — OpenRouter gates some `:free`
+  // endpoints behind a registered-app allowlist and answers
+  //   403 {"metadata":{"failed_routing_step":"Gate Free Endpoints by Agentic Harness"}}
+  // which no amount of retrying or waiting will change. 404: the model id does
+  // not exist upstream. That one MAY be our own bug (an id we constructed), and
+  // it is logged as such — but the response is the same either way, because the
+  // poisoned artifact is that id: quarantine it and substitute, rather than
+  // spend the turn re-asking for a model that cannot answer.
+  if (status === 403) {
+    if (hasModelScopedRefusalEvidence(err, msg)) return "unusable";
+    // A bare 403 is indistinguishable from an account-scoped block, so it gets
+    // the same treatment as a 401: not this model's fault, do not quarantine.
+    // Logged, not swallowed — if a second refusal shape shows up, this line is
+    // how it gets discovered instead of silently looping (PM #127 audit).
+    console.warn(
+      `[ModelHealth] Upstream 403 with no model-scoped evidence (no failed_routing_step, ` +
+        `no known refusal phrase) — treating as account-scoped and NOT quarantining the model. ` +
+        `If this repeats on one model only, its refusal shape needs a branch: ${msg.slice(0, 200)}`
+    );
+    return null;
+  }
+  if (status === 404) {
+    console.warn(
+      `[ModelHealth] Upstream 404 for a chat completion — the model id does not exist. ` +
+        `Quarantining it, but CHECK whether Orchestra constructed a bad id: ${msg.slice(0, 200)}`
+    );
+    return "unusable";
+  }
+
   // Ours, not theirs — never penalize the endpoint.
   if (
     msg.includes("semaphore") ||
@@ -275,6 +443,13 @@ export function classifyModelFailure(err: unknown): ModelFailureKind | null {
   ) {
     return null;
   }
+
+  // Status-ABSENT fallback for the permanent class, and only that. An exact
+  // multi-word vendor phrase, never a single token: this runs after the
+  // "ours, not theirs" guard above, so a local fault still wins, and it exists
+  // solely for a transport that drops the status code on the floor. If you are
+  // tempted to widen this to `"only available on"`, don't — prefer the status.
+  if (msg.includes(HARNESS_GATE_PHRASE)) return "unusable";
 
   if (
     msg.includes("429") ||

@@ -830,14 +830,32 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // the swarm collapsed. Surface it like the sibling crash branch so a
         // degraded turn is visibly degraded. Root cause is almost always
         // unreliable proposer models (free-tier 429s — CLAUDE.md §1).
+        // PM #127 — name the cause the drafts actually REPORT, structurally.
+        // The old notice blamed free-tier rate limits for every collapse; when
+        // the provider had refused to serve the model at all, that sent the
+        // operator off to wait out a throttle that did not exist.
+        const refusedEndpoints = [
+          ...new Set(
+            moaResult.drafts
+              .filter((d) => d.failureKind === "unusable")
+              .map((d) => `${d.resolvedProvider}/${d.resolvedModel}`)
+          ),
+        ];
+        const causeLine =
+          refusedEndpoints.length > 0
+            ? `The provider REFUSED to serve ${refusedEndpoints.join(", ")} to this account/app — no retry or wait will fix it. Pick a different proposer model` +
+              (settings.freeMode?.enabled
+                ? ", or allow the paid fallback (Settings → Free Mode)."
+                : ".")
+            : "Likely cause: unreliable proposer models (e.g. free-tier rate limits).";
         console.warn(
-          `[MoA] Swarm degraded: 0/${moaResult.drafts.length} proposers produced a usable draft — answering with a single agent, NO Skeptic audit this turn. Check proposer model reliability (free-tier models 429 under parallel load).`
+          `[MoA] Swarm degraded: 0/${moaResult.drafts.length} proposers produced a usable draft — answering with a single agent, NO Skeptic audit this turn. ${causeLine}`
         );
         publishUiSyncEvent({
           topic: "chat",
           chatId: options.chatId,
           projectId: options.projectId ?? null,
-          reason: `[MoA] Swarm stopped: all ${moaResult.drafts.length} expert proposers failed. This answer is from a single agent with no Skeptic audit. Likely cause: unreliable proposer models (e.g. free-tier rate limits).`,
+          reason: `[MoA] Swarm stopped: all ${moaResult.drafts.length} expert proposers failed. This answer is from a single agent with no Skeptic audit. ${causeLine}`,
         });
       } else if (moaResult.bypassed) {
         console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);

@@ -2149,3 +2149,57 @@ describe("DDD glue — reflection outcome event + in-breed sycophancy advisory",
     warnSpy.mockRestore();
   });
 });
+
+/**
+ * PM #127 audit — the drafts mapper in `runMoAEnsemble` is a WHITELIST
+ * destructure. `failureKind` and the resolved endpoint were added to the
+ * proposer's return shape AND to `MoAResult.drafts`, but not to the mapper in
+ * between, so they were silently dropped: `agent.ts`'s collapse notice filtered
+ * on `failureKind === "unusable"` against drafts that never carried the field,
+ * and the new cause line could not fire even once. Widening a type at both ends
+ * does not connect them.
+ */
+describe("PM #127 audit — the collapse notice's inputs actually reach the caller", () => {
+  afterEach(() => {
+    mockedGenerateText.mockReset();
+  });
+
+  it("drafts carry failureKind + the resolved endpoint when proposers are refused", async () => {
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Systems Analyst", systemPrompt: "You are a Systems Analyst.", color: "blue" },
+          { id: "critic", role: "Adversarial Critic", systemPrompt: "You are an Adversarial Critic.", color: "rose" },
+        ],
+      },
+    } as never);
+
+    // The real refusal shape: HTTP 403 corroborated by the vendor phrase.
+    mockedGenerateText.mockImplementation((async () => {
+      throw Object.assign(
+        new Error("x:free is only available on agentic harnesses. Try plugging it into..."),
+        { statusCode: 403 }
+      );
+    }) as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "design a distributed lock",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.degradedToSingleAgent).toBe(true);
+    expect(result.drafts.length).toBeGreaterThan(0);
+
+    // The three fields the notice needs must survive the mapper.
+    const refused = result.drafts.filter((d) => d.failureKind === "unusable");
+    expect(refused.length).toBeGreaterThan(0);
+    for (const d of refused) {
+      expect(typeof d.resolvedProvider).toBe("string");
+      expect(typeof d.resolvedModel).toBe("string");
+      expect(`${d.resolvedProvider}/${d.resolvedModel}`).not.toContain("undefined");
+    }
+  });
+});

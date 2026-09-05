@@ -39,6 +39,8 @@ import {
 import {
   classifyModelFailure,
   isModelCircuitOpen,
+  isPermanentFailureKind,
+  type ModelFailureKind,
   recordModelFailure,
   recordModelSuccess,
   selectHealthyConfig,
@@ -77,6 +79,15 @@ export interface ProposerDraftWithUsage {
   resolvedProvider: string;
   resolvedModel: string;
   resolvedTier: ProposerTier;
+  /**
+   * Why this proposer died, as the breaker classified it — STRUCTURED, so the
+   * collapse notice can name the real cause instead of guessing from the error
+   * prose (PM #127: the notice used to blame free-tier rate limits for every
+   * collapse, including a provider refusing to serve the model at all).
+   * Absent on a successful draft; `null` when the failure was not the
+   * endpoint's fault (a user abort, or one of our own errors).
+   */
+  failureKind?: ModelFailureKind | null;
 }
 
 /**
@@ -191,6 +202,29 @@ export async function runProposerFanOut(
     );
   }
 
+  // PM #127 — the operator's own tiers, displaced by the Free Mode overlay.
+  // They are the last thing standing when every free candidate is quarantined,
+  // but they usually cost money and the operator turned Free Mode ON to avoid
+  // that — so they join the pool only on an explicit opt-in, and either way we
+  // SAY they exist. A silent spend and a silent dead turn are both dishonest.
+  const displacedPaidTail: ModelConfig[] = [
+    settings.freeModeDisplacedTiers?.frontier,
+    settings.freeModeDisplacedTiers?.balanced,
+    settings.freeModeDisplacedTiers?.fast,
+    settings.freeModeDisplacedTiers?.skeptic,
+  ].filter((c): c is ModelConfig => Boolean(c?.model));
+
+  const paidFallbackAllowed = settings.freeMode?.allowPaidFallback === true;
+  if (displacedPaidTail.length > 0) {
+    const names = [...new Set(displacedPaidTail.map((c) => `${c.provider}/${c.model}`))].join(", ");
+    console.log(
+      paidFallbackAllowed
+        ? `[MoA] Free Mode: paid last-resort fallback ENABLED — ${names} will be used only after every free candidate is exhausted.`
+        : `[MoA] Free Mode: ${names} configured but NOT in the failover pool ` +
+            `(freeMode.allowPaidFallback is off). If every free model is refused, the turn degrades instead of spending.`
+    );
+  }
+
   const failoverPool: ModelConfig[] = [
     settings.proposerTiers?.frontier,
     settings.proposerTiers?.balanced,
@@ -198,6 +232,7 @@ export async function runProposerFanOut(
     settings.proposerTiers?.skeptic,
   ]
     .filter((c): c is ModelConfig => Boolean(c?.model))
+    .concat(paidFallbackAllowed ? displacedPaidTail : [])
     .map((c) => resolveWorkerKey(c, settings))
     .concat(workerConfig);
 
@@ -489,7 +524,7 @@ export async function runProposerFanOut(
             stopWhen: stepCountIs(guardedProposerTools ? 3 : 1),
             abortSignal: proposerSignal,
           });
-        } catch (textErr: any) {
+        } catch (textErr) {
           const msg = textErr instanceof Error ? textErr.message : String(textErr);
           if (guardedProposerTools && (msg.toLowerCase().includes("tool") || msg.toLowerCase().includes("endpoint"))) {
             console.warn(`[MoA] Proposer "${proposer.id}" model doesn't support tools. Retrying without tools... (${msg})`);
@@ -630,11 +665,50 @@ export async function runProposerFanOut(
           recordModelFailure(resolvedProvider, resolvedModel, failureKind);
         }
 
+        // PM #127 — the fan-out is PARALLEL, so the breaker alone only ever
+        // protects the NEXT turn: by the time it has learned anything, every
+        // proposer in THIS one was already dispatched to the dead endpoint. A
+        // permanent refusal (provider 403 "not available to this app") is the
+        // one case where we hold first-hand, immediate proof that no retry on
+        // this endpoint can succeed — so re-dispatch this proposer against a
+        // healthy substitute now, whatever its role. The breaker was opened by
+        // `recordModelFailure` above (threshold 1 for this kind), so
+        // `selectHealthyConfig` will skip the dead endpoint.
+        const permanentlyRefused =
+          substitutionAllowed &&
+          !abortSignal?.aborted &&
+          isPermanentFailureKind(failureKind);
+        const sameTurnPick = permanentlyRefused
+          ? selectHealthyConfig(proposerConfig, failoverPool, index)
+          : null;
+
+        // Precedence: a permanent refusal outranks the role, because the
+        // Skeptic's own fallback target could be the very endpoint that just
+        // refused us. Otherwise the Sprint-6 reviewer failover is unchanged.
+        // PM #127 audit — the reviewer's fallback target is the utility worker,
+        // which under Free Mode is very often the SAME endpoint that just
+        // refused us. Retrying it is a guaranteed second refusal that also
+        // records a failure against the worker, so skip it in that case.
+        const reviewerFallbackIsRefusedEndpoint =
+          workerConfig.provider === resolvedProvider && workerConfig.model === resolvedModel;
+        const fallbackConfig = sameTurnPick?.substituted
+          ? sameTurnPick.config
+          : standardRole === "reviewer" && !(permanentlyRefused && reviewerFallbackIsRefusedEndpoint)
+            ? workerConfig
+            : null;
+
+        if (permanentlyRefused && !sameTurnPick?.substituted) {
+          console.warn(
+            `[MoA] Proposer "${proposer.id}": ${resolvedProvider}/${resolvedModel} permanently refused us, ` +
+              `and every candidate in the failover pool is also unavailable — no same-turn substitute.`
+          );
+        }
+
         // Sprint 6 failover — A6: the substitution must be LOUD (with a
         // direct operator Skeptic the retry is off the operator's choice).
-        if (standardRole === "reviewer") {
+        if (fallbackConfig) {
           console.warn(
-            `[MoA] Skeptic failover: "${proposer.id}" on ${resolvedProvider}/${resolvedModel} failed (${errMsg}) → falling back to ${workerConfig.provider}/${workerConfig.model}${skepticConfig ? " (operator Skeptic model NOT honored for this retry)" : ""}`
+            `[MoA] ${sameTurnPick?.substituted ? "Permanent-refusal" : "Skeptic"} failover: "${proposer.id}" on ${resolvedProvider}/${resolvedModel} failed (${errMsg}) → falling back to ${fallbackConfig.provider}/${fallbackConfig.model}${skepticConfig && standardRole === "reviewer" ? " (operator Skeptic model NOT honored for this retry)" : ""}`
           );
           publishUiSyncEvent({
             topic: "chat",
@@ -649,7 +723,7 @@ export async function runProposerFanOut(
           });
           
           try {
-            const fallbackModel = createModel(workerConfig, { projectId, currentPath });
+            const fallbackModel = createModel(fallbackConfig, { projectId, currentPath });
             const messages: ModelMessage[] = [
               ...safeHistory.slice(-6),
               { role: "user", content: userMessage },
@@ -662,7 +736,7 @@ export async function runProposerFanOut(
               proposerSignal = AbortSignal.timeout(PROPOSER_TIMEOUT_MS);
             }
             const proposerMaxOutput = Math.min(
-              workerConfig.maxTokens ?? 2048,
+              fallbackConfig.maxTokens ?? 2048,
               4096
             );
 
@@ -673,11 +747,11 @@ export async function runProposerFanOut(
               system: proposer.systemPrompt + proposerContextBlock,
               messages,
               prepareStep: createTokenGovernor({
-                contextWindow: await resolveWindow(workerConfig),
+                contextWindow: await resolveWindow(fallbackConfig),
                 reservedOutputTokens: proposerMaxOutput,
-                modelHint: { provider: workerConfig.provider, model: workerConfig.model },
+                modelHint: { provider: fallbackConfig.provider, model: fallbackConfig.model },
               }),
-              temperature: workerConfig.temperature ?? 0.5,
+              temperature: fallbackConfig.temperature ?? 0.5,
               maxOutputTokens: proposerMaxOutput,
               tools: undefined,
               stopWhen: stepCountIs(1),
@@ -690,12 +764,12 @@ export async function runProposerFanOut(
             // Feed the breaker: the failover model just proved itself (or
             // returned yet another empty body on a loaded free endpoint).
             if (result.text?.trim()) {
-              recordModelSuccess(workerConfig.provider, workerConfig.model);
+              recordModelSuccess(fallbackConfig.provider, fallbackConfig.model);
             } else {
-              recordModelFailure(workerConfig.provider, workerConfig.model, "empty");
+              recordModelFailure(fallbackConfig.provider, fallbackConfig.model, "empty");
             }
 
-            console.log(`[MoA] Proposer "${proposer.id}" (role=${standardRole}, model=${workerConfig.provider}/${workerConfig.model}) FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);
+            console.log(`[MoA] Proposer "${proposer.id}" (role=${standardRole}, model=${fallbackConfig.provider}/${fallbackConfig.model}) FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);
 
             publishUiSyncEvent({
               topic: "chat",
@@ -716,9 +790,14 @@ export async function runProposerFanOut(
               text,
               latencyMs,
               rawUsage: result.usage,
-              resolvedProvider: workerConfig.provider,
-              resolvedModel: workerConfig.model,
-              resolvedTier: "fast", // Fallback typically uses standard reliable utility config
+              resolvedProvider: fallbackConfig.provider,
+              resolvedModel: fallbackConfig.model,
+              // The Skeptic's fallback target IS the utility worker, so "fast"
+              // is honest there. A permanent-refusal substitute comes out of
+              // the failover pool and keeps the tier this proposer was
+              // resolved to — never hardcode a tier the run did not use
+              // (QA-audit C2).
+              resolvedTier: sameTurnPick?.substituted ? proposerTier : "fast",
             };
           } catch (fallbackErr) {
              const fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
@@ -726,7 +805,7 @@ export async function runProposerFanOut(
                ? null
                : classifyModelFailure(fallbackErr);
              if (fallbackKind) {
-               recordModelFailure(workerConfig.provider, workerConfig.model, fallbackKind);
+               recordModelFailure(fallbackConfig.provider, fallbackConfig.model, fallbackKind);
              }
              console.error(`[MoA] Proposer "${proposer.id}" FALLBACK also failed: ${fallbackMsg}`);
              errMsg = `${errMsg} -> Fallback failed: ${fallbackMsg}`;
@@ -762,6 +841,7 @@ export async function runProposerFanOut(
           resolvedProvider,
           resolvedModel,
           resolvedTier: proposerTier,
+          failureKind,
         };
       }
     }));

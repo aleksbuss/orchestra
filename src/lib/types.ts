@@ -207,7 +207,37 @@ export interface AppSettings {
    */
   freeMode?: {
     enabled: boolean;
+    /**
+     * Let the failover stack fall back to the operator's own (paid) configured
+     * `proposerTiers` when every FREE candidate has been quarantined or is
+     * circuit-open (PM #127).
+     *
+     * Default OFF, deliberately: the operator turned Free Mode on to not spend
+     * money, and silently spending it is a worse bug than a degraded turn. With
+     * this off the paid tail is still COMPUTED and NAMED in the log/notice, so
+     * the operator can see the option they are declining rather than being told
+     * nothing happened.
+     */
+    allowPaidFallback?: boolean;
   };
+  /**
+   * INTERNAL — written ONLY by the Free Mode overlay (`applyFreeMode`), never
+   * by the settings UI and never persisted to `settings.json`.
+   *
+   * The overlay replaces `proposerTiers` wholesale with free models, which used
+   * to destroy the operator's own configured (usually paid) tiers before the
+   * fan-out built its failover pool from them — so when every free candidate
+   * was dead there was nothing left to substitute to (PM #127). The displaced
+   * originals are carried here so the pool can name them, and — only when
+   * `freeMode.allowPaidFallback` is on — actually use them as a last resort.
+   *
+   * The tier union is spelled out rather than imported: `ProposerTier` lives in
+   * `lib/agent/moa-personas.ts`, and a `lib/types` → `lib/agent` import would be
+   * a new edge in the direction the import-cycle gate exists to prevent.
+   */
+  freeModeDisplacedTiers?: Partial<
+    Record<"fast" | "balanced" | "frontier" | "skeptic", ModelConfig>
+  >;
   /**
    * Persistent successful-trace memory (PM #51). When enabled, Orchestra
    * captures MoA runs that meet a quality bar (proposer consensus,

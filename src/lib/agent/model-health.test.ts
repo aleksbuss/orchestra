@@ -345,3 +345,219 @@ describe("selectHealthyConfig", () => {
     expect(sel.config).toBe(alt);
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// PM #127 — the PERMANENT failure class
+// ────────────────────────────────────────────────────────────
+
+/**
+ * OpenRouter gates some `:free` endpoints behind a registered-app allowlist and
+ * answers HTTP 403 with `metadata.failed_routing_step: "Gate Free Endpoints by
+ * Agentic Harness"`. Before this, `classifyModelFailure` matched no branch,
+ * returned `null`, and the breaker never learned — so every proposer in the
+ * fan-out, on every future turn, kept being dispatched to an endpoint that was
+ * guaranteed to refuse. Detection is by STATUS, never by the vendor's prose.
+ */
+describe("permanent refusal (PM #127)", () => {
+  beforeEach(() => {
+    resetModelHealth();
+    delete process.env.ORCHESTRA_MODEL_CIRCUIT_DISABLED;
+    delete process.env.ORCHESTRA_MODEL_UNUSABLE_COOLDOWN_MS;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  /** The real shape: the AI SDK's APICallError carries `statusCode`. */
+  function apiError(statusCode: number, message: string): Error {
+    return Object.assign(new Error(message), { statusCode });
+  }
+
+  it("classifies a 403 as `unusable` — the provider refused to serve this model", () => {
+    const err = apiError(
+      403,
+      "thinkingmachines/inkling:free is only available on agentic harnesses. " +
+        "Try plugging it into a coding agent or productivity app listed on https://openrouter.ai/apps"
+    );
+    expect(classifyModelFailure(err)).toBe("unusable");
+  });
+
+  it("classifies a corroborated 403 wrapped in AI_RetryError.lastError too", () => {
+    // The status is unwrapped from `lastError`; the corroborating phrase rides
+    // on the wrapper's own message, which is what the SDK actually produces.
+    const wrapped = Object.assign(
+      new Error(
+        "Failed after 3 attempts. Last error: x:free is only available on agentic harnesses."
+      ),
+      { lastError: apiError(403, "Forbidden") }
+    );
+    expect(classifyModelFailure(wrapped)).toBe("unusable");
+  });
+
+  it("classifies a 404 as `unusable` — the model id does not exist upstream", () => {
+    expect(classifyModelFailure(apiError(404, "No endpoints found"))).toBe("unusable");
+  });
+
+  it("does NOT blame the model for a 401 — that is OUR credential", () => {
+    expect(classifyModelFailure(apiError(401, "No auth credentials found"))).toBeNull();
+  });
+
+  it("still prefers the status: a 429 is a throttle even with refusal-shaped prose", () => {
+    expect(
+      classifyModelFailure(apiError(429, "only available on agentic harnesses"))
+    ).toBe("throttle");
+  });
+
+  it("falls back to the exact vendor phrase ONLY when no status survived", () => {
+    expect(
+      classifyModelFailure(new Error("x is only available on agentic harnesses. Try..."))
+    ).toBe("unusable");
+    // A near-miss must not match — the fallback is an exact multi-word phrase.
+    expect(classifyModelFailure(new Error("only available on weekdays"))).toBeNull();
+  });
+
+  it("a local fault still wins over the prose fallback", () => {
+    expect(
+      classifyModelFailure(
+        new Error("invalid request: only available on agentic harnesses")
+      )
+    ).toBeNull();
+  });
+
+  it("opens the circuit on the FIRST unusable failure, not the third", () => {
+    expect(isModelCircuitOpen(P, M)).toBe(false);
+    recordModelFailure(P, M, "unusable");
+    expect(isModelCircuitOpen(P, M)).toBe(true);
+  });
+
+  it("a transient kind still needs the full threshold (unchanged)", () => {
+    recordModelFailure(P, M, "empty");
+    recordModelFailure(P, M, "empty");
+    expect(isModelCircuitOpen(P, M)).toBe(false);
+    recordModelFailure(P, M, "empty");
+    expect(isModelCircuitOpen(P, M)).toBe(true);
+  });
+
+  it("does NOT re-probe an unusable endpoint on the transient 5-minute schedule", () => {
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    recordModelFailure(P, M, "unusable");
+
+    // Well past the 5-minute transient cooldown…
+    vi.spyOn(Date, "now").mockReturnValue(now + 10 * 60_000);
+    expect(tryAcquireProbe(P, M)).toBe(false);
+
+    // …but past its own (24h) cooldown it becomes probeable again: a vendor
+    // allowlist is a business setting, so "permanent" is a TTL, not forever.
+    vi.spyOn(Date, "now").mockReturnValue(now + 25 * 60 * 60_000);
+    expect(tryAcquireProbe(P, M)).toBe(true);
+  });
+
+  it("a refused endpoint is substituted away from immediately", () => {
+    const preferred = { provider: P, model: M };
+    const alt = { provider: P, model: ALT };
+    recordModelFailure(P, M, "unusable");
+    const sel = selectHealthyConfig(preferred, [alt]);
+    expect(sel.substituted).toBe(true);
+    expect(sel.config).toBe(alt);
+  });
+});
+
+/**
+ * PM #127 AUDIT findings. Each of these pins a defect the first cut shipped
+ * with — found by an external 4-model council review plus a direct probe.
+ */
+describe("PM #127 audit — defects the first cut shipped", () => {
+  beforeEach(() => {
+    resetModelHealth();
+    delete process.env.ORCHESTRA_MODEL_CIRCUIT_DISABLED;
+    delete process.env.ORCHESTRA_MODEL_UNUSABLE_COOLDOWN_MS;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  function apiError(statusCode: number, message: string, extra: object = {}): Error {
+    return Object.assign(new Error(message), { statusCode, ...extra });
+  }
+
+  /**
+   * The fan-out is parallel: siblings hit one endpoint and can report DIFFERENT
+   * kinds. `lastFailureKind` is last-writer-wins, so a timeout landing after a
+   * 403 used to silently downgrade the 24h quarantine to the 5-minute schedule.
+   */
+  it("a sibling proposer's transient failure cannot downgrade a permanent quarantine", () => {
+    const t0 = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(t0);
+
+    recordModelFailure(P, M, "unusable"); // proposer A: 403
+    recordModelFailure(P, M, "unreachable"); // proposer B, same turn: timeout
+
+    vi.spyOn(Date, "now").mockReturnValue(t0 + 10 * 60_000); // past 5 min, far short of 24h
+    expect(tryAcquireProbe(P, M)).toBe(false);
+  });
+
+  it("a permanent refusal UPGRADES a circuit already open on a transient kind", () => {
+    const t0 = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(t0);
+
+    recordModelFailure(P, M, "empty");
+    recordModelFailure(P, M, "empty");
+    recordModelFailure(P, M, "empty"); // opens on the transient 5-min policy
+    recordModelFailure(P, M, "unusable"); // now known permanently refused
+
+    vi.spyOn(Date, "now").mockReturnValue(t0 + 10 * 60_000);
+    expect(tryAcquireProbe(P, M)).toBe(false);
+  });
+
+  it("a success clears the quarantine REASON, not just the open flag", () => {
+    const t0 = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(t0);
+    recordModelFailure(P, M, "unusable");
+    recordModelSuccess(P, M);
+
+    // A later transient trip must use the transient cooldown, not inherit 24h.
+    recordModelFailure(P, M, "empty");
+    recordModelFailure(P, M, "empty");
+    recordModelFailure(P, M, "empty");
+    vi.spyOn(Date, "now").mockReturnValue(t0 + 6 * 60_000);
+    expect(tryAcquireProbe(P, M)).toBe(true);
+  });
+
+  /**
+   * The audit's strongest finding: the `401 → null` rationale applies to an
+   * account-scoped 403 too (WAF, suspended account, provider-wide block). At
+   * threshold 1 a bare 403 would quarantine every healthy model in the pool,
+   * one at a time, for 24h — the exact false-positive class the evidence rule
+   * exists to prevent.
+   */
+  it("does NOT quarantine on a bare 403 with no model-scoped evidence", () => {
+    expect(classifyModelFailure(apiError(403, "Forbidden"))).toBeNull();
+    expect(classifyModelFailure(apiError(403, "Account suspended"))).toBeNull();
+  });
+
+  it("DOES quarantine a 403 corroborated by the structured routing metadata", () => {
+    const err = apiError(403, "Forbidden", {
+      responseBody: JSON.stringify({
+        error: {
+          code: 403,
+          metadata: { failed_routing_step: "Gate Free Endpoints by Agentic Harness" },
+        },
+      }),
+    });
+    expect(classifyModelFailure(err)).toBe("unusable");
+  });
+
+  it("DOES quarantine a 403 corroborated by the exact vendor phrase", () => {
+    expect(
+      classifyModelFailure(apiError(403, "x:free is only available on agentic harnesses."))
+    ).toBe("unusable");
+  });
+
+  it("finds the corroborating body through AI_RetryError.lastError", () => {
+    const wrapped = Object.assign(new Error("Failed after 3 attempts."), {
+      lastError: apiError(403, "Forbidden", {
+        responseBody: '{"error":{"metadata":{"failed_routing_step":"Gate Free Endpoints"}}}',
+      }),
+    });
+    expect(classifyModelFailure(wrapped)).toBe("unusable");
+  });
+});

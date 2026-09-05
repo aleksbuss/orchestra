@@ -9,6 +9,7 @@
  * push-downs stay at the route layer (PM #16/#27).
  */
 import fs from "fs/promises";
+import crypto from "crypto";
 import { safeWriteFile } from "./fs-utils";
 import {
   getProjectMcpDir,
@@ -142,6 +143,108 @@ async function loadProjectMcpServersFileCursor(
   } catch {
     return { mcpServers: {} };
   }
+}
+
+/**
+ * Outcome of a NON-destructive read of a project's `mcp-servers.json`, for
+ * callers that MERGE into the file rather than replacing it wholesale.
+ *
+ * `loadProjectMcpServersFileCursor` above is the read-for-REPLACE path: it
+ * coerces anything it cannot validate into `{mcpServers:{}}`, which is correct
+ * when the caller is about to write a complete, known-good config over the
+ * top. That same coercion is a data-loss bug for a caller that merges into
+ * what it read — it would overwrite a config it never understood (PM #126).
+ */
+export type McpServersFileReadResult =
+  | { state: "missing" }
+  // The index signature is the contract, not laziness: unknown top-level keys
+  // (and the legacy `servers` array) are preserved verbatim through a merge.
+  | { state: "ok"; raw: string; config: McpServersFileCursor & Record<string, unknown> }
+  | { state: "malformed"; raw: string; reason: string };
+
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read `mcp-servers.json` and report what was actually found, so a merging
+ * caller can quarantine-and-refuse instead of guessing (non-negotiable #26 —
+ * nothing under `data/` has an undo).
+ *
+ * Deliberately NOT `McpServersFileCursorSchema.safeParse`: that schema encodes
+ * a STRICTER contract than a merge wants. It strips unknown top-level keys and
+ * rejects the legacy `{servers:[...]}` file — both of which must survive a
+ * merge untouched. The guard here is therefore about the file's *envelope*
+ * (is it an object we can safely add a key to?), not its server entries; an
+ * entry shape we do not recognise is preserved verbatim rather than dropped.
+ */
+export async function readProjectMcpServersFileForMerge(
+  projectId: string
+): Promise<McpServersFileReadResult> {
+  const filePath = getProjectMcpServersPath(projectId);
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { state: "missing" };
+    // EACCES / EISDIR are real failures, not "start fresh" — a caller that
+    // treats them as "no file" writes over a file it could not read.
+    throw err;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      state: "malformed",
+      raw,
+      reason: `invalid JSON (${err instanceof Error ? err.message : String(err)})`,
+    };
+  }
+
+  if (!isPlainJsonObject(parsed)) {
+    // The array case is the dangerous one: assigning a property to an array is
+    // legal, but `JSON.stringify` DROPS it — so a merge would write the
+    // original bytes straight back and still report success.
+    const found = Array.isArray(parsed)
+      ? "an array"
+      : `a ${parsed === null ? "null" : typeof parsed}`;
+    return { state: "malformed", raw, reason: `top-level value is ${found}, not a JSON object` };
+  }
+
+  const servers = parsed.mcpServers;
+  if (servers !== undefined && !isPlainJsonObject(servers)) {
+    return { state: "malformed", raw, reason: "`mcpServers` is present but is not a JSON object" };
+  }
+
+  const mcpServers = (servers ?? {}) as McpServersFileCursor["mcpServers"];
+  return { state: "ok", raw, config: { ...parsed, mcpServers } };
+}
+
+/**
+ * Copy an unusable `mcp-servers.json` aside and return the backup path, so the
+ * bytes survive whatever the caller does next (non-negotiable #26).
+ *
+ * `COPYFILE_EXCL` makes the copy fail rather than clobber, so a second
+ * corruption in the same second can never destroy the first backup.
+ */
+export async function quarantineProjectMcpServersFile(projectId: string): Promise<string> {
+  const filePath = getProjectMcpServersPath(projectId);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const base = `${filePath}.corrupt-${stamp}`;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = attempt === 0 ? base : `${base}-${crypto.randomUUID().slice(0, 8)}`;
+    try {
+      await fs.copyFile(filePath, candidate, fs.constants.COPYFILE_EXCL);
+      return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    }
+  }
+  throw new Error(`Could not create a unique backup path for ${filePath}`);
 }
 
 function validateMcpServerId(value: string): string | null {

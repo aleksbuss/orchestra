@@ -485,3 +485,100 @@ describe("saveProjectMcpServersContent — raw-edit path", () => {
     expect(result.success).toBe(false);
   });
 });
+
+// ────────────────────────────────────────────────────────────
+// readProjectMcpServersFileForMerge / quarantineProjectMcpServersFile (PM #126)
+// ────────────────────────────────────────────────────────────
+
+describe("readProjectMcpServersFileForMerge — reports what it found, never guesses", () => {
+  it("reports `missing` when there is no file (the caller may create one)", async () => {
+    const m = await loadModule();
+    expect(await m.readProjectMcpServersFileForMerge("p-1")).toEqual({ state: "missing" });
+  });
+
+  it("preserves unknown top-level keys — the Zod schema would strip them", async () => {
+    await plantServersFile("p-1", { other: "stuff", mcpServers: { a: { command: "x" } } });
+    const m = await loadModule();
+    const read = await m.readProjectMcpServersFileForMerge("p-1");
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.config.other).toBe("stuff");
+    expect(read.config.mcpServers.a).toEqual({ command: "x" });
+  });
+
+  it("guarantees `mcpServers` exists even when the file omits it", async () => {
+    await plantServersFile("p-1", { other: "stuff" });
+    const m = await loadModule();
+    const read = await m.readProjectMcpServersFileForMerge("p-1");
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.config.mcpServers).toEqual({});
+    expect(read.config.other).toBe("stuff");
+  });
+
+  it("accepts the legacy `{servers:[...]}` envelope — a merge must not reject it", async () => {
+    await plantServersFile("p-1", {
+      servers: [{ id: "s1", transport: "stdio", command: "node" }],
+    });
+    const m = await loadModule();
+    const read = await m.readProjectMcpServersFileForMerge("p-1");
+    expect(read.state).toBe("ok");
+  });
+
+  it("preserves an unrecognised server ENTRY rather than dropping it", async () => {
+    await plantServersFile("p-1", { mcpServers: { weird: "not-an-object" } });
+    const m = await loadModule();
+    const read = await m.readProjectMcpServersFileForMerge("p-1");
+    expect(read.state).toBe("ok");
+    if (read.state !== "ok") return;
+    expect(read.config.mcpServers.weird).toBe("not-an-object");
+  });
+
+  it.each([
+    ["invalid JSON", "{ broken", /invalid JSON/i],
+    ["a top-level array", "[1,2,3]", /top-level value is an array/i],
+    ["a non-object `mcpServers`", '{"mcpServers":[]}', /not a JSON object/i],
+  ])("reports `malformed` with the raw bytes for %s", async (_label, content, pattern) => {
+    await plantServersFile("p-1", content);
+    const m = await loadModule();
+    const read = await m.readProjectMcpServersFileForMerge("p-1");
+    expect(read.state).toBe("malformed");
+    if (read.state !== "malformed") return;
+    expect(read.raw).toBe(content);
+    expect(read.reason).toMatch(pattern);
+  });
+});
+
+describe("quarantineProjectMcpServersFile", () => {
+  it("copies the bytes aside and returns the backup path", async () => {
+    const filePath = await plantServersFile("p-1", "{ broken");
+    const m = await loadModule();
+    const backup = await m.quarantineProjectMcpServersFile("p-1");
+
+    expect(path.basename(backup)).toMatch(/^servers\.json\.corrupt-/);
+    expect(await fs.readFile(backup, "utf-8")).toBe("{ broken");
+    // The original is untouched — quarantine copies, it never moves.
+    expect(await fs.readFile(filePath, "utf-8")).toBe("{ broken");
+  });
+
+  it("never clobbers an existing backup even at the SAME timestamp", async () => {
+    // Freeze the clock so both calls derive the identical `.corrupt-<stamp>`
+    // name — otherwise the timestamp alone makes them unique and the
+    // COPYFILE_EXCL retry path is never exercised.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
+    try {
+      await plantServersFile("p-1", "first");
+      const m = await loadModule();
+      const first = await m.quarantineProjectMcpServersFile("p-1");
+      await plantServersFile("p-1", "second");
+      const second = await m.quarantineProjectMcpServersFile("p-1");
+
+      expect(second).not.toBe(first);
+      expect(await fs.readFile(first, "utf-8")).toBe("first");
+      expect(await fs.readFile(second, "utf-8")).toBe("second");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

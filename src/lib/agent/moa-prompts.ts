@@ -121,6 +121,55 @@ function unwrapToolOutput(output: unknown): unknown {
   return output;
 }
 
+/**
+ * Truncate keeping BOTH ends, never head-only (PM #131).
+ *
+ * A head-only slice is the wrong shape for everything this module truncates.
+ * Measured: 992 chars of a test run cut at 500 keeps eighty lines of "✓ passed"
+ * and drops `FAIL … AssertionError: expected false to be true` — the one part
+ * that mattered. Command output, stack traces and tool results put the OUTCOME
+ * last; `capDraftForInjection` above already learned the same lesson for LLM
+ * drafts (conclusion at the end), at a larger cap.
+ *
+ * The elision marker is charged AGAINST the cap, so the result is always ≤ cap
+ * — these caps are summed across a whole context block, and a cap that quietly
+ * overruns is not a bound.
+ */
+export function capHeadTail(text: string, cap: number, headRatio = 0.6): string {
+  if (cap <= 0) return "";
+  if (text.length <= cap) return text;
+  const marker = `…[${text.length - cap} chars elided]…`;
+  // Degenerate cap (smaller than the marker): fall back to a plain head slice
+  // rather than emit a marker longer than the budget it is supposed to fit in.
+  if (marker.length >= cap) return sliceHead(text, cap);
+  const budget = cap - marker.length;
+  const headLen = Math.floor(budget * headRatio);
+  return sliceHead(text, headLen) + marker + sliceTail(text, budget - headLen);
+}
+
+// Both helpers only ever SHRINK the slice, so every caller's cap still holds.
+//
+// `String.prototype.slice` cuts UTF-16 code units, and an emoji is a surrogate
+// PAIR — cutting between its halves leaves a lone surrogate. Verified: capping
+// a run of 🎯 produced one. It survives `JSON.stringify` as an escape and
+// reaches the provider as mojibake in the middle of the Router's context, so
+// drop the orphaned half instead of shipping it.
+
+/** Head slice that never ends on an orphaned high surrogate. */
+function sliceHead(text: string, end: number): string {
+  if (end <= 0) return "";
+  const last = text.charCodeAt(end - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? end - 1 : end);
+}
+
+/** Tail slice that never starts on an orphaned low surrogate. */
+function sliceTail(text: string, len: number): string {
+  if (len <= 0) return "";
+  const start = text.length - len;
+  const first = text.charCodeAt(start);
+  return text.slice(first >= 0xdc00 && first <= 0xdfff ? start + 1 : start);
+}
+
 /** One-line, whitespace-collapsed, length-capped summary of an arbitrary value. */
 function summarizeValue(value: unknown, cap: number): string {
   if (value === null || value === undefined) return "";
@@ -135,17 +184,23 @@ function summarizeValue(value: unknown, cap: number): string {
     }
   }
   s = s.replace(/\s+/g, " ").trim();
-  return s.length > cap ? s.slice(0, cap) + "…" : s;
+  return capHeadTail(s, cap);
 }
 
 /**
  * Flatten one `ModelMessage`'s content — including tool-call and tool-result
- * parts — into a single plain-text line. Unlike the Router's flatten
- * (`moa-router.ts`), which extracts ONLY `.text` parts, this renders tool
- * activity (name + compact args/output) because that is exactly the task
- * context the proposers are missing.
+ * parts — into a single plain-text line, rendering tool activity (name +
+ * compact args/output) because that is exactly the task context a
+ * continuation ("continue" / "Продолжай") depends on.
+ *
+ * PM #129 — the Router (`moa-router.ts`) used to have its OWN flatten that
+ * extracted only `.text` parts, so every tool-call and tool-result message
+ * collapsed to an empty string and the Router judged `requiresSwarm` against a
+ * blank context window. It now calls THIS helper, which is why the function is
+ * exported. Keep one flatten: the proposers and the Router must not disagree
+ * about what the recent history says.
  */
-function flattenMessageContent(msg: ModelMessage, partCap: number): string {
+export function flattenMessageContent(msg: ModelMessage, partCap: number): string {
   const content = msg.content as unknown;
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -180,9 +235,14 @@ function flattenMessageContent(msg: ModelMessage, partCap: number): string {
  * context-dependent continuation ("continue" / "Продолжай"), proposers see only
  * plain chatter, cannot tell WHAT to continue, and each returns a "please
  * clarify" refusal — which the disagreement detector then reads as consensus
- * (identical drafts → ~0 distance) and lets poison the inline synthesis. The
- * Router already sidesteps this by flattening tool content to text
- * (`moa-router.ts`); the proposers did not — that asymmetry is the bug.
+ * (identical drafts → ~0 distance) and lets poison the inline synthesis.
+ *
+ * CORRECTED (PM #129): this comment used to claim "the Router already
+ * sidesteps this by flattening tool content to text (`moa-router.ts`); the
+ * proposers did not". That was false — the Router's own flatten kept only
+ * `.text` parts, so it was blind in exactly the same way, one layer earlier,
+ * and it is the layer that decides whether the swarm runs at all. Both now
+ * share `flattenMessageContent`.
  *
  * This restores the SAME flattened recent-history view as a plain-text block for
  * the proposer SYSTEM prompt (NOT a re-inserted message — appending to the
@@ -205,8 +265,7 @@ export function buildProposerContextBlock(
   for (const msg of history.slice(-maxMessages)) {
     const flat = flattenMessageContent(msg, perMessageCharCap).replace(/\s+/g, " ").trim();
     if (!flat) continue;
-    const capped =
-      flat.length > perMessageCharCap ? flat.slice(0, perMessageCharCap) + "…" : flat;
+    const capped = capHeadTail(flat, perMessageCharCap);
     lines.push(`[${msg.role.toUpperCase()}]: ${capped}`);
   }
   if (lines.length === 0) return "";

@@ -674,6 +674,8 @@ export async function runAgent(options: RunAgentOptions) {
     chatId: options.chatId,
     agentNumber: options.agentNumber,
     tools: toolNames,
+    // PM #130 — the Auto-Pilot imperative belongs to the unattended loop only.
+    autoPilot: options.isBackground,
   });
 
   if (mcpDocs) systemPrompt += mcpDocs;

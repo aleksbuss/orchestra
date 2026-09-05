@@ -10,6 +10,14 @@ import {
 } from "@/lib/storage/project-skills";
 import { getChatFiles } from "@/lib/storage/chat-files-store";
 import { getActiveGoal } from "@/lib/storage/goal-store";
+import { capHeadTail } from "@/lib/agent/moa-prompts";
+
+/**
+ * Bounds on the Active Goal Tree block (PM #130). Both are head+tail, so a
+ * folded `result` keeps its conclusion — an LLM-written summary puts it last.
+ */
+const GOAL_TASK_RESULT_CHAR_CAP = 400;
+const GOAL_TREE_CHAR_CAP = 6000;
 import type { GoalTask } from "@/lib/types";
 
 const PROMPTS_DIR = path.join(process.cwd(), "src", "prompts");
@@ -125,6 +133,14 @@ export async function buildSystemPrompt(options: {
   chatId?: string;
   agentNumber?: number;
   tools?: string[];
+  /**
+   * PM #130 — true ONLY inside the unattended Auto-Pilot loop (background /
+   * daemon run). It gates the imperative half of the Active Goal Tree block:
+   * with the lookup key fixed, that block now actually renders, and telling an
+   * INTERACTIVE turn "your immediate objective is to complete the FIRST pending
+   * task" would hijack whatever the user just asked.
+   */
+  autoPilot?: boolean;
 }): Promise<string> {
   const parts: string[] = [];
 
@@ -275,15 +291,30 @@ export async function buildSystemPrompt(options: {
   }
 
   // 6. Active Goal Tree (AGI-lite Autopilot)
-  const projectIdStr = options.projectId ?? "none";
+  //
+  // PM #130 — keyed by chatId, NOT projectId. `goal-store` stores one tree per
+  // chat at `data/goals/<chatId>.json` (`getGoalPath(chatId)`, and `saveGoal`
+  // throws without a `chatId`), so the previous `getActiveGoal(projectId)` —
+  // defaulting to the literal string "none" — could only ever hit ENOENT. This
+  // block had therefore NEVER rendered; `daemon.ts` keyed it correctly, which
+  // is the only reason Auto-Pilot worked at all. Runtime-verified against a
+  // live goal file before the change.
   let activeGoalStr = "";
   try {
-    const goal = await getActiveGoal(projectIdStr);
+    const goal = options.chatId ? await getActiveGoal(options.chatId) : null;
     if (goal && goal.status === "active") {
+      // This tree is UNBOUNDED by construction — it recurses through subtasks
+      // and inlines each task's `result` verbatim, and `result` is free text an
+      // LLM wrote. Nobody had ever paid for it (the lookup key was wrong, so
+      // the block never rendered), and fixing the key is what puts it on the
+      // wire, so bounding it is part of that fix rather than a separate
+      // improvement. Measured on the four real goal files: 340-587 tokens,
+      // depth 1 — the caps are far above anything in use and only catch a
+      // runaway, which is what a bound is for.
       const renderTasks = (tasks: GoalTask[], indent: string = ""): string => {
         return tasks.map(t => {
           let str = `${indent}- [${t.status.toUpperCase()}] Task ${t.id}: ${t.description}`;
-          if (t.result) str += ` (Result: ${t.result})`;
+          if (t.result) str += ` (Result: ${capHeadTail(t.result, GOAL_TASK_RESULT_CHAR_CAP)})`;
           if (t.subtasks && t.subtasks.length > 0) {
             str += "\n" + renderTasks(t.subtasks, indent + "  ");
           }
@@ -291,14 +322,23 @@ export async function buildSystemPrompt(options: {
         }).join("\n");
       };
 
+      // The imperative is for the unattended loop ONLY. On an interactive turn
+      // the same tree is CONTEXT — it tells the model what "продолжай" refers
+      // to without overriding the message the user actually sent.
+      const directive = options.autoPilot
+        ? `IMPORTANT: You are part of an Auto-Pilot loop working on this Goal. ` +
+          `Check the tasks above. Your immediate objective is to complete the FIRST task that is currently 'pending' or 'in_progress'. ` +
+          `When you finish it, use the 'update_task_status' tool to mark it 'completed', provide a summary, and the system will automatically re-run you for the next step.`
+        : `This is the goal this chat is working toward — CONTEXT, not an instruction. ` +
+          `Answer the message the user actually sent; do NOT switch to a goal task unless they ask you to (a bare "continue" / "продолжай" IS such a request, and it means the first task above that is still 'pending' or 'in_progress'). ` +
+          `Whenever you do finish one, mark it with the 'update_task_status' tool.`;
+
       activeGoalStr = `\n## Active Goal Tree\n` +
         `Title: ${goal.title}\n` +
         `Objective: ${goal.description}\n\n` +
-        `Tasks:\n${renderTasks(goal.tasks)}\n\n` +
-        `IMPORTANT: You are part of an Auto-Pilot loop working on this Goal. ` +
-        `Check the tasks above. Your immediate objective is to complete the FIRST task that is currently 'pending' or 'in_progress'. ` +
-        `When you finish it, use the 'update_task_status' tool to mark it 'completed', provide a summary, and the system will automatically re-run you for the next step.`;
-      
+        `Tasks:\n${capHeadTail(renderTasks(goal.tasks), GOAL_TREE_CHAR_CAP)}\n\n` +
+        directive;
+
       parts.push(activeGoalStr);
     }
   } catch {

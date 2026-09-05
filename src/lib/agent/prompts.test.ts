@@ -328,37 +328,104 @@ describe("buildSystemPrompt — file inventories", () => {
 });
 
 describe("buildSystemPrompt — active goal tree", () => {
+  const GOAL = {
+    id: "g",
+    title: "Build the thing",
+    description: "Ship the v3 of the thing",
+    status: "active",
+    tasks: [
+      {
+        id: 1,
+        description: "Plan it",
+        status: "completed",
+        result: "Plan ready",
+      },
+      { id: 2, description: "Build it", status: "in_progress" },
+    ],
+  };
+
+  it("looks the goal up by chatId — NOT projectId (PM #130)", async () => {
+    // THE regression. `goal-store` stores one tree per CHAT
+    // (`data/goals/<chatId>.json`), and this builder asked for
+    // `getActiveGoal(projectId ?? "none")` — a key that can never exist. The
+    // old test asserted only the RENDERING, against a mock that returned the
+    // goal for any argument, so the block was pinned green while it had never
+    // once rendered in production. Assert the ARGUMENT.
+    getActiveGoalMock.mockResolvedValue(GOAL);
+    await buildSystemPrompt({ chatId: "chat-123", projectId: "proj-abc" });
+    expect(getActiveGoalMock).toHaveBeenCalledWith("chat-123");
+    expect(getActiveGoalMock).not.toHaveBeenCalledWith("proj-abc");
+    expect(getActiveGoalMock).not.toHaveBeenCalledWith("none");
+  });
+
+  it("does not even query the goal store without a chatId", async () => {
+    getActiveGoalMock.mockResolvedValue(GOAL);
+    const prompt = await buildSystemPrompt({ projectId: "proj-abc" });
+    expect(getActiveGoalMock).not.toHaveBeenCalled();
+    expect(prompt).not.toMatch(/## Active Goal Tree/);
+  });
+
   it("emits Active Goal Tree block with rendered task list when a goal is active", async () => {
-    getActiveGoalMock.mockResolvedValue({
-      id: "g",
-      title: "Build the thing",
-      description: "Ship the v3 of the thing",
-      status: "active",
-      tasks: [
-        {
-          id: 1,
-          description: "Plan it",
-          status: "completed",
-          result: "Plan ready",
-        },
-        { id: 2, description: "Build it", status: "in_progress" },
-      ],
-    });
-    const prompt = await buildSystemPrompt({});
+    getActiveGoalMock.mockResolvedValue(GOAL);
+    const prompt = await buildSystemPrompt({ chatId: "chat-123" });
     expect(prompt).toMatch(/## Active Goal Tree/);
     expect(prompt).toMatch(/Title: Build the thing/);
     expect(prompt).toMatch(/\[COMPLETED\] Task 1: Plan it \(Result: Plan ready\)/);
     expect(prompt).toMatch(/\[IN_PROGRESS\] Task 2: Build it/);
-    expect(prompt).toMatch(/Auto-Pilot loop/);
+  });
+
+  it("issues the Auto-Pilot imperative ONLY in an unattended run (PM #130)", async () => {
+    // With the key fixed this block finally renders on interactive turns too.
+    // "Your immediate objective is to complete the FIRST pending task" would
+    // then hijack whatever the user actually asked — so the imperative is
+    // gated, and the interactive wording presents the tree as context.
+    getActiveGoalMock.mockResolvedValue(GOAL);
+
+    const auto = await buildSystemPrompt({ chatId: "chat-123", autoPilot: true });
+    expect(auto).toMatch(/Auto-Pilot loop/);
+    expect(auto).toMatch(/immediate objective/);
+
+    const interactive = await buildSystemPrompt({ chatId: "chat-123" });
+    expect(interactive).toMatch(/## Active Goal Tree/);
+    expect(interactive).not.toMatch(/Auto-Pilot loop/);
+    expect(interactive).not.toMatch(/immediate objective/);
+    expect(interactive).toMatch(/CONTEXT, not an instruction/);
+  });
+
+
+  it("bounds the tree: a runaway task result is folded head+tail (PM #130)", () => {
+    // Nobody had ever paid for this block — the lookup key was wrong, so it
+    // never rendered. Fixing the key is what puts an unbounded, LLM-written
+    // `result` field on the wire, so the bound belongs to the same change.
+    return (async () => {
+      getActiveGoalMock.mockResolvedValue({
+        ...GOAL,
+        tasks: [
+          {
+            id: 1,
+            description: "Huge",
+            status: "completed",
+            result: "HEAD" + "r".repeat(9000) + "TAIL",
+          },
+          { id: 2, description: "Next one", status: "pending" },
+        ],
+      });
+      const prompt = await buildSystemPrompt({ chatId: "chat-123" });
+      expect(prompt).toMatch(/chars elided/);
+      expect(prompt).toContain("HEAD");
+      expect(prompt).toContain("TAIL");
+      expect(prompt).toContain("Task 2: Next one");
+      expect(prompt.length).toBeLessThan(20000);
+    })();
   });
 
   it("getActiveGoal throwing or returning null → no Goal Tree block, no throw", async () => {
     getActiveGoalMock.mockRejectedValueOnce(new Error("goal-store crash"));
-    const a = await buildSystemPrompt({});
+    const a = await buildSystemPrompt({ chatId: "chat-123" });
     expect(a).not.toMatch(/## Active Goal Tree/);
 
     getActiveGoalMock.mockResolvedValueOnce(null);
-    const b = await buildSystemPrompt({});
+    const b = await buildSystemPrompt({ chatId: "chat-123" });
     expect(b).not.toMatch(/## Active Goal Tree/);
   });
 });

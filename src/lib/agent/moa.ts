@@ -82,7 +82,19 @@ export {
   type DPGResult,
 } from "@/lib/agent/moa-router";
 
-import { generateDynamicSwarm } from "@/lib/agent/moa-router";
+import { generateDynamicSwarm, type RouterGoalContext } from "@/lib/agent/moa-router";
+import { getActiveGoal } from "@/lib/storage/goal-store";
+import type { GoalTask } from "@/lib/types";
+
+/** Depth-first flatten of a goal tree — subtasks count as real work too. */
+function flattenGoalTasks(tasks: readonly GoalTask[] | undefined): GoalTask[] {
+  const out: GoalTask[] = [];
+  for (const task of tasks ?? []) {
+    out.push(task);
+    if (task.subtasks?.length) out.push(...flattenGoalTasks(task.subtasks));
+  }
+  return out;
+}
 
 
 // §10 (Sprint 5) — `emptyBackoffMs` moved to `moa-proposers.ts` alongside the
@@ -325,7 +337,33 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     );
   }
 
-  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock, maxSwarmSize);
+  // PM #131 — the Router's primary "what work is in flight" signal. The
+  // recency window over the transcript is measurably unable to carry it (on a
+  // real 84-message chat the user's request sat 26 messages back, outside any
+  // sane window), while the goal tree states the task in ~150 tokens. Read
+  // here because storage access belongs to this layer, not to `moa-router`.
+  // Fail-safe: a missing or unreadable goal degrades to the transcript path.
+  let routerGoal: RouterGoalContext | undefined;
+  try {
+    const goal = await getActiveGoal(chatId);
+    if (goal && goal.status === "active") {
+      const flat = flattenGoalTasks(goal.tasks);
+      routerGoal = {
+        title: goal.title,
+        objective: goal.description,
+        nextTask: flat.find((t) => t.status !== "completed")?.description,
+        completed: flat.filter((t) => t.status === "completed").length,
+        total: flat.length,
+      };
+    }
+  } catch (err) {
+    console.warn(
+      "[MoA] Active-goal lookup for the Router failed (non-fatal):",
+      err instanceof Error ? err.message : err
+    );
+  }
+
+  const dpgResult = await generateDynamicSwarm(userMessage, history, routerConfig, searchEnabled, abortSignal, fewShotsBlock, maxSwarmSize, routerGoal);
 
   publishUiSyncEvent({
     topic: "chat",
@@ -341,9 +379,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       // stdout. This node is already on screen; naming the state costs nothing.
       taskSummary: dpgResult.degraded
         ? "Static roles — expert team could not be generated"
-        : dpgResult.requiresSwarm
-          ? "Assembled Expert Team"
-          : "Bypassed Swarm",
+        : dpgResult.continuationFloorApplied
+          // PM #129 — the Router said "trivial" about a bare "продолжай"; the
+          // deterministic floor overrode it. Say which decision the user is
+          // looking at, exactly as the `degraded` arm does.
+          ? "Assembled Expert Team — continuing the task in progress"
+          : dpgResult.requiresSwarm
+            ? "Assembled Expert Team"
+            : "Bypassed Swarm",
       status: "completed",
       completedAt: new Date().toISOString(),
     },

@@ -51,9 +51,15 @@ import {
   describeRouterError,
   applySkepticControlArm,
   isSkepticControlArmActive,
+  isContinuationMessage,
+  resolveContinuationSubject,
+  hasRecentTaskActivity,
+  buildRouterContextBlock,
+  buildRouterGoalBlock,
 } from "./moa-router";
 import { MOA_PROPOSERS, detectProposerRole } from "./moa-personas";
 import { log } from "@/lib/observability/logger";
+import { estimateTokenCount } from "./compressor";
 import type { ModelConfig } from "@/lib/types";
 import type { ModelMessage } from "ai";
 
@@ -783,5 +789,454 @@ describe("generateDynamicSwarm — tier-aware retry budget (Sprint 2b)", () => {
 
     expect(mockedGenerateObject).toHaveBeenCalledTimes(1);
     expect(result.degraded).toBe(true);
+  });
+});
+
+// ── PM #129 — continuations ────────────────────────────────────────────────
+
+/** Assistant turn that is PURE tool activity — the shape that rendered blank. */
+const TOOL_CALL_MESSAGE: ModelMessage = {
+  role: "assistant",
+  content: [
+    {
+      type: "tool-call",
+      toolCallId: "c1",
+      toolName: "replace_in_file",
+      input: { path: "src/lib/auth/session.ts", search: "old", replace: "new" },
+    },
+  ],
+} as ModelMessage;
+
+const TOOL_RESULT_MESSAGE: ModelMessage = {
+  role: "tool",
+  content: [
+    {
+      type: "tool-result",
+      toolCallId: "c1",
+      toolName: "replace_in_file",
+      output: { type: "json", value: { success: true, path: "src/lib/auth/session.ts" } },
+    },
+  ],
+} as ModelMessage;
+
+const REFACTOR_REQUEST =
+  "Refactor the session layer: split session.ts into token issuance and " +
+  "validation, migrate every callsite, and keep the audit log intact.";
+
+/** A long agentic turn the operator then says "продолжай" to. */
+const CONTINUATION_HISTORY: ModelMessage[] = [
+  { role: "user", content: REFACTOR_REQUEST },
+  TOOL_CALL_MESSAGE,
+  TOOL_RESULT_MESSAGE,
+  { role: "assistant", content: "Split the issuance path; validation is next." },
+];
+
+describe("isContinuationMessage — deterministic lexicon (PM #129)", () => {
+  it.each([
+    "продолжай",
+    "Продолжай.",
+    "продолжи",
+    "продолжай пожалуйста",
+    "давай дальше",
+    "дальше",
+    "ещё",
+    "еще",
+    "continue",
+    "Continue!",
+    "continue please",
+    "go on",
+    "keep going",
+    "carry on",
+    "proceed",
+  ])("treats %j as a bare continuation", (msg) => {
+    expect(isContinuationMessage(msg)).toBe(true);
+  });
+
+  it.each([
+    "go on",
+    "keep going",
+    "carry on",
+    "go ahead",
+    "ok go",
+  ])("treats the PHRASE %j as a continuation", (msg) => {
+    expect(isContinuationMessage(msg)).toBe(true);
+  });
+
+  it.each([
+    "go",
+    "next",
+    "more",
+    "finish",
+    "keep",
+    "carry",
+  ])("does NOT treat the BARE word %j as a continuation (cross-model review)", (msg) => {
+    // These were strong on their own and it was wrong: bare "next" is
+    // pagination, "more" is "more examples", "go" is an approval. Each would
+    // have forced a swarm and spent shared free-tier quota. They still count
+    // inside a phrase ("go on", "keep going") — see the case above.
+    expect(isContinuationMessage(msg)).toBe(false);
+  });
+
+  it.each([
+    "",
+    "спасибо",
+    "привет",
+    "continue with the auth refactor and migrate every callsite",
+    "продолжай рефакторинг session.ts и перенеси все вызовы",
+    "more tests for the tokenizer please",
+    "what happens next in the pipeline?",
+  ])("does NOT treat %j as a bare continuation", (msg) => {
+    // Anything carrying its own task description must reach the Router
+    // unannotated — the floor exists for messages with NO signal, and widening
+    // it into "any short-ish message" is how a bypass becomes unreachable.
+    expect(isContinuationMessage(msg)).toBe(false);
+  });
+});
+
+describe("resolveContinuationSubject (PM #129)", () => {
+  it("returns the last SUBSTANTIVE user request, skipping earlier continuations", () => {
+    const history: ModelMessage[] = [
+      { role: "user", content: REFACTOR_REQUEST },
+      { role: "assistant", content: "started" },
+      { role: "user", content: "продолжай" },
+      { role: "assistant", content: "more" },
+    ];
+    expect(resolveContinuationSubject("продолжай", history)).toBe(REFACTOR_REQUEST);
+  });
+
+  it("ignores the current message whether or not history already contains it", () => {
+    const withCurrent: ModelMessage[] = [
+      { role: "user", content: REFACTOR_REQUEST },
+      { role: "user", content: "continue" },
+    ];
+    expect(resolveContinuationSubject("continue", withCurrent)).toBe(REFACTOR_REQUEST);
+  });
+
+  it("returns empty string when there is nothing to inherit", () => {
+    expect(resolveContinuationSubject("continue", [])).toBe("");
+    expect(
+      resolveContinuationSubject("continue", [{ role: "assistant", content: "hi" }])
+    ).toBe("");
+  });
+});
+
+describe("buildRouterContextBlock — tool activity is VISIBLE (PM #129 mechanism)", () => {
+  it("renders tool calls and tool results instead of collapsing them to blanks", () => {
+    // THE regression. The old Router flatten kept only `.text` parts, so this
+    // history rendered as `[ASSISTANT]: ` / `[TOOL]: ` — the Router judged a
+    // one-word continuation against an empty page and answered "trivial".
+    const block = buildRouterContextBlock(CONTINUATION_HISTORY);
+    expect(block).toContain("replace_in_file");
+    expect(block).toContain("src/lib/auth/session.ts");
+    expect(block).not.toMatch(/^\[ASSISTANT\]:\s*$/m);
+    expect(block).not.toMatch(/^\[TOOL\]:\s*$/m);
+  });
+
+  it("drops empty messages and folds an oversized one head+tail (PM #131)", () => {
+    const block = buildRouterContextBlock([
+      { role: "user", content: "START" + "y".repeat(20000) + "END" },
+      { role: "assistant", content: "" },
+    ]);
+    expect(block.split("\n")).toHaveLength(1);
+    // Head AND tail survive — the old head-only slice dropped "END", which on
+    // real tool output is where the failure lives.
+    expect(block).toContain("START");
+    expect(block).toContain("END");
+    expect(block).toMatch(/chars elided/);
+  });
+
+  it("bounds the block in TOKENS, not characters (PM #131)", () => {
+    // The old bound was 8 messages × 500 CHARS — the wrong unit for the
+    // constraint (the Router's context window) and, measured on a real chat,
+    // it discarded 69% of the window's content to save 0.9% of the budget.
+    const heavy: ModelMessage[] = Array.from({ length: 40 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `message ${i} ` + "z".repeat(4000),
+    }));
+    const block = buildRouterContextBlock(heavy);
+    const tokens = estimateTokenCount([{ role: "user", content: block }]);
+    expect(tokens).toBeGreaterThan(0);
+    expect(tokens).toBeLessThanOrEqual(4200); // budget 3000 + one final line
+    // Depth is decided by the budget, not by a fixed message count.
+    expect(block.split("\n").length).toBeGreaterThan(1);
+  });
+
+  it("never overruns the budget, on the densest realistic payloads (cross-model review)", () => {
+    // An external review claimed the block could breach its budget: the role
+    // prefix was not charged against the per-message share, and the join
+    // separators were not counted at all. It reproduced — 3016 tokens against
+    // a 3000 budget. Cyrillic is the adversarial case (it tokenizes far denser
+    // than English) and it is what the operator actually writes.
+    for (const size of [200, 900, 1800, 4000, 12000]) {
+      const msgs: ModelMessage[] = Array.from({ length: 40 }, (_, i) => ({
+        role: i % 2 === 0 ? "user" : "assistant",
+        content: `m${i} ` + "щ".repeat(size),
+      }));
+      const tokens = estimateTokenCount([
+        { role: "user", content: buildRouterContextBlock(msgs) },
+      ]);
+      expect(tokens).toBeLessThanOrEqual(3000);
+    }
+  });
+
+  it("keeps MORE messages when they are small — the budget buys signal", () => {
+    const small: ModelMessage[] = Array.from({ length: 20 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `short message ${i}`,
+    }));
+    const block = buildRouterContextBlock(small);
+    // The old fixed window would have stopped at 8 regardless of size.
+    expect(block.split("\n").length).toBeGreaterThan(8);
+    expect(block).toContain("short message 19");
+  });
+});
+
+describe("hasRecentTaskActivity (PM #129)", () => {
+  it("detects tool calls and tool results in the window", () => {
+    expect(hasRecentTaskActivity(CONTINUATION_HISTORY, 8)).toBe(true);
+    expect(hasRecentTaskActivity([TOOL_RESULT_MESSAGE], 8)).toBe(true);
+  });
+
+  it("is false for plain chatter, and respects the window size", () => {
+    expect(
+      hasRecentTaskActivity(
+        [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+        ],
+        8
+      )
+    ).toBe(false);
+    // The tool activity is older than the window → not recent.
+    expect(hasRecentTaskActivity(CONTINUATION_HISTORY, 1)).toBe(false);
+  });
+});
+
+describe("buildRouterGoalBlock — the goal is the primary signal (PM #131)", () => {
+  const GOAL = {
+    title: "TelegramAttacker Hardening",
+    objective: "Close three critical gaps: anti-detection, metrics, SIEM.",
+    nextTask: "Rework antiDetection.ts: replace client-side obfuscation",
+    completed: 1,
+    total: 6,
+  };
+
+  it("states the task, the progress and the next unfinished step", () => {
+    const block = buildRouterGoalBlock(GOAL);
+    expect(block).toContain("ACTIVE GOAL");
+    expect(block).toContain("TelegramAttacker Hardening");
+    expect(block).toContain("Progress: 1/6");
+    expect(block).toContain("Rework antiDetection.ts");
+  });
+
+  it("is empty without a goal, and omits the next-task line when everything is done", () => {
+    expect(buildRouterGoalBlock(undefined)).toBe("");
+    const finished = buildRouterGoalBlock({ ...GOAL, nextTask: undefined, completed: 6 });
+    expect(finished).toContain("Progress: 6/6");
+    expect(finished).not.toContain("Next unfinished task");
+  });
+
+  it("caps each field so a runaway description cannot flood the Router prompt", () => {
+    const block = buildRouterGoalBlock({ ...GOAL, objective: "z".repeat(5000) });
+    expect(block).toContain("…");
+    expect(block.length).toBeLessThan(2500);
+  });
+});
+
+describe("generateDynamicSwarm — goal-driven routing (PM #131)", () => {
+  const GOAL = {
+    title: "Session layer split",
+    objective: "Split session.ts into issuance and validation, migrate callsites.",
+    nextTask: "Migrate the remaining 6 callsites and keep the audit log intact",
+    completed: 1,
+    total: 6,
+  };
+
+  beforeEach(() => {
+    mockedGenerateObject.mockReset();
+  });
+
+  it("puts the active goal in the Router prompt", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+    await generateDynamicSwarm("продолжай", [], STUB_MODEL, false, undefined, "", 5, GOAL);
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).toContain("ACTIVE GOAL");
+    expect(prompt).toContain("Session layer split");
+  });
+
+  it("inherits the continuation subject from the goal, NOT the transcript walk", async () => {
+    // The measured failure of the transcript walk: on a long session the last
+    // substantive user message falls outside the lookback. The goal does not.
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+    await generateDynamicSwarm("продолжай", [], STUB_MODEL, false, undefined, "", 5, GOAL);
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).toContain("ORIGINAL REQUEST BEING CONTINUED");
+    expect(prompt).toContain("Migrate the remaining 6 callsites");
+  });
+
+  it("an unfinished goal is evidence of work in flight — the floor fires with NO tool activity", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult({ requiresSwarm: false }));
+    const result = await generateDynamicSwarm(
+      "продолжай",
+      [{ role: "assistant", content: "ok" }],
+      STUB_MODEL,
+      false,
+      undefined,
+      "",
+      5,
+      GOAL
+    );
+    expect(result.requiresSwarm).toBe(true);
+    expect(result.continuationFloorApplied).toBe(true);
+  });
+
+  it("a COMPLETED goal is not work in flight", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult({ requiresSwarm: false }));
+    const result = await generateDynamicSwarm(
+      "продолжай",
+      [{ role: "assistant", content: "ok" }],
+      STUB_MODEL,
+      false,
+      undefined,
+      "",
+      5,
+      { ...GOAL, nextTask: undefined, completed: 6 }
+    );
+    expect(result.requiresSwarm).toBe(false);
+    expect(result.continuationFloorApplied).toBeUndefined();
+  });
+
+  it("no goal → unchanged behaviour (the transcript path still works)", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult({ requiresSwarm: false }));
+    const result = await generateDynamicSwarm(
+      "продолжай",
+      CONTINUATION_HISTORY,
+      STUB_MODEL,
+      false
+    );
+    expect(result.requiresSwarm).toBe(true);
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).not.toContain("ACTIVE GOAL");
+  });
+});
+
+describe("generateDynamicSwarm — continuation floor (PM #129)", () => {
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    // The preceding describe leaves a `mockRejectedValue` IMPLEMENTATION behind
+    // (`vi.clearAllMocks` clears calls, not implementations) — reset, don't
+    // inherit someone else's 402.
+    mockedGenerateObject.mockReset();
+    infoSpy = vi.spyOn(log, "info").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    infoSpy.mockRestore();
+  });
+
+  it("overrides requiresSwarm:false to true on a bare continuation of real work", async () => {
+    // The operator's actual complaint: the swarm would not engage on
+    // "продолжай" without the Force pill, because the Router — correctly, for
+    // the single word it was shown — called it trivial.
+    mockedGenerateObject.mockResolvedValue(
+      fakeObjectResult({ requiresSwarm: false })
+    );
+
+    const result = await generateDynamicSwarm(
+      "продолжай",
+      CONTINUATION_HISTORY,
+      STUB_MODEL,
+      false
+    );
+
+    expect(result.requiresSwarm).toBe(true);
+    expect(result.continuationFloorApplied).toBe(true);
+    expect(infoSpy).toHaveBeenCalledWith(
+      "moa_router_continuation_floor",
+      expect.objectContaining({ module: "moa-router", hasSubject: true })
+    );
+  });
+
+  it("leaves a genuine bypass alone — a continuation of idle chatter still bypasses", async () => {
+    // The floor must not become "always swarm". No tool activity, and the
+    // inherited request is short, so there is no evidence of work in flight.
+    mockedGenerateObject.mockResolvedValue(
+      fakeObjectResult({ requiresSwarm: false })
+    );
+
+    const result = await generateDynamicSwarm(
+      "continue",
+      [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello, how can I help?" },
+      ],
+      STUB_MODEL,
+      false
+    );
+
+    expect(result.requiresSwarm).toBe(false);
+    expect(result.continuationFloorApplied).toBeUndefined();
+  });
+
+  it("never fires on a NON-continuation, however short", async () => {
+    mockedGenerateObject.mockResolvedValue(
+      fakeObjectResult({ requiresSwarm: false })
+    );
+
+    const result = await generateDynamicSwarm(
+      "спасибо",
+      CONTINUATION_HISTORY,
+      STUB_MODEL,
+      false
+    );
+
+    expect(result.requiresSwarm).toBe(false);
+    expect(result.continuationFloorApplied).toBeUndefined();
+  });
+
+  it("only ever flips false → true, never the reverse", async () => {
+    mockedGenerateObject.mockResolvedValue(
+      fakeObjectResult({ requiresSwarm: true })
+    );
+
+    const result = await generateDynamicSwarm(
+      "продолжай",
+      CONTINUATION_HISTORY,
+      STUB_MODEL,
+      false
+    );
+
+    expect(result.requiresSwarm).toBe(true);
+    expect(result.continuationFloorApplied).toBeUndefined();
+  });
+
+  it("hands the Router the ORIGINAL request and an explicit continuation notice", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+
+    await generateDynamicSwarm("продолжай", CONTINUATION_HISTORY, STUB_MODEL, false);
+
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).toContain("CONTINUATION NOTICE");
+    expect(prompt).toContain("ORIGINAL REQUEST BEING CONTINUED");
+    expect(prompt).toContain(REFACTOR_REQUEST);
+  });
+
+  it("adds no continuation block to an ordinary request", async () => {
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+
+    await generateDynamicSwarm(REFACTOR_REQUEST, CONTINUATION_HISTORY, STUB_MODEL, false);
+
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).not.toContain("CONTINUATION NOTICE");
+  });
+
+  it("no longer tells the Router that a simple code edit means no swarm", async () => {
+    // The de-bias half: that clause blanket-excluded coding work, which is the
+    // bulk of what this repo is used for.
+    mockedGenerateObject.mockResolvedValue(fakeObjectResult());
+
+    await generateDynamicSwarm("x", [], STUB_MODEL, false);
+
+    const prompt = (mockedGenerateObject.mock.calls[0][0] as any).prompt;
+    expect(prompt).not.toMatch(/simple code edit/i);
   });
 });

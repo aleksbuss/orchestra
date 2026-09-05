@@ -13,6 +13,7 @@ import {
   buildInlineSynthesisInjection,
   buildProposerContextBlock,
   capDraftForInjection,
+  capHeadTail,
   INLINE_SYNTHESIS_DRAFT_CHAR_CAP,
 } from "./moa-prompts";
 
@@ -163,5 +164,45 @@ describe("buildProposerContextBlock — D1 / PM #94 proposer grounding", () => {
     expect(block).toContain("Real text.");
     // The image-only user turn produced no line.
     expect(block).not.toMatch(/\[USER\]/);
+  });
+});
+
+describe("capHeadTail — PM #131 truncation primitive", () => {
+  it("never exceeds the cap, over an exhaustive sweep of lengths and caps", () => {
+    // A cross-model review claimed the output could exceed `cap`. It could not:
+    // 36 300 combinations, zero violations. Pinned so a future edit to the
+    // marker or the head/tail split cannot quietly introduce one.
+    for (let len = 0; len <= 300; len += 1) {
+      const text = "x".repeat(len);
+      for (let cap = 0; cap <= 120; cap += 1) {
+        expect(capHeadTail(text, cap).length).toBeLessThanOrEqual(Math.max(cap, 0));
+      }
+    }
+  });
+
+  it("keeps both ends, and returns short input untouched", () => {
+    expect(capHeadTail("short", 50)).toBe("short");
+    const out = capHeadTail("HEAD" + "-".repeat(400) + "TAIL", 60);
+    expect(out.startsWith("HEAD")).toBe(true);
+    expect(out.endsWith("TAIL")).toBe(true);
+    expect(out).toMatch(/chars elided/);
+  });
+
+  it("never leaves a lone surrogate — an emoji run is cut on a pair boundary", () => {
+    // `slice` cuts UTF-16 code units and an emoji is a surrogate PAIR. The
+    // review flagged it and it reproduced: the orphaned half reaches the
+    // provider as mojibake inside the Router's context.
+    const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (let cap = 1; cap <= 90; cap++) {
+      expect(loneSurrogate.test(capHeadTail("🎯".repeat(60), cap))).toBe(false);
+    }
+  });
+
+  it("degenerate caps: zero, negative, and smaller than the marker", () => {
+    expect(capHeadTail("anything", 0)).toBe("");
+    expect(capHeadTail("anything", -5)).toBe("");
+    // Cap below the marker's own length falls back to a plain head slice.
+    const tiny = capHeadTail("x".repeat(100), 5);
+    expect(tiny).toBe("xxxxx");
   });
 });

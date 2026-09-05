@@ -154,6 +154,34 @@ export function classifyRouterError(err: unknown): string {
   return "other";
 }
 
+// ── Router context layer ────────────────────────────────────────────────────
+//
+// PM #131 — the continuation lexicon, the goal block and the token-bounded
+// history block moved to `moa-router-context.ts` when this file crossed the
+// 800-line soft cap. Re-exported so existing importers keep working.
+
+export {
+  isContinuationMessage,
+  resolveContinuationSubject,
+  hasRecentTaskActivity,
+  buildRouterContextBlock,
+  buildRouterGoalBlock,
+  type RouterGoalContext,
+} from "@/lib/agent/moa-router-context";
+
+import {
+  isContinuationMessage,
+  resolveContinuationSubject,
+  hasRecentTaskActivity,
+  buildRouterContextBlock,
+  buildRouterGoalBlock,
+  goalContinuationSubject,
+  CONTINUATION_SUBJECT_MIN_CHARS,
+  ROUTER_CONTEXT_MESSAGES,
+  type RouterGoalContext,
+} from "@/lib/agent/moa-router-context";
+
+
 export interface DPGResult {
   requiresSwarm: boolean;
   personas: MoAProposer[];
@@ -171,6 +199,13 @@ export interface DPGResult {
    * holds today by accident of where the fallback returns, not by contract.
    */
   degraded?: boolean;
+  /**
+   * PM #129 — the Router returned `requiresSwarm: false` for a BARE
+   * continuation of demonstrated work, and the deterministic floor overrode it
+   * to `true`. Surfaced so "why did the swarm run here?" is answerable from the
+   * result, not only from stdout.
+   */
+  continuationFloorApplied?: boolean;
 }
 
 /**
@@ -188,18 +223,44 @@ export async function generateDynamicSwarm(
   // after the INSTRUCTIONS list so it biases persona generation
   // without interfering with the structured-output schema.
   fewShotsBlock: string = "",
-  maxSwarmSize: number = 5
+  maxSwarmSize: number = 5,
+  // PM #131 — the active goal for this chat, read by the caller (moa.ts owns
+  // the storage access; this module stays pure and fs-free).
+  goal?: RouterGoalContext
 ): Promise<DPGResult> {
   try {
-    // Format the last 5 messages for context — content can be string or array (tool-calls)
-    const recentContext = history.slice(-5).map(m => {
-      const text = typeof m.content === "string"
-        ? m.content
-        : Array.isArray(m.content)
-          ? m.content.map(p => (typeof p === "object" && p !== null && "text" in p ? (p as {text: string}).text : "")).join(" ")
-          : String(m.content);
-      return `[${m.role.toUpperCase()}]: ${text.slice(0, 500)}`;
-    }).join("\n");
+    // PM #129 — was a local flatten that kept ONLY `.text` parts, so a
+    // tool-call/tool-result message rendered as `[ASSISTANT]: ` and the Router
+    // judged `requiresSwarm` against a blank window on every tool-heavy turn.
+    const recentContext = buildRouterContextBlock(history);
+
+    const goalBlock = buildRouterGoalBlock(goal);
+
+    // Deterministic continuation analysis — computed BEFORE the call so it can
+    // both steer the prompt and floor the verdict afterwards.
+    const isContinuation = isContinuationMessage(userMessage);
+    // The goal record wins over the transcript walk: it states the task
+    // directly, while the walk is bounded by a lookback that a long session
+    // outruns (measured — the previous user request sat 48 messages back).
+    const continuationSubject = isContinuation
+      ? goalContinuationSubject(goal) || resolveContinuationSubject(userMessage, history)
+      : "";
+    // An active goal with unfinished tasks IS work in flight — evidence the
+    // recency window cannot always show.
+    const goalInFlight = !!goal && goal.completed < goal.total;
+    const continuationFloor =
+      isContinuation &&
+      (goalInFlight ||
+        hasRecentTaskActivity(history, ROUTER_CONTEXT_MESSAGES) ||
+        continuationSubject.length >= CONTINUATION_SUBJECT_MIN_CHARS);
+
+    const continuationBlock = isContinuation
+      ? `\n\nCONTINUATION NOTICE:
+The user's message is a bare continuation — it describes no task of its own. Do NOT judge the literal words. Judge the work being continued, shown in RECENT CONTEXT${continuationSubject ? " and in ORIGINAL REQUEST BEING CONTINUED" : ""}.${continuationSubject ? `
+
+ORIGINAL REQUEST BEING CONTINUED:
+${continuationSubject}` : ""}`
+      : "";
 
     const routerModel = createModel(modelConfig, {});
     const runRouterCall = (repairHint: string = "") => generateObject({
@@ -216,7 +277,7 @@ export async function generateDynamicSwarm(
       // verification (2026-06).
       maxOutputTokens: resolveMaxOutputTokens(modelConfig),
       schema: z.object({
-        requiresSwarm: z.boolean().describe("Set to false ONLY IF the user's message is a simple conversational reply (e.g. 'thanks', 'hello') or a trivial task that a single AI agent can handle easily without needing a committee of diverse experts."),
+        requiresSwarm: z.boolean().describe("Set to false ONLY IF the user's message is a simple conversational reply (e.g. 'thanks', 'hello') or a trivial task that a single AI agent can handle easily without needing a committee of diverse experts. A short message is NOT automatically trivial: a bare continuation ('continue', 'продолжай', 'дальше') inherits the complexity of the work shown in RECENT CONTEXT — judge that work, not the length of the message."),
         personas: z.array(z.object({
           id: z.string().describe("A short snake_case id (e.g. 'tax_lawyer')"),
           role: z.string().describe("The human-readable Title/Role of the expert (e.g. 'Senior Tax Attorney')"),
@@ -226,17 +287,17 @@ export async function generateDynamicSwarm(
         })).min(3).max(maxSwarmSize).describe(`List of exactly 3 to ${maxSwarmSize} highly specialized experts required to answer the user request. Only used if requiresSwarm is true.`)
       }),
       prompt: `You are the Orchestra Auto-Swarm Router.
-The user has submitted a request. Your job is to determine if a "Dream Team" of experts is needed.
+The user has submitted a request. Your job is to determine if a "Dream Team" of experts is needed.${goalBlock}
 
 RECENT CONTEXT:
 ${recentContext}
 
 CURRENT USER REQUEST (truncated if too long):
-${userMessage.slice(0, 2000)}
+${userMessage.slice(0, 2000)}${continuationBlock}
 
 INSTRUCTIONS:
-1. If the request is trivial, conversational, or a simple code edit, set requiresSwarm to false.
-2. If the request requires multi-faceted analysis, deep architecture, creative brainstorming, or complex problem solving, set requiresSwarm to true.
+1. Set requiresSwarm to false ONLY for a genuinely trivial turn: a greeting, a thank-you, a yes/no confirmation, or a one-line lookup that a single agent finishes in one step with no analysis.
+2. Set requiresSwarm to true when the request needs multi-faceted analysis, deep architecture or design decisions, a multi-file or cross-cutting change, debugging an unknown root cause, a security or correctness review, creative brainstorming, or any task where a wrong answer is expensive. A SHORT message is NOT a simple task — a bare continuation ("continue" / "продолжай" / "дальше") inherits the complexity of the work in RECENT CONTEXT, so judge THAT work.
 3. If true, assemble 3 to ${maxSwarmSize} hyper-specialized domain experts. Do NOT use generic roles.
 4. For each expert, provide a highly specific systemPrompt using this exact structure:
    [GOAL] What they are trying to achieve from their narrow perspective.
@@ -329,6 +390,31 @@ INSTRUCTIONS:
 
     const { object, usage } = routerResult!;
 
+    // PM #129 — the deterministic floor. Everything above still asks a model to
+    // cooperate; this does not. A bare continuation of demonstrated work may not
+    // be classified trivial, because the message the Router judged contains no
+    // task at all — the task is in the history. Narrow by construction: it only
+    // ever flips false → true, only on a bare continuation, and only when the
+    // conversation shows real work (tool activity, or a substantial original
+    // request to inherit from). The personas are always present to run with —
+    // the schema requires 3-5 regardless of the verdict, and PM #91 injects the
+    // Skeptic unconditionally.
+    let requiresSwarm = object.requiresSwarm;
+    let continuationFloorApplied = false;
+    if (!requiresSwarm && continuationFloor) {
+      requiresSwarm = true;
+      continuationFloorApplied = true;
+      log.info("moa_router_continuation_floor", {
+        module: "moa-router",
+        provider: modelConfig.provider,
+        model: modelConfig.model,
+        hasSubject: continuationSubject.length > 0,
+      });
+      console.warn(
+        `[MoA] Router judged a bare continuation trivial (requiresSwarm=false) while a task is in flight — overriding to true (PM #129 continuation floor).`
+      );
+    }
+
     // PM #37 — guarantee the QA Auditor / Skeptic. CLAUDE.md §1 promises
     // "one DPG role is ALWAYS forced to be a QA Auditor / Skeptic", but
     // the previous implementation relied entirely on a prompt instruction.
@@ -383,10 +469,11 @@ INSTRUCTIONS:
     // degenerate personas) was invisible precisely because nothing said WHICH
     // model generated the personas. This line would have exposed it at once.
     console.log(
-      `[MoA] Router (DPG) personas generated by ${modelConfig.provider}/${modelConfig.model} — ${personas.length} persona(s), requiresSwarm=${object.requiresSwarm}`
+      `[MoA] Router (DPG) personas generated by ${modelConfig.provider}/${modelConfig.model} — ${personas.length} persona(s), requiresSwarm=${requiresSwarm}${continuationFloorApplied ? " (continuation floor applied)" : ""}`
     );
     return {
-      requiresSwarm: object.requiresSwarm,
+      requiresSwarm,
+      ...(continuationFloorApplied ? { continuationFloorApplied: true } : {}),
       // Both wrappers are strict no-ops unless their dev-only eval flag is set.
       // Identical-prompts runs LAST because it replaces every persona outright
       // (the self-MoA arm has no roles at all, skeptic control included).

@@ -410,10 +410,19 @@ export async function GET() {
           openCircuits
             .map(
               (e) =>
-                `${e.provider}/${e.model} (${e.consecutiveFailures} consecutive failures, last: ${e.lastFailureKind})`
+                `${e.provider}/${e.model} (${e.consecutiveFailures} consecutive failures, ` +
+                `last: ${e.lastFailureKind}${
+                  e.openedByKind === "unusable" ? ", REFUSED by the provider" : ""
+                })`
             )
             .join("; ") +
-          ". Free/shared endpoints throttle under parallel fan-out — switch proposerTiers to reliable models, or wait out the cooldown.",
+          // PM #127 — the remedy depends on WHY the circuit opened. Telling an
+          // operator to "wait out the cooldown" on a provider refusal is the
+          // same misdirection the collapse notice used to give: waiting cannot
+          // help, because nothing about the endpoint is going to change.
+          (openCircuits.some((e) => e.openedByKind === "unusable")
+            ? ". At least one endpoint was REFUSED outright (the provider will not serve it to this account/app) — waiting will NOT help; pick a different model. Any others are free/shared endpoints throttling under parallel fan-out."
+            : ". Free/shared endpoints throttle under parallel fan-out — switch proposerTiers to reliable models, or wait out the cooldown."),
       });
     } else {
       checks.push({

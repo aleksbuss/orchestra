@@ -69,6 +69,7 @@ import {
   type SkepticModelOverride,
 } from "@/lib/agent/moa-personas";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
+import type { ModelFailureKind } from "@/lib/agent/model-health";
 export { createWindowResolver } from "@/lib/agent/moa-window";
 
 
@@ -211,8 +212,23 @@ export interface MoAResult {
      */
     signals: TraceSignals;
   };
-  /** Individual proposer drafts for debugging/logging */
-  drafts: { proposerId: string; role: string; text: string; latencyMs: number }[];
+  /**
+   * Individual proposer drafts for debugging/logging.
+   *
+   * Carries the RESOLVED endpoint and the breaker's classification of a
+   * failure (PM #127) so the collapse notice can name the real cause
+   * structurally, instead of pattern-matching the error prose or defaulting to
+   * "probably a free-tier rate limit" for every collapse.
+   */
+  drafts: {
+    proposerId: string;
+    role: string;
+    text: string;
+    latencyMs: number;
+    resolvedProvider?: string;
+    resolvedModel?: string;
+    failureKind?: ModelFailureKind | null;
+  }[];
   /** Aggregation latency */
   aggregationLatencyMs: number;
   /** Total wall-clock time */
@@ -437,12 +453,25 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     }
   }
   // Strip the internal-only rawUsage field before exposing drafts.
-  const drafts = draftsWithUsage.map(({ proposerId, role, text, latencyMs }) => ({
-    proposerId,
-    role,
-    text,
-    latencyMs,
-  }));
+  //
+  // PM #127 audit — this destructure is a WHITELIST, so every field the
+  // collapse notice needs has to be named here. `failureKind` and the resolved
+  // endpoint were added to `ProposerDraftWithUsage` and to `MoAResult.drafts`
+  // but NOT here, so they were silently dropped in between: `agent.ts`'s
+  // `refusedEndpoints` was always empty and the new cause line never fired
+  // once. Widening a type at both ends does not connect them — the mapper in
+  // the middle is the actual wire.
+  const drafts = draftsWithUsage.map(
+    ({ proposerId, role, text, latencyMs, resolvedProvider, resolvedModel, failureKind }) => ({
+      proposerId,
+      role,
+      text,
+      latencyMs,
+      resolvedProvider,
+      resolvedModel,
+      failureKind,
+    })
+  );
 
   const successfulDrafts = drafts.filter((d) => isSuccessfulDraft(d.text));
   console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded.`);

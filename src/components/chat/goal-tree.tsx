@@ -71,7 +71,7 @@ export function GoalTree({ chatId, syncTick }: GoalTreeProps) {
         if (!cancelled) {
           setGoal(data.goal);
         }
-      } catch (err) {
+      } catch {
         // ignore
       }
     };

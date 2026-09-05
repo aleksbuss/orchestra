@@ -461,7 +461,7 @@ export function ModelConfigWizard({
     } finally {
       setConnectionLoading(false);
     }
-  }, [apiKey, isCliProvider, provider, selectedAuthMethod]);
+  }, [effectiveApiKey, isCliProvider, provider, selectedAuthMethod]);
 
   useEffect(() => {
     if (!provider) {
@@ -485,6 +485,7 @@ export function ModelConfigWizard({
     provider,
     selectedAuthMethod,
     config.authMethod,
+    configKey,
     updateSettings,
   ]);
 

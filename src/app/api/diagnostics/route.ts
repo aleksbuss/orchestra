@@ -4,7 +4,6 @@
  * Tests every provider's API key by making a real (minimal) API call.
  * Returns detailed status for each provider + preset readiness.
  */
-import { NextRequest } from "next/server";
 import { getSettings } from "@/lib/storage/settings-store";
 import {
   assertSafeOutboundUrl,
@@ -214,7 +213,7 @@ function maskKey(key: string): string {
   return key.slice(0, 6) + "..." + key.slice(-4);
 }
 
-export async function GET(_req: NextRequest) {
+export async function GET() {
   const settings = await getSettings();
   const vault = settings.providerApiKeys || {};
 

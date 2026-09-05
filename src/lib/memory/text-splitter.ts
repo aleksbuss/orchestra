@@ -51,7 +51,7 @@ export class RecursiveCharacterTextSplitter {
             : text.split(""); // Character split if empty separator
 
         // Reassemble into valid chunks
-        let currentChunk: string[] = [];
+        const currentChunk: string[] = [];
         let currentLength = 0;
 
         for (const split of splits) {

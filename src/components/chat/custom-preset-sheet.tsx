@@ -57,7 +57,7 @@ export function CustomPresetSheet({
         <SheetHeader className="mb-6">
           <SheetTitle>Custom Swarm Configuration</SheetTitle>
           <SheetDescription>
-            Configure your Brain model (Orchestrator) and Worker models. These settings are applied globally when "Manual config" is active.
+            Configure your Brain model (Orchestrator) and Worker models. These settings are applied globally when &ldquo;Manual config&rdquo; is active.
           </SheetDescription>
         </SheetHeader>
 

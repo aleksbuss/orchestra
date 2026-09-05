@@ -220,7 +220,7 @@ export function QuickModelSelector({ disabled }: QuickModelSelectorProps) {
         setSaving(false);
       }
     },
-    [apiKeyInput]
+    [apiKeyInput, setActivePreset]
   );
 
   const providerKeys = Object.keys(MODEL_PROVIDERS);

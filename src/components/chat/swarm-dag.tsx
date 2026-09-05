@@ -230,9 +230,9 @@ function DAGNodeCard({ node, depth }: { node: DAGNode; depth: number }) {
 
 /* ─────────────────────── Main Component ─────────────────────── */
 
-export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: string | null; externalNodes?: Map<string, any>; onClearNodes?: () => void }) {
+export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: string | null; externalNodes?: Map<string, DAGNode>; onClearNodes?: () => void }) {
   const local = useSwarmDAGEvents(externalNodes ? null : chatId);
-  const nodes = (externalNodes || local.nodes) as Map<string, DAGNode>;
+  const nodes = externalNodes || local.nodes;
   const clearNodes = onClearNodes || local.clearNodes;
   const [isOpen, setIsOpen] = useState(true);
   const [isStopping, setIsStopping] = useState(false);

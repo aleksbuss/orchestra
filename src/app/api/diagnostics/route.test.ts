@@ -102,7 +102,7 @@ afterEach(() => {
 });
 
 async function callDiagnostics() {
-  const res = await GET({} as any);
+  const res = await GET();
   return (await res.json()) as {
     providers: Array<{
       provider: string;
@@ -223,7 +223,7 @@ describe("GET /api/diagnostics — key masking (no leaks)", () => {
         providerApiKeys: { google: "AIza-LEAK-cccccccccccccccccccccc" },
       }) as any
     );
-    const res = await GET({} as any);
+    const res = await GET();
     const text = await res.text();
     expect(text).not.toContain("sk-LEAK-DETECT");
     expect(text).not.toContain("sk-ant-LEAK");

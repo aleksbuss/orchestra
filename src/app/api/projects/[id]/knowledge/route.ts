@@ -63,6 +63,7 @@ export async function GET(
         );
         return NextResponse.json(fileDetails);
     } catch (error) {
+        console.error("List error:", error);
         return NextResponse.json(
             { error: "Failed to list knowledge files" },
             { status: 500 }
@@ -208,8 +209,8 @@ export async function DELETE(
         // Delete file from disk
         try {
             await fs.unlink(filePath);
-        } catch (error: any) {
-            if (error.code !== "ENOENT") {
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
                 throw error;
             }
             // If file doesn't exist, we still try to delete vectors

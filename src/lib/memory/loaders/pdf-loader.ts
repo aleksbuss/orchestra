@@ -17,7 +17,6 @@ export async function loadPdf(filePath: string): Promise<LoadedDocument> {
     // CJS .js entry from 2.x was removed. The runtime API surface
     // (getDocument / numPages / getPage / getTextContent) is unchanged
     // across 2 → 4. CVE GHSA-wgrm-67xf-hhpq is fixed in 4.2.67+.
-    // @ts-ignore
     const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
 
     // Set up a fake worker to avoid worker file loading issues in Node

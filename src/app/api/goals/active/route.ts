@@ -16,6 +16,7 @@ export async function GET(req: Request) {
     }
     return NextResponse.json({ goal });
   } catch (error) {
+    console.error("Active goal fetch error:", error);
     return NextResponse.json(
       { error: "Failed to fetch active goal" },
       { status: 500 }

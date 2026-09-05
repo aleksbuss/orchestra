@@ -104,7 +104,7 @@ export async function getSettings(): Promise<AppSettings> {
     try {
       content = await fs.readFile(SETTINGS_FILE, "utf-8");
     } catch (err) {
-      if ((err as any).code === "ENOENT") {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
         await new Promise(resolve => setTimeout(resolve, 50));
         content = await fs.readFile(SETTINGS_FILE, "utf-8");
       } else {

@@ -32,8 +32,9 @@ export function createBlackboardTools(context: AgentContext): ToolSet {
           abortSignal,
         });
         return `Fact successfully written to Blackboard memory under topic '${topic}'.`;
-      } catch (e: any) {
-        return `Failed to write to Blackboard: ${e.message}`;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return `Failed to write to Blackboard: ${msg}`;
       }
     },
   });
@@ -53,8 +54,9 @@ export function createBlackboardTools(context: AgentContext): ToolSet {
         });
         if (results.length === 0) return "No matching facts found in Blackboard.";
         return results.map(r => `[Topic: ${r.topic}] ${r.content} (Score: ${r.score.toFixed(2)})`).join("\n\n");
-      } catch (e: any) {
-        return `Failed to search Blackboard: ${e.message}`;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return `Failed to search Blackboard: ${msg}`;
       }
     },
   });

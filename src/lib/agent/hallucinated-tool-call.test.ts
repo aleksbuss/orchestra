@@ -160,6 +160,53 @@ describe("extractHallucinatedToolCall (PM #81)", () => {
     expect(call?.args).toEqual({ file_path: "a.ts" });
   });
 
+  // ── Branch 6b (found 2026-09-06, LIVE Free Mode long run): dots-3 prints the
+  // tool name as the TAG ITSELF, not a `name="…"` attribute — `<dots_function_call>
+  // \n<code_execution">\n<parameter name="runtime">…`, a stray `">`, no `<invoke`.
+  // Branch 6 needs `<invoke name=`, so this returned null → turnHasDeliverableAnswer
+  // saw the prose preamble as an answer → recovery skipped → raw XML shipped to the
+  // user. 24 of this variant vs 6 `<invoke>` in one run. Anchor on the well-formed
+  // <parameter name=> inside a known wrapper; read the name from the nearest tag. ──
+  it("parses the NAME-AS-TAG dots variant with a stray quote (the verbatim msg-86 shape)", () => {
+    const raw =
+      'I\'ll start by examining the current state of the project files.\n' +
+      '<dots_function_call>\n<code_execution">\n' +
+      '<parameter name="runtime">terminal</parameter>\n' +
+      '<parameter name="command">\nfind /proj -name "*.ts" | head\n</parameter>\n' +
+      "</dots_function_call>";
+    const call = extractHallucinatedToolCall(raw);
+    expect(call?.name).toBe("code_execution");
+    expect(call?.args.runtime).toBe("terminal");
+    expect(String(call?.args.command)).toContain("find /proj");
+  });
+
+  it("parses the name-as-tag variant with a CLEAN tag (no stray quote) and with attributes", () => {
+    expect(
+      extractHallucinatedToolCall(
+        '<dots_function_call>\n<write_text_file>\n<parameter name="file_path">a.ts</parameter>'
+      )?.name
+    ).toBe("write_text_file");
+    expect(
+      extractHallucinatedToolCall(
+        '<function_calls>\n<search_web version="1">\n<parameter name="q">x</parameter>'
+      )?.name
+    ).toBe("search_web");
+  });
+
+  it("keeps the `response` carve-out for the name-as-tag form (stays recoverable prose)", () => {
+    // `response` printed as text is deliberately delivered=true elsewhere; the new
+    // branch must not flip it to an action call.
+    const raw =
+      '<dots_function_call>\n<response">\n<parameter name="text">the answer</parameter>';
+    expect(extractHallucinatedToolCall(raw)).toBeNull();
+  });
+
+  it("does NOT match prose mentioning <parameter name=> WITHOUT a function wrapper", () => {
+    const prose =
+      'Set the <parameter name="x"> field conceptually, then re-run the check.';
+    expect(extractHallucinatedToolCall(prose)).toBeNull();
+  });
+
   it("parses a no-argument <invoke name=> call (get_current_project)", () => {
     const raw = '<invoke name="get_current_project"></invoke>';
     const call = extractHallucinatedToolCall(raw);

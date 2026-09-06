@@ -7,7 +7,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-blue?logo=typescript)](https://www.typescriptlang.org/)
 [![CI](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/aleksbuss/orchestra/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-4336%20passing-brightgreen)](#tests)
-[![Post-Mortems](https://img.shields.io/badge/post--mortems-132%20documented-purple)](./POST_MORTEMS.md)
+[![Post-Mortems](https://img.shields.io/badge/post--mortems-133%20documented-purple)](./POST_MORTEMS.md)
 [![Status](https://img.shields.io/badge/status-v1.0-green)]()
 
 **Local-first AI workspace with a real Mixture-of-Agents pipeline.**

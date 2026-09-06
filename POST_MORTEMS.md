@@ -38,6 +38,38 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 133. A write that lands AFTER the last green verification silently invalidates it, and the completion-honesty backstop cannot see it
+
+**Date:** 2026-09-06
+**Status:** OPEN — diagnosed, reproduced, deliberately NOT fixed (see "Decision")
+**Severity:** P2 — no crash and no data loss; the agent reports a verified success that is no longer true of the bytes on disk.
+
+**Symptoms:** Found during the PM #132 live Free-Mode verification runs (isolated data dir, project `hardtest`, chat `realrun-hardtest-64b2c6d4`). The agent was asked to write a sliding-window rate limiter plus tests and run them. Its final answer said *"All 8 tests pass successfully"* and pasted a full TAP transcript showing `# pass 8 # fail 0`. Running the file it left on disk: **2 pass, 6 fail**, headline assertion `Third request should be denied: true !== false` — `allow()` no longer enforced `maxRequests` at all.
+
+**Root cause:** The TAP transcript was NOT fabricated — it is the real `code_execution` result. The message order is the whole defect:
+
+| msg | event |
+| --- | --- |
+| [4] | `write_text_file` → `rate-limiter.js`, 5141 bytes |
+| [6] | `write_text_file` → `rate-limiter.test.js`, 5589 bytes |
+| [8] | `code_execution` → real TAP, `# pass 8 # fail 0` |
+| [12] | `write_text_file` → `rate-limiter.js` AGAIN, 5266 bytes, `overwritten: true` |
+| [14] | `response` → "All 8 tests pass" + the [8] transcript |
+
+Nothing ran after [12]. The claim was true of the version tested and false of the version shipped. A verification is evidence only for the bytes that existed when it ran; an edit afterwards silently voids it.
+
+`detectPrematureCompletion` ([`agent-response.ts`](src/lib/agent/agent-response.ts)) cannot catch this, for TWO independent reasons — either alone is sufficient:
+1. It fires only when the last whitelisted verification exited **non-zero**. Here it exited zero; the invalidating event was a WRITE, which the check has no concept of.
+2. The command was `node --test …`, and `VERIFICATION_COMMAND_PATTERNS` carries `npm test` / `vitest` / `jest` / `pytest` but not bare `node --test` — so `lastCheck` was null and the backstop never even engaged.
+
+**Decision (why this is OPEN and not fixed):** The fix is small and was costed against the real code, not estimated: ~20 lines to track the last write-tool call position against the last verification position inside the loop that already walks the messages, one line to add `node --test` to the whitelist, ~70 lines of tests — one file plus its test, no plumbing, advisory-only path so the risk is near zero. It was NOT done because its EFFECT is unmeasured in the way that matters: the output is a notice, and PM #84's own rationale concedes Orchestra "cannot make a model reason honestly" — a degraded free model may ignore this notice exactly as it ignores the others. Contrast PM #132's prompt override, which was accepted on a measured 6/11 → 0/11 live A/B. The operator-facing half WOULD be deterministic, which is the real argument for building it; the project being wrapped up is the argument against. Recorded rather than silently dropped.
+
+**Reproduction:** the message order above is the fixture. Any turn that writes a file, verifies green, then writes that file again reproduces it.
+
+**Rule (binding even though the check does not exist):** Never treat a verification as current after any write to a path it covered. When reviewing an agent turn that claims a green check, confirm the check is the LAST tool call touching that path — a passing transcript quoted after a later edit is not evidence.
+
+---
+
 ## 132. The stream-recovery path shipped a substitute's printed tool call straight to the user — the one call site of three with no output gate
 
 **Date:** 2026-09-06
@@ -66,6 +98,8 @@ Two smaller defects fell out of the same block: the pre-strip `if (!attempt.text
 **Why the notice is stage-specific:** `buildToolMarkupDegradationNotice` blames long-context degradation and says "nothing was changed". Both are wrong here — this path follows a stream ERROR and hands the model no tools at all, and the triggering request was read-only, where "nothing was changed" reassures about a mutation nobody attempted while omitting the part that matters: the lookup never ran, so no answer would have been grounded.
 
 **Regression Coverage:** `primary-stream-recovery.test.ts` § "residual markup gate (PM #132)" — the live chat-store string as a fixture (never persisted, notice instead, `turn_degraded` not `turn_recovered`, telemetry stage + substitute identity, billing attribution, thinking-only refusal, quoted-markup false positive); `hallucinated-tool-call.test.ts` § "gateForcedAnswer (PM #132)" pins the pipeline order; `final-answer-failover.test.ts` § "tool-less system-prompt override" pins the override on every attempt and the `endpoint` report. All three fixes were mutation-verified: reverting each one individually turns the matching test red.
+
+**Residual gap, measured and deliberately LEFT OPEN:** `gateForcedAnswer` uses `printedActionCallName`, which tolerates a TRUNCATED JSON body. The main turn and `tool-capable-retry.ts` do not — they gate on `turnHasDeliverableAnswer`, which routes through the strict `extractHallucinatedToolCall`. Probed live: `<tool_call>{"name":"write_text_file","arguments":{"file_path":"/x.ts","content":"abc` (cut mid-string) → `gateForcedAnswer` reports degraded, `turnHasDeliverableAnswer` reports **delivered**, so that blob would be persisted raw. Unifying them was REJECTED on evidence: the same probe shows this detector already false-positives on a legitimate answer that QUOTES tool syntax — including one wrapped entirely in a ``` fence, because `stripOneCodeFence` removes the fence and judges the contents (behaviour pinned by an existing test, so it is deliberate). Widening the strict path would trade a rare failure (a truncated JSON-dialect print) for a more frequent one (discarding a good answer that explains tool syntax) on EVERY turn. Revisit only with a measurement of how often each actually occurs.
 
 **Doc Updates:** this entry; `docs/references/moa-swarm-contracts.md` § forced-answer ladder.
 

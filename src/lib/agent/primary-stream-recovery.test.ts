@@ -470,6 +470,24 @@ describe("recoverPrimaryStreamFailure — residual markup gate (PM #132)", () =>
     "site:github.com created:>2026-08-01 stars:>1000 interesting projects\n" +
     "</parameter>\n</function>\n</invoke>\n</minimax:tool_call>";
 
+  /**
+   * A SECOND live shape, captured 2026-09-06 straight off
+   * `dots-studio/dots-3-note-preview:free` during the PM #132 verification run
+   * (real bytes, not hand-written): a different dialect from the incident's
+   * Functionary form — `<dots_function_call><invoke name="…">` — carrying a
+   * MALFORMED `<parameter namequery">` (the `="` is simply missing) and three
+   * leading blank lines. Degraded output is mangled in ways a hand-written
+   * fixture never is; this is the guard against a gate that only survives
+   * well-formed markup.
+   */
+  const LIVE_DOTS_MARKUP =
+    '\n\n\n<dots_function_call>\n<invoke name="search_web">\n' +
+    '<parameter name="query">GitHub trending repositories last month 2026 interesting projects\n' +
+    '</parameter>\n<parameter name="num_results">\n10\n</parameter>\n</invoke>\n' +
+    "</dots_function_call>\n<dots_function_call>\n<invoke name=\"search_web\">\n" +
+    '<parameter namequery">best new open source projects August September 2026 GitHub\n' +
+    '</parameter>\n<parameter name="num_results">\n10\n</parameter>\n</invoke>\n</dots_function_call>';
+
   const SUBSTITUTE: ModelConfig = {
     provider: "openrouter",
     model: "vendor/substitute:free",
@@ -494,6 +512,25 @@ describe("recoverPrimaryStreamFailure — residual markup gate (PM #132)", () =>
     // …and it must NAME the tool that did not run, so the user knows the answer
     // would not have been grounded.
     expect(content).toContain("search_web");
+  });
+
+  it("holds on a SECOND live dialect captured off dots-3, malformed attribute included", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: LIVE_DOTS_MARKUP,
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(true);
+    const content = chatState.messages[0].content;
+    expect(content).not.toContain("<dots_function_call>");
+    expect(content).not.toContain("<invoke");
+    expect(content).toContain("search_web");
+    expect(mockedRecordDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({ stage: "stream-recovery", toolName: "search_web" })
+    );
   });
 
   it("does NOT announce 'Answered by a different model' — nothing was answered", async () => {

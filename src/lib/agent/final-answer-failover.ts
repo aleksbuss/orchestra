@@ -47,6 +47,7 @@ import { createModel } from "@/lib/providers/llm-provider";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import { governMessages } from "@/lib/agent/token-governor";
+import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   classifyModelFailure,
@@ -183,6 +184,14 @@ export interface FinalAnswerResult {
   usage?: RawUsage;
   /** Operator-facing note: a substitution happened, or nothing could be delivered. */
   notice?: string;
+  /**
+   * PM #132 — which endpoint actually PRODUCED `text`. Absent when nothing was
+   * delivered. Callers fold `usage` against this, not against the brain: on the
+   * substitute path the tokens were burned by a different provider/model, and
+   * pricing them as the brain's mis-bills the turn (free-tier substitutes make
+   * the error invisible at 0 USD, paid ones do not).
+   */
+  endpoint?: ModelConfig;
 }
 
 /**
@@ -379,6 +388,13 @@ export async function generateFinalAnswerWithFailover(
   // its brain does not degrade. Pruning the transcript that CAUSED the degraded
   // forced answer is the point — the substitute must not inherit the full 68K.
   args = { ...args, messages: boundForcedAnswerContext(args.messages) };
+  // PM #132 — every attempt below is tool-less, yet `args.systemPrompt` is the
+  // FULL tool-capable prompt (it mandates `search_web`, the `response` tool,
+  // goal trees). Countermand it ONCE here, for the brain retry and every
+  // substitute alike, rather than leaving the "do not call tools" line alone in
+  // a user message that the system prompt outranks. Prevention for the class the
+  // residual gate at each call site only CONTAINS.
+  args = { ...args, systemPrompt: args.systemPrompt + FORCED_ANSWER_TOOL_OVERRIDE };
   let usage: RawUsage | undefined;
 
   const fold = (u: RawUsage | undefined) => {
@@ -397,7 +413,7 @@ export async function generateFinalAnswerWithFailover(
   if (!brainTripped && !args.skipBrainRetry) {
     const first = await attemptOnce(args.model, args, brainConfig);
     fold(first?.usage);
-    if (first?.text) return { text: first.text, usage };
+    if (first?.text) return { text: first.text, usage, endpoint: brainConfig };
     if (abortSignal?.aborted) {
       logRecoveryAborted("after brain attempt 1", recoveryStartedAt);
       return { text: "", usage };
@@ -417,7 +433,7 @@ export async function generateFinalAnswerWithFailover(
       }
       const second = await attemptOnce(args.model, args, brainConfig);
       fold(second?.usage);
-      if (second?.text) return { text: second.text, usage };
+      if (second?.text) return { text: second.text, usage, endpoint: brainConfig };
       if (abortSignal?.aborted) {
         logRecoveryAborted("after brain attempt 2", recoveryStartedAt);
         return { text: "", usage };
@@ -559,6 +575,7 @@ export async function generateFinalAnswerWithFailover(
       return {
         text: attempt.text,
         usage,
+        endpoint: substitute,
         notice:
           `[Agent] ${brainConfig.provider}/${brainConfig.model} returned an empty response — ` +
           `this answer was written by ${substitute.provider}/${substitute.model} instead.`,

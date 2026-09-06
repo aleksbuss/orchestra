@@ -38,6 +38,41 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 132. The stream-recovery path shipped a substitute's printed tool call straight to the user — the one call site of three with no output gate
+
+**Date:** 2026-09-06
+**Status:** RESOLVED
+**Severity:** P1 — user-visible garbage in place of an answer, with the turn reported to the operator as a SUCCESS ("Answered by a different model").
+
+**Symptoms:** The operator asked (in Russian) for interesting GitHub projects from the last month. The chat rendered a prose preamble followed by three raw `<function=search_web><parameter=query>…` blocks and two stray closing tags from two other markup dialects, under an emerald "Answered by a different model" banner. No tool ran. Verbatim in `data/chats/560896d7-2b36-4877-b5b0-485bbe1c5e67.json`, message `750b19ea`.
+
+**Root cause — two layers, both real:**
+
+1. **Containment (the leak).** `generateFinalAnswerWithFailover` has three call sites. `agent-response.ts` (PM #69's forced answer) and `tool-capable-retry.ts` both post-process the ladder's output before it reaches a user; `primary-stream-recovery.ts` applied `stripThinkingTags` and persisted whatever was left. So the one path reached by a *primary stream error* — as opposed to a turn that merely delivered nothing — was the one path with no residual-markup gate. The detector was never the problem: run against the stored string, `extractHallucinatedToolCall` returns `search_web`, `turnHasDeliverableAnswer` returns `false`, and `printedActionCallName` returns `search_web`. The gate simply was not wired in. `primary-stream-recovery.ts`'s own header already warned about this exact drift — the shared *instruction* had been extracted into `finalAnswerInstruction` after PM #119 "so they cannot drift apart the way they just did", but the shared *output gate* never was.
+
+2. **Cause (why there was markup to contain).** The ladder is tool-less by construction — `generateText`, no `tools` — yet it is handed the FULL tool-capable system prompt, which mandates tool use (`src/prompts/system.md`: "I MUST prioritize the `search_web` tool heavily"). The only counter-instruction was one line inside a user message, which a system prompt outranks. Every other tool-less generation path in the repo already carried an override (`PLAIN_CHAT_TOOL_OVERRIDE` on the plain-chat path, its mirror in `moa-proposer-tools.ts`); this ladder was the one that did not. The substitute obeyed the system prompt.
+
+Two smaller defects fell out of the same block: the pre-strip `if (!attempt.text)` check cannot see an answer that becomes empty *after* `stripThinkingTags` (a thinking-only reply persisted an empty assistant message and called the turn recovered), and `foldTurnUsage` billed the substitute's tokens against `args.brainConfig` — invisible while every substitute is free-tier, a real mis-bill the moment one is not.
+
+**Resolution:**
+- `gateForcedAnswer(raw)` in `agent-response.ts` — the ONE gate, detection only: `stripThinkingTags` → `unwrapSerializedResponseCall` → `trim` → `printedActionCallName`. Order is load-bearing (markup quoted inside a reasoning block is not a call; a mis-emitted `response` IS the answer; the truncation-tolerant check must run last, on the exact string the caller will persist). Policy — record telemetry, swap in a notice, abandon the turn — stays at each call site, which genuinely differ; folding policy into the helper would rebuild the same drift trap one level up.
+- `primary-stream-recovery.ts` runs it before `updateChat`, persists a stage-specific honest notice instead of the markup, announces the new `turn_degraded` chat-error kind (amber) rather than the emerald `turn_recovered`, and refuses to persist an answer that strips to empty.
+- `FORCED_ANSWER_TOOL_OVERRIDE` (`prompts.ts`) is appended once inside `generateFinalAnswerWithFailover`, so the brain retry and every substitute get it. Separate constant from `PLAIN_CHAT_TOOL_OVERRIDE` on purpose: telling a tool-capable model "you cannot call tools" is a false premise it can argue with.
+- `FinalAnswerResult.endpoint` reports which endpoint actually produced the text; usage and degradation telemetry both name it.
+- New `DegradationStage` member `"stream-recovery"`, so this site stops being invisible to telemetry.
+
+**Why the notice, and not a silent turn:** three council reviewers argued for `recovered: false` (no message at all), on the grounds that a persisted notice poisons the next turn as few-shot fodder. Rejected on the evidence: what poisons is *markup* — that is what `neutralizeHallucinatedHistory` exists to strip — and prose does not. A blank turn is the failure `degradation-policy.ts` already fixed once, being "indistinguishable from an Orchestra bug". Their adjacent point was accepted: a degraded turn must not claim it was answered, hence `turn_degraded`.
+
+**Why the notice is stage-specific:** `buildToolMarkupDegradationNotice` blames long-context degradation and says "nothing was changed". Both are wrong here — this path follows a stream ERROR and hands the model no tools at all, and the triggering request was read-only, where "nothing was changed" reassures about a mutation nobody attempted while omitting the part that matters: the lookup never ran, so no answer would have been grounded.
+
+**Regression Coverage:** `primary-stream-recovery.test.ts` § "residual markup gate (PM #132)" — the live chat-store string as a fixture (never persisted, notice instead, `turn_degraded` not `turn_recovered`, telemetry stage + substitute identity, billing attribution, thinking-only refusal, quoted-markup false positive); `hallucinated-tool-call.test.ts` § "gateForcedAnswer (PM #132)" pins the pipeline order; `final-answer-failover.test.ts` § "tool-less system-prompt override" pins the override on every attempt and the `endpoint` report. All three fixes were mutation-verified: reverting each one individually turns the matching test red.
+
+**Doc Updates:** this entry; `docs/references/moa-swarm-contracts.md` § forced-answer ladder.
+
+**Rule:** A recovery path that persists model output is a delivery path, and every delivery path runs the same output gate. When a helper grows a second call site, extract the OUTPUT contract at the same time as the INPUT one — a shared prompt with unshared post-processing is drift that compiles. And never hand a tool-less generation a prompt that mandates tools: countermand it in the system prompt, where the mandate lives, not in a user message it outranks.
+
+---
+
 ## 131. The Router's context bound was measured in the wrong unit, cut in the wrong direction, and sampled the wrong axis
 
 **Date:** 2026-09-05

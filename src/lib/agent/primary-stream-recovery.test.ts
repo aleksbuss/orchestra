@@ -29,8 +29,21 @@ vi.mock("@/lib/agent/agent-dag-events", () => ({
 vi.mock("@/lib/agent/tool-capable-retry", () => ({
   attemptToolCapableRetry: vi.fn(),
 }));
+// Spread the ORIGINAL for both of these: only one export is under observation,
+// and replacing the whole module would hand every other importer in this graph
+// an `undefined` where it expects a function.
+vi.mock("@/lib/agent/degradation-telemetry", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/agent/degradation-telemetry")>();
+  return { ...actual, recordToolChannelDegradation: vi.fn() };
+});
+vi.mock("@/lib/cost/accumulator", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/cost/accumulator")>();
+  return { ...actual, foldTurnUsage: vi.fn(actual.foldTurnUsage) };
+});
 
 import { generateFinalAnswerWithFailover } from "@/lib/agent/final-answer-failover";
+import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
+import { foldTurnUsage } from "@/lib/cost/accumulator";
 import { attemptToolCapableRetry } from "@/lib/agent/tool-capable-retry";
 import { updateChat } from "@/lib/storage/chat-store";
 import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
@@ -48,6 +61,8 @@ const mockedToolRetry = vi.mocked(attemptToolCapableRetry);
 const mockedUpdateChat = vi.mocked(updateChat);
 const mockedPublishChatError = vi.mocked(publishChatErrorEvent);
 const mockedPublishOrchestratorFinished = vi.mocked(publishOrchestratorFinished);
+const mockedRecordDegradation = vi.mocked(recordToolChannelDegradation);
+const mockedFoldTurnUsage = vi.mocked(foldTurnUsage);
 
 const BRAIN: ModelConfig = { provider: "openrouter", model: "vendor/brain:free" };
 
@@ -423,5 +438,207 @@ describe("recoverPrimaryStreamFailure — success path", () => {
 
     expect(out.recovered).toBe(false);
     expect(chatState.messages).toHaveLength(0);
+  });
+});
+
+/**
+ * PM #132 — the residual-markup gate this call site never had.
+ *
+ * The ladder it calls is tool-less, so a substitute that decides it needs a
+ * tool has no channel and prints the call as text. This site persisted whatever
+ * came back and shipped raw markup to a user.
+ */
+describe("recoverPrimaryStreamFailure — residual markup gate (PM #132)", () => {
+  /**
+   * VERBATIM from the live incident: `data/chats/560896d7-2b36-4877-b5b0-
+   * 485bbe1c5e67.json`, message 750b19ea, written 2026-09-06T08:18:21Z by
+   * `nvidia/nemotron-3-ultra-550b-a55b:free` after `z-ai/glm-5.2:free` returned
+   * empty. Prose preamble first, then three Functionary-form calls, then two
+   * closing tags from two OTHER dialects — kept exactly as stored, mangling
+   * included, because the whole point is that this is what real degraded output
+   * looks like.
+   */
+  const LIVE_MARKUP =
+    "I'll search for recent interesting GitHub projects and trends from the last month.\n" +
+    "<function=search_web>\n<parameter=query>\n" +
+    "GitHub trending repositories last month 2026 interesting projects ideas\n" +
+    "</parameter>\n</function>\n" +
+    "<function=search_web>\n<parameter=query>\n" +
+    "GitHub awesome projects 2026 September new repositories trending\n" +
+    "</parameter>\n</function>\n" +
+    "<function=search_web>\n<parameter=query>\n" +
+    "site:github.com created:>2026-08-01 stars:>1000 interesting projects\n" +
+    "</parameter>\n</function>\n</invoke>\n</minimax:tool_call>";
+
+  const SUBSTITUTE: ModelConfig = {
+    provider: "openrouter",
+    model: "vendor/substitute:free",
+  };
+
+  it("never persists the raw markup — the user gets an honest notice instead", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: LIVE_MARKUP,
+      usage: { totalTokens: 275 },
+      endpoint: SUBSTITUTE,
+      notice: "[Agent] brain returned an empty response — substitute answered instead.",
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(true);
+    expect(chatState.messages).toHaveLength(1);
+    const content = chatState.messages[0].content;
+    expect(content).not.toContain("<function=search_web>");
+    expect(content).not.toContain("<parameter=");
+    expect(content).not.toContain("minimax");
+    // …and it must NAME the tool that did not run, so the user knows the answer
+    // would not have been grounded.
+    expect(content).toContain("search_web");
+  });
+
+  it("does NOT announce 'Answered by a different model' — nothing was answered", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: LIVE_MARKUP,
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+    });
+
+    await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(mockedPublishChatError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ kind: "turn_degraded" }),
+      })
+    );
+    expect(mockedPublishChatError).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ kind: "turn_recovered" }),
+      })
+    );
+    expect(mockedPublishOrchestratorFinished).toHaveBeenCalledWith(
+      "chat-1",
+      "proj-1",
+      "completed",
+      "agent_stream_recovery_degraded"
+    );
+  });
+
+  it("records the degradation against the SUBSTITUTE, at its own stage", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: LIVE_MARKUP,
+      usage: { promptTokens: 15499 },
+      endpoint: SUBSTITUTE,
+    });
+
+    await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(mockedRecordDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "stream-recovery",
+        chatId: "chat-1",
+        provider: SUBSTITUTE.provider,
+        model: SUBSTITUTE.model,
+        toolName: "search_web",
+        promptTokens: 15499,
+      })
+    );
+  });
+
+  it("bills the substitute's tokens to the SUBSTITUTE, not to the brain slot", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: "a perfectly good answer",
+      usage: { totalTokens: 42 },
+      endpoint: SUBSTITUTE,
+    });
+
+    await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(mockedFoldTurnUsage).toHaveBeenCalledWith(
+      undefined,
+      SUBSTITUTE.provider,
+      SUBSTITUTE.model,
+      expect.objectContaining({ continuationUsage: { totalTokens: 42 } })
+    );
+  });
+
+  it("falls back to the brain for billing when the ladder reports no endpoint", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "answer", usage: { totalTokens: 7 } });
+
+    await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(mockedFoldTurnUsage).toHaveBeenCalledWith(
+      undefined,
+      BRAIN.provider,
+      BRAIN.model,
+      expect.anything()
+    );
+  });
+
+  it("a clean answer is persisted verbatim and still announces turn_recovered", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: "Here are three interesting repositories.",
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+      notice: "[Agent] substitute answered instead.",
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(true);
+    expect(chatState.messages[0].content).toBe("Here are three interesting repositories.");
+    expect(mockedRecordDegradation).not.toHaveBeenCalled();
+    expect(mockedPublishChatError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ kind: "turn_recovered" }),
+      })
+    );
+  });
+
+  it("a mis-emitted `response` call is an ANSWER — unwrapped to prose, not treated as degraded", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: '{"call":"response","arguments":{"message":"The real answer."}}',
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(true);
+    expect(chatState.messages[0].content).toBe("The real answer.");
+    expect(mockedRecordDegradation).not.toHaveBeenCalled();
+  });
+
+  it("an answer that is ONLY a <thinking> block persists nothing (the pre-strip check cannot see it)", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: "<thinking>I should probably search the web first.</thinking>",
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(false);
+    expect(chatState.messages).toHaveLength(0);
+    expect(mockedPublishChatError).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ kind: "turn_recovered" }),
+      })
+    );
+  });
+
+  it("markup QUOTED inside a thinking block is not a printed call — the answer still ships", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text:
+        "<thinking>I could emit <function=search_web><parameter=query>x</parameter></function> " +
+        "but I have no tools.</thinking>Here is what I know without searching.",
+      usage: undefined,
+      endpoint: SUBSTITUTE,
+    });
+
+    const out = await recoverPrimaryStreamFailure(baseArgs());
+
+    expect(out.recovered).toBe(true);
+    expect(chatState.messages[0].content).toBe("Here is what I know without searching.");
+    expect(mockedRecordDegradation).not.toHaveBeenCalled();
   });
 });

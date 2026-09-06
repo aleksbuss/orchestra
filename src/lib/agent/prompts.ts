@@ -93,6 +93,34 @@ export const PLAIN_CHAT_TOOL_OVERRIDE =
   "output any tool-call markup, XML-like tags, or function-call syntax; just write the answer.";
 
 /**
+ * PM #132 — the same override for the FORCED-ANSWER ladder
+ * (`final-answer-failover.ts`), which runs `generateText` with NO `tools` on a
+ * model that CAN call them. That premise difference is why this is a separate
+ * constant rather than a reuse of `PLAIN_CHAT_TOOL_OVERRIDE`: telling a
+ * tool-capable model "you cannot call tools" is a false statement it can
+ * (and does) argue with.
+ *
+ * Why it is needed at all: the ladder is handed the FULL tool-capable system
+ * prompt (`system.md` mandates "you MUST prioritize the `search_web` tool
+ * heavily"), and the only counter-instruction was one line buried in a user
+ * message. Live incident 2026-09-06 (chat 560896d7): the substitute obeyed the
+ * system prompt over that line and printed three `<function=search_web>` blocks
+ * as text. Every other tool-less generation path in this repo already carries an
+ * override — the plain-chat path (`agent.ts`) and MoA's tool-less proposers
+ * (`moa-proposer-tools.ts`); this ladder was the one that did not.
+ */
+export const FORCED_ANSWER_TOOL_OVERRIDE =
+  "\n\n## ⚠️ NO TOOLS THIS TURN\n" +
+  "No tools are attached to this request, so a tool call is not possible — it would " +
+  "reach nothing. Disregard every earlier instruction about calling tools, the " +
+  "`response` tool, goal trees, self-healing loops, or `<call:...>` / function-call " +
+  "syntax, INCLUDING any instruction that says you MUST use a tool such as " +
+  "`search_web`: none of that applies to this request. Reply to the user directly in " +
+  "natural-language prose. Do NOT output tool-call markup, XML-like tags, or " +
+  "function-call syntax of any dialect — text that merely LOOKS like a tool call " +
+  "executes nothing and is shown to the user as raw markup.";
+
+/**
  * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). The
  * load-bearing synthesis rules (ported from `AGGREGATOR_SYSTEM_PROMPT`) that get
  * appended to the orchestrator system prompt on the collapsed synthesis path, so

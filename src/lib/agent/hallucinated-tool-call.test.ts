@@ -17,6 +17,7 @@ import {
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
   HALLUCINATED_HISTORY_PLACEHOLDER,
+  gateForcedAnswer,
 } from "./agent-response";
 
 describe("printedActionCallName (PM #109 — catches TRUNCATED markup)", () => {
@@ -440,5 +441,62 @@ describe("extractHallucinatedToolCall — DeepSeek format (PM #82 followup)", ()
     expect(
       extractHallucinatedToolCall("<tool_call_begin>function<tool_sep>write_text_file")
     ).toBeNull();
+  });
+});
+
+/**
+ * PM #132 — the shared gate every forced (tool-less) answer passes. The pipeline
+ * order inside it is the contract; these pin it, because a reshuffle is silent
+ * (each individual step keeps working, the COMBINATION stops being correct).
+ */
+describe("gateForcedAnswer (PM #132)", () => {
+  it("degrades on the live incident's markup and names the tool", () => {
+    const live =
+      "I'll search for recent interesting GitHub projects and trends from the last month.\n" +
+      "<function=search_web>\n<parameter=query>\nGitHub trending repositories\n</parameter>\n" +
+      "</function>\n</invoke>\n</minimax:tool_call>";
+
+    const gate = gateForcedAnswer(live);
+
+    expect(gate.degraded).toBe(true);
+    expect(gate.toolName).toBe("search_web");
+  });
+
+  it("catches a TRUNCATED JSON body too (inherits printedActionCallName, not the strict parser)", () => {
+    const gate = gateForcedAnswer('<tool_call>{"name":"write_text_file","arguments":{"path":"/a/b');
+    expect(gate.degraded).toBe(true);
+    expect(gate.toolName).toBe("write_text_file");
+  });
+
+  it("strips thinking BEFORE judging — markup quoted inside a reasoning block is not a call", () => {
+    const gate = gateForcedAnswer(
+      "<thinking>I would call <function=search_web><parameter=query>x</parameter></function></thinking>" +
+        "Plain answer."
+    );
+    expect(gate.degraded).toBe(false);
+    expect(gate.text).toBe("Plain answer.");
+  });
+
+  it("unwraps a mis-emitted `response` call to prose instead of flagging it", () => {
+    const gate = gateForcedAnswer('{"call":"response","arguments":{"message":"The answer."}}');
+    expect(gate.degraded).toBe(false);
+    expect(gate.text).toBe("The answer.");
+  });
+
+  it("returns empty text for a thinking-only answer (so a caller can refuse to persist it)", () => {
+    expect(gateForcedAnswer("<thinking>hmm</thinking>").text).toBe("");
+  });
+
+  it("passes ordinary prose through untouched, trimmed", () => {
+    const gate = gateForcedAnswer("  Here are three repositories.  ");
+    expect(gate).toEqual({
+      degraded: false,
+      toolName: null,
+      text: "Here are three repositories.",
+    });
+  });
+
+  it("empty input is not a crash and not a degradation", () => {
+    expect(gateForcedAnswer("")).toEqual({ degraded: false, toolName: null, text: "" });
   });
 });

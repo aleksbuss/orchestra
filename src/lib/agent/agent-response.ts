@@ -310,6 +310,53 @@ export function extractHallucinatedToolCall(
     return { name: inv[1], args, raw: body };
   }
 
+  // 6b) dots NAME-AS-TAG variant (found 2026-09-06 in a Free Mode long run).
+  //    `dots-studio/dots-3-note-preview:free` prints the tool name as the TAG
+  //    ITSELF inside the wrapper — verbatim from the chat store:
+  //      `<dots_function_call>\n<code_execution">\n<parameter name="runtime">…`
+  //    — a stray `">`, NO `<invoke`, NO `name=` attribute. Branch 6 needs
+  //    `<invoke name="…">`, so this matched NOTHING: `extractHallucinatedToolCall`
+  //    returned null, the prose preamble made `turnHasDeliverableAnswer` true, the
+  //    recovery net was skipped, and 16 KB of raw XML shipped to the user. In one
+  //    6-turn run the log had 24 of this variant vs 6 of the detected `<invoke>`
+  //    form — the undetected shape DOMINATES for this model.
+  //
+  //    Per the protake council: do NOT anchor on the tool-name tag (its quoting
+  //    is the malformed part — `"?` is brittle and mis-parses attributes /
+  //    `<name>` / `<name attr=…>`). Anchor on the WELL-FORMED signal instead —
+  //    a known wrapper plus a `<parameter name="…">` — and read the tool name
+  //    from the nearest preceding element tag that is not the wrapper/parameter/
+  //    invoke. Structure-only (no tool registry) to keep this pure like the other
+  //    branches; a fenced example is already stripped above. Classification only:
+  //    args are parsed for the re-prompt, NEVER executed (executing text recovered
+  //    from an untrusted transcript is the injection surface the council flagged).
+  const dotsWrapper = /<(?:dots_function_call|function_calls)>/i.test(body);
+  const firstParamIdx = dotsWrapper
+    ? body.search(/<parameter\s+name\s*=\s*["']/i)
+    : -1;
+  if (firstParamIdx > 0) {
+    const preceding = [
+      ...body.slice(0, firstParamIdx).matchAll(/<([A-Za-z_][A-Za-z0-9_.\-]*)\b[^>]*>/gi),
+    ]
+      .map((m) => m[1])
+      .filter(
+        (n) => !/^(?:dots_function_call|function_calls|invoke|parameter)$/i.test(n)
+      );
+    const name = preceding[preceding.length - 1];
+    // `response` printed as text stays "recoverable to prose" (delivered=true) —
+    // same carve-out as every other branch; only an ACTION tool flips delivered.
+    if (name && name.toLowerCase() !== "response") {
+      const after = body.slice(firstParamIdx);
+      const args: Record<string, unknown> = {};
+      for (const p of after.matchAll(
+        /<parameter\s+name\s*=\s*["']([A-Za-z0-9_.\-]+)["']\s*>([\s\S]*?)(?=<\/parameter>|<parameter\s+name|<\/(?:antml:)?invoke>|<\/dots_function_call>|<\/function_calls>|$)/gi
+      )) {
+        args[p[1]] = p[2].trim();
+      }
+      return { name, args, raw: body };
+    }
+  }
+
   // 5) bare JSON blob (no markup) — ONLY the `response` serialization (PM #61).
   //    Bare JSON is too ambiguous to treat as an ACTION-tool call: a legitimate
   //    final answer can BE bare JSON (e.g. "reply with only the tool-call JSON,

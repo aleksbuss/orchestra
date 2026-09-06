@@ -78,6 +78,16 @@ export function styleForKind(kind: ChatErrorKind): BannerStyle {
         icon: "text-violet-600 dark:text-violet-400",
         label: "Model unavailable — trying another",
       };
+    case "turn_degraded":
+      // PM #132 — a recovery that produced text but no ANSWER (the substitute
+      // printed a tool call as text). Amber like the other "the system is not
+      // broken, but this turn did not work" states, and pointedly NOT the
+      // emerald of `turn_recovered`: nothing was answered and nothing ran.
+      return {
+        container: "bg-amber-500/10 border-amber-500/20 text-amber-200",
+        icon: "text-amber-600 dark:text-amber-400",
+        label: "Tool call printed, not executed",
+      };
     case "upstream_no_tools":
       // Actionable — user MUST switch model. Amber draws attention without
       // alarming as much as red, since the system isn't broken, just

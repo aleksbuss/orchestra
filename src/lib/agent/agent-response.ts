@@ -423,6 +423,50 @@ export function printedActionCallName(text: string): string | null {
   return null;
 }
 
+/** The verdict on one forced (tool-less) answer — see `gateForcedAnswer`. */
+export type ForcedAnswerGate =
+  | { degraded: false; toolName: null; text: string }
+  | { degraded: true; toolName: string; text: string };
+
+/**
+ * PM #132 — the ONE gate every forced (tool-less) answer passes before it is
+ * shown or persisted.
+ *
+ * `generateFinalAnswerWithFailover` has three call sites and each was free to
+ * post-process its output by hand. Two did; `primary-stream-recovery.ts` did
+ * not, and shipped a substitute's three printed `<function=search_web>` blocks
+ * straight into the chat (live, chat 560896d7, 2026-09-06). That module's own
+ * header already warned about this exact drift — the shared *instruction* had
+ * been extracted into `finalAnswerInstruction`, the shared *output gate* never
+ * was. This is that extraction.
+ *
+ * DETECTION ONLY, deliberately: it reports what the text IS and returns the
+ * cleaned text, and leaves POLICY (record telemetry? swap in a notice? abandon
+ * the turn?) to each call site, which genuinely differ. Folding policy in here
+ * would rebuild the same drift trap one level up.
+ *
+ * Pipeline order is load-bearing and must not be reshuffled:
+ *   1. `stripThinkingTags` — a reasoning block is never shown to the user, and
+ *      markup QUOTED inside one was never a real call, so it must not trip the
+ *      gate.
+ *   2. `unwrapSerializedResponseCall` — a mis-emitted `response` call IS the
+ *      answer; recovering it must happen before anything judges the text.
+ *   3. `.trim()`, then `printedActionCallName` — which tolerates a TRUNCATED
+ *      JSON body (PM #109: the output cap can cut a `<tool_call>{…}` blob
+ *      mid-string, and a parse-strict check then waves the raw markup through).
+ *
+ * The result is that the string judged is byte-for-byte the string the caller
+ * persists — validating one representation and storing another is how markup
+ * slips past a gate that "ran".
+ */
+export function gateForcedAnswer(raw: string): ForcedAnswerGate {
+  const text = unwrapSerializedResponseCall(stripThinkingTags(raw ?? "")).trim();
+  const toolName = printedActionCallName(text);
+  return toolName
+    ? { degraded: true, toolName, text }
+    : { degraded: false, toolName: null, text };
+}
+
 export function extractAssistantText(msg: ModelMessage): string {
   if (msg.role !== "assistant") return "";
   const content = msg.content;
@@ -1195,21 +1239,16 @@ export async function resolveTurnContinuation(args: {
       currentPath,
       degradationPolicy,
     });
-    const text = unwrapSerializedResponseCall(attempt.text);
     // If the forced answer ITSELF degraded into a printed ACTION tool call (the
     // model keeps emitting tool markup as text under context pressure), do NOT
     // ship the raw markup as the answer — that is the 16 KB-of-garbage failure.
-    // `response`-markup is already recovered by unwrapSerializedResponseCall
-    // above; anything else printed as an action call is un-executed work.
-    //
-    // `printedActionCallName` (NOT `extractHallucinatedToolCall`) so a call whose
-    // JSON was TRUNCATED still counts: the output cap above can cut a
-    // `<tool_call>{"name":"write_text_file",…}` blob mid-string, and a parser that
-    // requires valid JSON then sees "no tool call" and ships the raw markup — the
-    // exact bug this gate exists to stop (chat 9891bb43, a 4367-char truncated
-    // blob delivered to the user).
-    const residualName = printedActionCallName(text);
-    if (residualName) {
+    // A mis-emitted `response` call is recovered to prose inside the gate;
+    // anything else printed as an action call is un-executed work. PM #132 moved
+    // this detection into `gateForcedAnswer` so `primary-stream-recovery.ts`
+    // runs the SAME check instead of its own (it had none).
+    const gate = gateForcedAnswer(attempt.text);
+    const text = gate.text;
+    if (gate.degraded) {
       // PM #109 — flag the chat AND record the conditions. This site used to do
       // neither: the notice shipped, the chat stayed un-flagged, so the next
       // turn ran at the same context and failed the same way (observed three
@@ -1219,14 +1258,14 @@ export async function resolveTurnContinuation(args: {
         chatId,
         provider: brainConfig?.provider,
         model: brainConfig?.model,
-        toolName: residualName,
+        toolName: gate.toolName,
         markupChars: text.length,
         promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
       });
       return {
         text: buildToolMarkupDegradationNotice(settings),
         usage: attempt.usage,
-        uiNotice: `[Agent] Forced answer still printed a '${residualName}' tool call as text; delivered an honest failure notice instead of raw markup.`,
+        uiNotice: `[Agent] Forced answer still printed a '${gate.toolName}' tool call as text; delivered an honest failure notice instead of raw markup.`,
       };
     }
     if (text) {

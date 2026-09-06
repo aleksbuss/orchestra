@@ -83,9 +83,11 @@ export function resetChatDegradation(chatId?: string): void {
 }
 
 /**
- * Which detection site saw the degradation. All three MUST report — the
- * forced-answer stage is where the live incident actually surfaced, and it was
- * the one site that recorded nothing.
+ * Which detection site saw the degradation. All FOUR must report — the site
+ * that records nothing is the site whose failures stay invisible, which is how
+ * both live incidents behind this union were found late (PM #109's chat
+ * re-entered the same failure three times; PM #132's shipped raw markup to a
+ * user with no telemetry row at all).
  */
 export type DegradationStage =
   /** The main tool-loop turn ended with printed markup (PM #81 detector). */
@@ -93,7 +95,15 @@ export type DegradationStage =
   /** The bounded re-issue degraded into markup again instead of calling natively. */
   | "reissue"
   /** The forced final answer itself came back as markup (PM #108 notice path). */
-  | "forced-answer";
+  | "forced-answer"
+  /**
+   * PM #132 — the substitute answer produced by `primary-stream-recovery.ts`
+   * after the PRIMARY stream errored came back as markup. Distinct from
+   * `forced-answer`: that one follows a turn that completed without delivering,
+   * this one follows a turn whose model call errored outright, and the two
+   * reach the ladder with different context and different instructions.
+   */
+  | "stream-recovery";
 
 export interface ToolChannelDegradationEvent {
   stage: DegradationStage;

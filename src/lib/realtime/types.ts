@@ -73,6 +73,15 @@ export type ChatErrorKind =
    */
   | "turn_recovered_with_tools"
   /**
+   * PM #132 — the recovery ladder DID produce text for this turn, but that text
+   * was a tool call the model printed instead of executing, so the user was
+   * handed an honest failure notice rather than the substitute's "answer".
+   * Deliberately NOT `turn_recovered`: that banner says "Answered by a different
+   * model", which would be a false claim about a turn where nothing was
+   * answered and nothing was executed. Amber, not emerald — this turn failed.
+   */
+  | "turn_degraded"
+  /**
    * PM #122 — fired the MOMENT the retry/substitute ladder actually starts
    * (`final-answer-failover.ts`'s call sites), before it is known whether it
    * will succeed. The ladder runs `generateText`, never `streamText` — zero

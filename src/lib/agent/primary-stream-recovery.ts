@@ -67,7 +67,8 @@ import {
   allowsModelSubstitution,
 } from "@/lib/agent/degradation-policy";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
-import { stripThinkingTags } from "@/lib/agent/agent-response";
+import { gateForcedAnswer } from "@/lib/agent/agent-response";
+import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import { updateChat } from "@/lib/storage/chat-store";
 import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
@@ -81,6 +82,33 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
  * invariant in this codebase (no cluster mode).
  */
 const recoveryInFlight = new Set<string>();
+
+/**
+ * PM #132 — the user-facing text for a recovery whose substitute printed a tool
+ * call instead of answering.
+ *
+ * Stage-specific ON PURPOSE, rather than reusing
+ * `buildToolMarkupDegradationNotice`: that notice explains a LONG-CONTEXT
+ * degradation ("an accumulated context makes them drop the tool-calling
+ * channel") and says "nothing was changed". Both are wrong here. This path is
+ * reached after the primary model ERRORED, and the substitute is then asked to
+ * answer with NO tools attached at all — the printed call is the predictable
+ * result of that, not evidence of a context cliff. And the triggering request
+ * is frequently read-only (the live incident was a web search), where "nothing
+ * was changed" reads as reassurance about a mutation nobody attempted, while
+ * quietly omitting the thing the user actually needs to know: the lookup never
+ * ran, so no part of the answer would have been grounded.
+ */
+export function streamRecoveryMarkupNotice(toolName: string): string {
+  return (
+    `⚠️ **This turn did not complete.** Your model's request failed, and the model that stepped in ` +
+    `to answer was given no tools — it responded by writing out a \`${toolName}\` call as text. ` +
+    `Text that looks like a tool call executes nothing, so **\`${toolName}\` never ran** and nothing ` +
+    `it would have returned is reflected in any answer.\n\n` +
+    `**Send the message again** — a fresh turn runs with tools attached and usually succeeds. If it ` +
+    `keeps failing, switch the chat model (a degraded free endpoint is the usual cause).`
+  );
+}
 
 /**
  * Duck-typed the same way `postmortem.ts`'s internal extractor reads an
@@ -283,6 +311,49 @@ export async function recoverPrimaryStreamFailure(
     // A cancel that landed mid-recovery — don't persist an unwanted message.
     if (args.abortSignal?.aborted) return { recovered: false };
 
+    // PM #132 — the ladder above is TOOL-LESS by construction, so a substitute
+    // that decides the request needs a tool has no channel to call one and
+    // prints the call as TEXT instead. Until now this site persisted whatever
+    // came back after `stripThinkingTags` and nothing else — the only one of
+    // the ladder's three call sites with no residual-markup gate — and shipped
+    // three raw `<function=search_web>` blocks straight into a user's chat
+    // (live, chat 560896d7, 2026-09-06). `gateForcedAnswer` is the shared gate
+    // the other two run; it also unwraps a mis-emitted `response` call, so a
+    // real answer that merely arrived in call-shaped clothing still gets
+    // delivered as prose.
+    const gate = gateForcedAnswer(attempt.text);
+    // Nothing left after stripping (a thinking-only answer). The `!attempt.text`
+    // check above runs on the RAW string and cannot see this: it would persist
+    // an empty assistant message and call the turn recovered.
+    if (!gate.text) return { recovered: false };
+
+    // Whoever actually produced the text — the brain on its retry, or a
+    // substitute. Usage and degradation telemetry must both name IT, not the
+    // brain slot: on the substitute path the tokens were burned by a different
+    // provider/model, and pricing them as the brain's mis-bills the turn.
+    const answeringEndpoint = attempt.endpoint ?? args.brainConfig;
+
+    if (gate.degraded) {
+      recordToolChannelDegradation({
+        stage: "stream-recovery",
+        chatId: args.chatId,
+        provider: answeringEndpoint.provider,
+        model: answeringEndpoint.model,
+        toolName: gate.toolName,
+        markupChars: gate.text.length,
+        promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
+      });
+    }
+
+    // Persist the honest notice rather than the markup — and rather than
+    // nothing. A silent turn is "indistinguishable from an Orchestra bug"
+    // (the reasoning `degradation-policy.ts` already encodes for undeliverable
+    // turns), and the notice is prose, so unlike the markup it cannot become
+    // few-shot fodder the next turn imitates.
+    const content = gate.degraded
+      ? streamRecoveryMarkupNotice(gate.toolName)
+      : gate.text;
+
     let persisted = false;
     try {
       await updateChat(args.chatId, (chat) => {
@@ -290,14 +361,14 @@ export async function recoverPrimaryStreamFailure(
         chat.messages.push({
           id: crypto.randomUUID(),
           role: "assistant",
-          content: stripThinkingTags(attempt.text),
+          content,
           createdAt: now,
         });
         chat.updatedAt = now;
         chat.cumulativeUsage = foldTurnUsage(
           chat.cumulativeUsage,
-          args.brainConfig.provider,
-          args.brainConfig.model,
+          answeringEndpoint.provider,
+          answeringEndpoint.model,
           { continuationUsage: attempt.usage }
         );
         return chat;
@@ -312,18 +383,35 @@ export async function recoverPrimaryStreamFailure(
     // Never claim a recovery the store didn't durably record.
     if (!persisted) return { recovered: false };
 
+    // A degraded turn must NOT announce itself as "Answered by a different
+    // model" — nothing was answered and nothing was executed. Separate kind,
+    // amber, so the operator can tell a rescue from a containment.
     publishChatErrorEvent({
       chatId: args.chatId,
       projectId: args.projectId,
-      payload: {
-        kind: "turn_recovered",
-        message:
-          attempt.notice ??
-          `[Agent] The configured model failed to answer; this turn was answered by a substitute instead.`,
-        recoverable: true,
-      },
+      payload: gate.degraded
+        ? {
+            kind: "turn_degraded",
+            message:
+              `[Agent] The substitute ${answeringEndpoint.provider}/${answeringEndpoint.model} printed a ` +
+              `'${gate.toolName}' tool call as text instead of answering; delivered an honest failure ` +
+              `notice instead of raw markup.`,
+            recoverable: true,
+          }
+        : {
+            kind: "turn_recovered",
+            message:
+              attempt.notice ??
+              `[Agent] The configured model failed to answer; this turn was answered by a substitute instead.`,
+            recoverable: true,
+          },
     });
-    publishOrchestratorFinished(args.chatId, args.projectId, "completed", "agent_stream_recovered");
+    publishOrchestratorFinished(
+      args.chatId,
+      args.projectId,
+      "completed",
+      gate.degraded ? "agent_stream_recovery_degraded" : "agent_stream_recovered"
+    );
     publishUiSyncEvent({ topic: "files", projectId: args.projectId ?? null, reason: "agent_turn_finished" });
 
     return { recovered: true };

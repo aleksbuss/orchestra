@@ -27,6 +27,7 @@ import {
   UNDELIVERABLE_NOTICE,
 } from "./final-answer-failover";
 import { resetModelHealth, recordModelFailure, isModelCircuitOpen } from "./model-health";
+import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import {
   __setOpenRouterBenchmarkScoreForTest,
   __resetOpenRouterPricingForTests,
@@ -734,5 +735,74 @@ describe("compareModelsByBenchmarkScoreDesc", () => {
 
   it("stable (returns 0) when neither side has score data", () => {
     expect(compareModelsByBenchmarkScoreDesc(m("x"), m("y"))).toBe(0);
+  });
+});
+
+/**
+ * PM #132 — this ladder is tool-less but is handed the FULL tool-capable system
+ * prompt, which mandates tool use ("you MUST prioritize the `search_web` tool
+ * heavily"). The only counter-instruction used to be one line in a user message,
+ * which the system prompt outranks: a substitute printed three
+ * `<function=search_web>` blocks as text and they were shipped to the user.
+ */
+describe("generateFinalAnswerWithFailover — tool-less system-prompt override", () => {
+  function systemsSent(): string[] {
+    return mockedGenerateText.mock.calls.map((c) => (c[0] as { system: string }).system);
+  }
+
+  it("countermands the tool-capable system prompt on the brain attempt", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: "answer", usage: undefined } as never);
+
+    await generateFinalAnswerWithFailover(args({ systemPrompt: "You MUST use search_web." }));
+
+    const [sent] = systemsSent();
+    expect(sent).toContain("You MUST use search_web."); // caller's prompt is preserved…
+    expect(sent).toContain(FORCED_ANSWER_TOOL_OVERRIDE); // …and then overridden
+    // The override must be LAST — a countermand that the mandate follows is not
+    // a countermand.
+    expect(sent.endsWith(FORCED_ANSWER_TOOL_OVERRIDE)).toBe(true);
+  });
+
+  it("applies to every attempt, substitutes included — not just the first", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "", usage: undefined } as never) // brain
+      .mockResolvedValueOnce({ text: "", usage: undefined } as never) // brain retry
+      .mockResolvedValueOnce({ text: "substitute answer", usage: undefined } as never);
+
+    await generateFinalAnswerWithFailover(args({ settings: settings() }));
+
+    const sent = systemsSent();
+    expect(sent.length).toBeGreaterThanOrEqual(3);
+    for (const s of sent) expect(s).toContain(FORCED_ANSWER_TOOL_OVERRIDE);
+  });
+
+  it("reports WHICH endpoint produced the text — the brain when the brain answered", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: "answer", usage: undefined } as never);
+
+    const out = await generateFinalAnswerWithFailover(args());
+
+    expect(out.endpoint).toEqual(BRAIN);
+  });
+
+  it("reports the SUBSTITUTE when a substitute answered (usage must not be billed to the brain)", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "", usage: undefined } as never)
+      .mockResolvedValueOnce({ text: "", usage: undefined } as never)
+      .mockResolvedValueOnce({ text: "substitute answer", usage: undefined } as never);
+
+    const out = await generateFinalAnswerWithFailover(args());
+
+    expect(out.text).toBe("substitute answer");
+    expect(out.endpoint?.model).toBe(UTILITY.model);
+    expect(out.endpoint?.model).not.toBe(BRAIN.model);
+  });
+
+  it("reports no endpoint when nothing was delivered", async () => {
+    mockedGenerateText.mockResolvedValue({ text: "", usage: undefined } as never);
+
+    const out = await generateFinalAnswerWithFailover(args());
+
+    expect(out.text).toBe("");
+    expect(out.endpoint).toBeUndefined();
   });
 });

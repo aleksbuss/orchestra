@@ -25,6 +25,7 @@ import {
 } from "./agent-response";
 import { isChatDegraded, resetChatDegradation } from "./degradation-telemetry";
 import { applyFreeMode } from "./free-mode";
+import { isFreeTierModel } from "./proposer-pacing";
 import { subscribeUiSyncEvents } from "@/lib/realtime/event-bus";
 import type { UiSyncEvent } from "@/lib/realtime/types";
 
@@ -344,23 +345,33 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(notice).not.toContain("some/other:free");
   });
 
-  it("Free-Mode notice treats `openrouter/free` as free — it has no `:free` suffix", () => {
-    // protake review: the suffix test missed the free AUTO-ROUTER id, which is a
-    // real value in this operator's config. Missing it puts the notice back in
-    // the exact failure it exists to remove — "your configured model is
-    // stronger, turn Free Mode off" pointing at another free model.
-    const raw = {
-      chatModel: { provider: "openrouter", model: "openrouter/free", apiKey: "k" },
+  it("Free-Mode notice classifies models with the SAME predicate Free Mode selects with", () => {
+    // The notice must not invent its own notion of "free". A protake review
+    // proposed widening it to also catch `openrouter/free` (the auto-router);
+    // that was declined on operator direction — Free Mode never selects the
+    // auto-router (its pool is too weak to rank), so the notice would be
+    // reasoning about a state the system does not produce, from a SECOND
+    // definition of "free". This pins the shared predicate instead.
+    const displacedIsFree = {
+      chatModel: { provider: "openrouter", model: "nvidia/nemotron-3.5-lightning:free", apiKey: "k" },
       proposerTiers: {
         frontier: { provider: "openrouter", model: "deepseek/deepseek-chat", apiKey: "k" },
       },
       freeMode: { enabled: true },
     } as unknown as AppSettings;
-    const notice = buildToolMarkupDegradationNotice(applyFreeMode(raw).settings);
+    const freeNotice = buildToolMarkupDegradationNotice(applyFreeMode(displacedIsFree).settings);
+    expect(isFreeTierModel("nvidia/nemotron-3.5-lightning:free")).toBe(true);
+    expect(freeNotice).toContain("will not fix this");
+    expect(freeNotice).toContain("deepseek/deepseek-chat");
 
-    expect(notice).not.toContain("turn off Free Mode");
-    expect(notice).toContain("will not fix this");
-    expect(notice).toContain("deepseek/deepseek-chat");
+    // …and a displaced PAID brain takes the other branch, from the same predicate.
+    const displacedIsPaid = {
+      chatModel: { provider: "openrouter", model: "deepseek/deepseek-chat", apiKey: "k" },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const paidNotice = buildToolMarkupDegradationNotice(applyFreeMode(displacedIsPaid).settings);
+    expect(isFreeTierModel("deepseek/deepseek-chat")).toBe(false);
+    expect(paidNotice).toContain("turn off Free Mode");
   });
 
   it("Free-Mode notice stays honest when settings never went through the overlay", () => {

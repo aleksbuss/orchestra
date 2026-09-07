@@ -462,3 +462,45 @@ export function gateForcedAnswer(raw: string): ForcedAnswerGate {
     ? { degraded: true, toolName, text }
     : { degraded: false, toolName: null, text };
 }
+
+/**
+ * PM #134 (MoA half) — a proposer draft that is PRINTED TOOL MARKUP is
+ * un-executed work, not an answer.
+ *
+ * Proposers run with `tools: undefined`, exactly like the forced-answer ladder,
+ * so the same failure applies: a model that decides it needs a tool has no
+ * channel to call one and prints the call as text. `moa.ts` had three paths that
+ * ship a draft to the user verbatim (the lone successful draft, the tournament
+ * winner, the aggregation-error fallback) and none of them looked. The last is
+ * the sharp one: markup blobs measured 16–19 KB in the incident chats, so
+ * "longest" actively PREFERS the garbage, and an aggregation failure is exactly
+ * what a degraded free tier produces alongside the markup.
+ *
+ * Used as a PREDICATE only, the same discipline as `attemptOnce`: the text that
+ * ships is the raw draft, so what is judged is what is stored.
+ *
+ * FOLLOW-UP (the context half): `moa.ts` now filters markup where
+ * `successfulDrafts` is ASSEMBLED, so none reaches any consumer — delivery or
+ * context. The per-path gates that remain (tournament winner, aggregation-error
+ * fallback) are unreachable-by-construction BACKSTOPS, kept because this failure
+ * has shipped kilobytes of raw XML to a user twice and the filter that makes
+ * them redundant is one loop a future "restore the ensemble size" edit could
+ * undo. They live HERE rather than in `moa.ts` so their proof does not depend on
+ * a reachable path — a test that can only reach a backstop through a filter that
+ * already removed its input is a vacuous test.
+ *
+ * The aggregator's OWN output gate is NOT a backstop and must stay: it is a
+ * separate generation that can print markup from clean input.
+ */
+export function isPrintedMarkupDraft(text: string): boolean {
+  return gateForcedAnswer(text ?? "").degraded;
+}
+
+/** The longest draft that is not printed markup, or null when every one is. */
+export function pickDeliverableDraft<T extends { text: string }>(
+  drafts: readonly T[]
+): T | null {
+  const clean = drafts.filter((d) => !isPrintedMarkupDraft(d.text));
+  if (clean.length === 0) return null;
+  return clean.reduce((a, b) => (a.text.length > b.text.length ? a : b));
+}

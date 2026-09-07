@@ -74,6 +74,21 @@ vi.mock("@/lib/tools/search-engine", () => ({
     !!(s?.enabled && s.provider !== "none"),
 }));
 
+// Trace memory is stubbed for the whole file. Behaviourally identical to the
+// disabled path every existing test already runs (`fakeSettings` leaves
+// `traceMemory` off), and it means a REGRESSION in the degraded-turn capture
+// guard fails an assertion instead of embedding + writing into the live
+// `data/traces/` — this file sets no `ORCHESTRA_DATA_DIR` (CLAUDE.md rule 27).
+vi.mock("@/lib/agent/trace-memory", () => ({
+  captureSuccessfulTrace: vi.fn(async () => ({
+    captured: false,
+    reason: "stubbed",
+    qualityScore: 0,
+  })),
+  retrieveRelevantTraces: vi.fn(async () => []),
+  formatTracesAsFewShots: vi.fn(() => ""),
+}));
+
 // Mock the logger so the DDD `ddd_reflection_outcome` event is a deterministic
 // vi.fn (asserted in the DDD-glue tests) rather than a real file/stdout write.
 // moa.ts only uses `log.info`; keep the rest of the module (withLogContext etc.)
@@ -92,6 +107,13 @@ import {
   AGGREGATOR_SYSTEM_PROMPT,
   buildInlineSynthesisInjection,
 } from "./moa";
+import {
+  isPrintedMarkupDraft,
+  pickDeliverableDraft,
+} from "./printed-tool-call";
+import { captureSuccessfulTrace } from "@/lib/agent/trace-memory";
+
+const mockedCaptureTrace = vi.mocked(captureSuccessfulTrace);
 import type { AppSettings } from "@/lib/types";
 import { generateText, generateObject } from "ai";
 import { createModel } from "@/lib/providers/llm-provider";
@@ -2212,28 +2234,36 @@ describe("PM #127 audit — the collapse notice's inputs actually reach the call
  * Proposers run with `tools: undefined`, exactly like the forced-answer ladder,
  * so the same failure applies. `isSuccessfulDraft` only rejects `[Error: …]` and
  * `(empty draft)` — a 19 KB markup blob passes it as a "successful" draft.
+ *
+ * FOLLOW-UP (the context half): markup is now dropped where `successfulDrafts`
+ * is ASSEMBLED, so it reaches neither the delivery paths nor the four context
+ * surfaces (inline-synthesis system prompt, aggregator prompt, tournament
+ * judges, disagreement embeddings). The user-visible contract asserted below is
+ * unchanged — "markup never reaches the user" — but several of these now reach
+ * it through the assembly filter rather than through a per-path gate. Those
+ * per-path gates are still in the code as backstops, and because a filtered
+ * input can no longer reach them, their proof lives in the direct unit tests at
+ * the bottom of this block rather than in an end-to-end run.
  */
 describe("printed-markup drafts are never delivered (PM #134)", () => {
   const MARKUP =
     "I'll look that up.\n<function=search_web>\n<parameter=query>\n" +
     "GitHub trending repositories\n</parameter>\n</function>";
 
-  function personas() {
-    return {
-      object: {
-        requiresSwarm: true,
-        personas: [
-          { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "blue" },
-          { id: "implementer", role: "Implementation Engineer", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "green" },
-        ],
-      },
-    };
+  function personas(count = 2) {
+    const all = [
+      { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "blue" },
+      { id: "implementer", role: "Implementation Engineer", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "green" },
+      { id: "reviewer", role: "Code Reviewer", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "red" },
+    ];
+    return { object: { requiresSwarm: true, personas: all.slice(0, count) } };
   }
 
   it("the LONE successful draft: an honest notice, never the markup", async () => {
     mockedGenerateObject.mockResolvedValueOnce(personas() as never);
     // One proposer prints markup; every other call fails, so exactly one draft
-    // survives `isSuccessfulDraft` and the single-draft shortcut fires.
+    // survives `isSuccessfulDraft` — and the assembly filter then drops it,
+    // leaving zero deliverable drafts.
     mockedGenerateText
       .mockResolvedValueOnce({ text: MARKUP } as never)
       .mockRejectedValue(new Error("503 Service Unavailable"));
@@ -2250,28 +2280,11 @@ describe("printed-markup drafts are never delivered (PM #134)", () => {
     expect(result.degradedToSingleAgent).toBe(true);
   });
 
-  it("the aggregation-error fallback prefers a CLEAN draft over a longer markup blob", async () => {
-    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
-    // The markup blob is deliberately the LONGEST — that is the whole trap: the
-    // fallback picks by length, and degraded models emit the biggest strings.
-    const longMarkup = MARKUP + "x".repeat(4000);
-    mockedGenerateText
-      .mockResolvedValueOnce({ text: longMarkup } as never)
-      .mockResolvedValueOnce({ text: "a short but real answer" } as never)
-      .mockRejectedValue(new Error("aggregator exploded"));
-
-    const result = await runMoAEnsemble({
-      chatId: "c1",
-      userMessage: "find something",
-      history: [],
-      settings: fakeSettings(),
-    });
-
-    expect(result.text).not.toContain("<function=");
-    expect(result.text).toContain("a short but real answer");
-  });
-
-  it("aggregation failed AND every draft is markup: an honest notice, not the biggest blob", async () => {
+  it("every draft is markup: an honest notice, never 'check your API keys'", async () => {
+    // Distinguishes the two zero-deliverable-draft causes. Both proposers
+    // ANSWERED — the endpoint is fine and the config is fine, the model is
+    // degraded — so the misconfiguration text would send the operator to the
+    // wrong place entirely.
     mockedGenerateObject.mockResolvedValueOnce(personas() as never);
     mockedGenerateText
       .mockResolvedValueOnce({ text: MARKUP + "x".repeat(4000) } as never)
@@ -2287,14 +2300,205 @@ describe("printed-markup drafts are never delivered (PM #134)", () => {
 
     expect(result.text).not.toContain("<function=");
     expect(result.text).toContain("printed the call as text");
+    expect(result.text).not.toContain("API keys");
     expect(result.degradedToSingleAgent).toBe(true);
   });
 
-  it("a TOURNAMENT winner that is markup is DISCARDED at the tournament gate", async () => {
-    // Isolates the tournament gate specifically: with real judges producing a
-    // real winner, the winning draft is returned VERBATIM and synthesis never
-    // runs — so the aggregator-output gate cannot cover this path.
+  // ── The CONTEXT half: markup must not reach a prompt either ──────────────
+  //
+  // This is the gap the delivery gates left open. A markup draft in a prompt is
+  // few-shot poison of the PM #81 kind, and the worst reader of it is the final
+  // TOOL-CAPABLE stream — the one model in the turn that still has a native
+  // tool channel to imitate its way out of.
+
+  it("a markup draft never reaches the AGGREGATOR's prompt", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one: use fetch()" } as never)
+      .mockResolvedValueOnce({ text: MARKUP } as never)
+      .mockResolvedValueOnce({ text: "draft three: use undici" } as never)
+      .mockResolvedValueOnce({ text: "the synthesis" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "how do I fetch",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).toBe("the synthesis");
+    // The aggregator is the LAST generateText call; its user content carries the
+    // drafts (`buildAggregatorPrompt`).
+    const aggCall = mockedGenerateText.mock.calls.at(-1)?.[0] as {
+      messages: { role: string; content: string }[];
+    };
+    const aggPrompt = JSON.stringify(aggCall.messages);
+    expect(aggPrompt).not.toContain("<function=");
+    expect(aggPrompt).not.toContain("<parameter=");
+    // The clean drafts DID make it — proving the assertion above is not passing
+    // because the prompt is empty.
+    expect(aggPrompt).toContain("draft one: use fetch()");
+    expect(aggPrompt).toContain("draft three: use undici");
+  });
+
+  it("a markup draft never reaches the inline-synthesis handoff (the tool-capable stream's system prompt)", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one: use fetch()" } as never)
+      .mockResolvedValueOnce({ text: MARKUP } as never)
+      .mockResolvedValueOnce({ text: "draft three: use undici" } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "how do I fetch",
+      history: [],
+      settings: {
+        ...fakeSettings(),
+        aggregator: { mode: "synthesis", inlineSynthesis: true },
+      } as never,
+    });
+
+    const handoff = result.synthesisHandoff;
+    expect(handoff).toBeDefined();
+    expect(handoff!.drafts).toHaveLength(2);
+    // What `agent.ts` actually appends to the system prompt.
+    const injected = buildInlineSynthesisInjection(
+      "synthesize",
+      handoff!.drafts,
+      handoff!.disagreementMarker
+    );
+    expect(injected).not.toContain("<function=");
+    expect(injected).toContain("draft one: use fetch()");
+    expect(injected).toContain("draft three: use undici");
+  });
+
+  it("the aggregation-error fallback still picks the longest CLEAN draft", async () => {
+    // Reaches the fallback for real: two clean drafts survive the assembly
+    // filter, so aggregation runs — and then explodes.
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: MARKUP + "x".repeat(4000) } as never)
+      .mockResolvedValueOnce({ text: "a short but real answer" } as never)
+      .mockResolvedValueOnce({ text: "a longer but equally real answer" + "y".repeat(100) } as never)
+      .mockRejectedValue(new Error("aggregator exploded"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("a longer but equally real answer");
+  });
+
+  // ── Backstop proof (direct, since the filter makes these unreachable) ─────
+
+  it("isPrintedMarkupDraft: markup yes, prose no, prose ABOUT markup no", () => {
+    expect(isPrintedMarkupDraft(MARKUP)).toBe(true);
+    expect(isPrintedMarkupDraft("Use the search_web tool for this.")).toBe(false);
+    expect(isPrintedMarkupDraft("")).toBe(false);
+    // A fenced teaching example is not a call (stripOneCodeFence + the
+    // conservative anchoring in `printed-tool-call.ts`).
+    expect(
+      isPrintedMarkupDraft("Never write `<tool_call>` yourself — use the native channel.")
+    ).toBe(false);
+  });
+
+  // ── The two gates AFTER the aggregator (same class, one hop later) ───────
+
+  it("a REVISOR that prints markup does not reach the <expert_consensus> block", async () => {
+    // The aggregator gate runs BEFORE reflection, so the revisor — another
+    // model generation — was ungated. Its text becomes `MoAResult.text`, which
+    // `agent.ts` injects as `<expert_consensus>` into the final TOOL-CAPABLE
+    // stream's system prompt: the same poison, one hop later.
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one" } as never)
+      .mockResolvedValueOnce({ text: "draft two" } as never)
+      .mockResolvedValueOnce({ text: "draft three" } as never)
+      // ≥30 chars, or `reflectOnResponse` skips the audit as trivial and the
+      // revisor never runs (MIN_RESPONSE_LEN_FOR_REFLECTION).
+      .mockResolvedValueOnce({ text: "a clean synthesis of the three expert drafts" } as never)
+      // reflection critic: flags an issue, so the revisor runs
+      .mockResolvedValueOnce({
+        text: '{"shouldRevise": true, "critique": "x", "suggestion": "y"}',
+      } as never);
+    mockedGenerateObject.mockResolvedValueOnce({
+      object: { diff: MARKUP, status: "fixed" },
+    } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: { ...fakeSettings(), reflection: { enabled: true } } as never,
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("printed the call as text");
+  }, 30_000);
+
+  it("a degraded turn is never captured as a trace (the few-shot pool stays clean)", async () => {
+    // `computeQualityScore` reads ENSEMBLE signals only — proposer ratio here is
+    // a perfect 3/3 — so a turn whose text is the degradation notice scores well
+    // and would be persisted, then re-injected as a Router few-shot example.
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one" } as never)
+      .mockResolvedValueOnce({ text: "draft two" } as never)
+      .mockResolvedValueOnce({ text: "draft three" } as never)
+      // the AGGREGATOR degrades
+      .mockResolvedValueOnce({ text: MARKUP } as never);
+
+    const degraded = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: { ...fakeSettings(), traceMemory: { enabled: true } } as never,
+    });
+
+    expect(degraded.text).toContain("printed the call as text");
+    expect(mockedCaptureTrace).not.toHaveBeenCalled();
+
+    // Control arm: an identical CLEAN turn does still reach the capture call,
+    // so the assertion above is not passing because capture never runs at all.
+    vi.clearAllMocks();
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one" } as never)
+      .mockResolvedValueOnce({ text: "draft two" } as never)
+      .mockResolvedValueOnce({ text: "draft three" } as never)
+      .mockResolvedValueOnce({ text: "a clean synthesis" } as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: { ...fakeSettings(), traceMemory: { enabled: true } } as never,
+    });
+    expect(mockedCaptureTrace).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("pickDeliverableDraft: prefers the longest CLEAN draft, null when all are markup", () => {
+    const long = { text: MARKUP + "x".repeat(4000) };
+    const shortClean = { text: "short" };
+    const longerClean = { text: "a much longer clean draft" };
+    expect(pickDeliverableDraft([long, shortClean, longerClean])).toBe(longerClean);
+    expect(pickDeliverableDraft([long, { text: MARKUP }])).toBeNull();
+    expect(pickDeliverableDraft([])).toBeNull();
+  });
+
+  it("a TOURNAMENT never receives a markup draft — it is dropped at assembly, before the judges", async () => {
+    // This replaces "a tournament winner that is markup is DISCARDED at the
+    // tournament gate". That gate is still in the code, but the assembly filter
+    // means no markup can reach it, so the old test could only have gone green
+    // by NOT filtering. Asserting a warning that can no longer fire is the
+    // vacuous-test trap; assert the behaviour that is actually in force, and let
+    // the gate's predicate be proven directly above.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
     mockedGenerateObject
       .mockResolvedValueOnce(personas() as never) // Router / DPG
       .mockResolvedValue({ object: { rankedProposerIds: ["analyst", "implementer"] } } as never); // judge
@@ -2310,11 +2514,16 @@ describe("printed-markup drafts are never delivered (PM #134)", () => {
       } as never,
     });
 
+    const logs = log.mock.calls.map((c) => c.join(" ")).join("\n");
     const warnings = warn.mock.calls.map((c) => c.join(" ")).join("\n");
-    expect(warnings).toContain("Tournament winner");
-    expect(warnings).toContain("PRINTED tool call");
+    expect(logs).toContain("printed a tool call as text and was dropped");
+    expect(warnings).toContain("PRINTED tool calls, not answers");
+    // No judge ever ran: the run ended before the tournament.
+    expect(logs).not.toContain("Starting TOURNAMENT aggregation");
     expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("printed the call as text");
     warn.mockRestore();
+    log.mockRestore();
   }, 30_000);
 
   it("a tournament that produces NO winner still never ships markup", async () => {

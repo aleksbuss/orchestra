@@ -39,7 +39,7 @@ your message
 [Fan-out] proposers run in PARALLEL (semaphore-bounded)
    │   each: bounded single agent, tier-resolved model, role-based tools
    ▼
-drafts ──▶ filter (isSuccessfulDraft) ──▶ 0? fallback · 1? use it · ≥2? continue
+drafts ──▶ filter (isSuccessfulDraft + isPrintedMarkupDraft) ──▶ 0? fallback · 1? use it · ≥2? continue
    │
    ▼
 [Disagreement check]  embed drafts · pairwise cosine · marker if divergent
@@ -87,8 +87,8 @@ Each persona becomes a **proposer**: a bounded, single-purpose agent. Key mechan
 
 ### 2.3 Draft filtering and the 0/1/N branches
 
-`isSuccessfulDraft` drops empties and `[Error: …]` drafts. Then:
-- **0 successful** → return a "all proposers failed, check config" message.
+`isSuccessfulDraft` drops empties and `[Error: …]` drafts; `isPrintedMarkupDraft` then drops any draft that PRINTED a tool call as text, so markup reaches neither a delivery path nor a prompt (PM #134). Then:
+- **0 successful** → return a "all proposers failed, check config" message — or, when the drafts were markup rather than failures, the honest degradation notice.
 - **1 successful** → use it verbatim, skip aggregation.
 - **≥2 successful** → continue to disagreement + fan-in.
 

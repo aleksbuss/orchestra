@@ -84,7 +84,38 @@ export {
 
 import { generateDynamicSwarm, type RouterGoalContext } from "@/lib/agent/moa-router";
 import { getActiveGoal } from "@/lib/storage/goal-store";
+import { gateForcedAnswer } from "@/lib/agent/printed-tool-call";
+import { buildToolMarkupDegradationNotice } from "@/lib/agent/agent-response";
 import type { GoalTask } from "@/lib/types";
+
+/**
+ * PM #134 (MoA half) — a proposer draft that is PRINTED TOOL MARKUP is
+ * un-executed work, not an answer.
+ *
+ * Proposers run with `tools: undefined`, exactly like the forced-answer ladder,
+ * so the same failure applies: a model that decides it needs a tool has no
+ * channel to call one and prints the call as text. `moa.ts` had THREE paths that
+ * ship a draft to the user verbatim and none of them looked:
+ *   1. `successfulDrafts.length === 1` — the lone draft is returned as-is.
+ *   2. the tournament winner — "the winning draft (verbatim) is the final answer".
+ *   3. the aggregation-error fallback — the LONGEST draft.
+ * Path 3 is the sharp one: markup blobs measured 16–19 KB in the incident chats,
+ * so "longest" actively PREFERS the garbage, and an aggregation failure is
+ * exactly what a degraded free tier produces alongside the markup.
+ *
+ * Used as a PREDICATE only, the same discipline as `attemptOnce`: the text that
+ * ships is the raw draft, so what is judged is what is stored.
+ */
+function isPrintedMarkupDraft(text: string): boolean {
+  return gateForcedAnswer(text ?? "").degraded;
+}
+
+/** The longest draft that is not printed markup, or null when every one is. */
+function pickDeliverableDraft<T extends { text: string }>(drafts: readonly T[]): T | null {
+  const clean = drafts.filter((d) => !isPrintedMarkupDraft(d.text));
+  if (clean.length === 0) return null;
+  return clean.reduce((a, b) => (a.text.length > b.text.length ? a : b));
+}
 
 /** Depth-first flatten of a goal tree — subtasks count as real work too. */
 function flattenGoalTasks(tasks: readonly GoalTask[] | undefined): GoalTask[] {
@@ -538,6 +569,22 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   // If only one draft succeeded, skip aggregation
   if (successfulDrafts.length === 1) {
+    // PM #134 — but a lone draft that is PRINTED MARKUP is not an answer, and
+    // this path ships it verbatim. `isSuccessfulDraft` only checks for a body.
+    if (isPrintedMarkupDraft(successfulDrafts[0].text)) {
+      console.warn(
+        `[MoA] The only successful draft is a PRINTED tool call, not an answer — ` +
+          `delivering an honest notice instead of ${successfulDrafts[0].text.length} chars of markup.`
+      );
+      return {
+        text: buildToolMarkupDegradationNotice(settings),
+        degradedToSingleAgent: true,
+        drafts,
+        aggregationLatencyMs: 0,
+        totalLatencyMs: Date.now() - totalStart,
+        cumulativeUsage: moaUsage,
+      };
+    }
     console.log(`[MoA] Only 1 draft succeeded, skipping aggregation.`);
     return {
       text: successfulDrafts[0].text,
@@ -746,7 +793,17 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         moaUsage = mergeUsage(moaUsage, tournament.cumulativeUsage);
       }
 
-      if (tournament.winnerProposerId && tournament.winningText) {
+      // PM #134 — a winner that is printed markup is treated as NO winner, so
+      // the caller's existing fallback runs instead of shipping it. The judges
+      // are supposed to rank markup last, but the documented all-judges-failed
+      // rule is "winner = longest successful draft", and a markup blob is
+      // usually the longest thing a degraded model emits.
+      if (tournament.winningText && isPrintedMarkupDraft(tournament.winningText)) {
+        console.warn(
+          `[MoA] Tournament winner ${tournament.winnerProposerId} is a PRINTED tool call, ` +
+            `not an answer — discarding it and falling through to synthesis.`
+        );
+      } else if (tournament.winnerProposerId && tournament.winningText) {
         const aggregationLatencyMs = tournament.latencyMs;
         const finalText = tournament.winningText;
         console.log(
@@ -867,6 +924,20 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     const aggregationLatencyMs = Date.now() - aggStart;
     let finalText = aggResult.text?.trim() || "(aggregation produced empty output)";
 
+    // PM #134 — the aggregator is a MODEL too, and this is the LAST hop before
+    // the user. Found while testing the tournament gate: with every proposer
+    // printing markup, the tournament produced no winner, execution fell
+    // through to synthesis, and the synthesised text was itself markup — which
+    // shipped verbatim because nothing here looked. Gating the three
+    // draft-delivery paths and leaving this one open would have been theatre.
+    if (isPrintedMarkupDraft(finalText)) {
+      console.warn(
+        `[MoA] The AGGREGATOR printed a tool call as text instead of synthesising ` +
+          `(${finalText.length} chars) — delivering an honest notice instead.`
+      );
+      finalText = buildToolMarkupDegradationNotice(settings);
+    }
+
     console.log(`[MoA] Aggregation completed in ${aggregationLatencyMs}ms (${finalText.length} chars)`);
 
     // PM #36 — fold the aggregator's tokens into the running total.
@@ -975,10 +1046,29 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[MoA] Fatal Aggregation Error: ${errMsg}`);
 
-    // Fallback: return the longest successful draft so the user doesn't get an empty screen
-    const bestDraft = successfulDrafts.reduce((a, b) =>
-      a.text.length > b.text.length ? a : b
-    );
+    // Fallback: return the longest successful draft so the user doesn't get an
+    // empty screen.
+    //
+    // PM #134 — "longest" actively PREFERS printed markup: the blobs measured in
+    // the incident chats were 16–19 KB, far longer than any prose draft, and an
+    // aggregation failure is exactly what a degraded free tier produces
+    // alongside them. So pick the longest DELIVERABLE draft, and when every
+    // draft is markup say so honestly rather than shipping the biggest blob.
+    const bestDraft = pickDeliverableDraft(successfulDrafts);
+    if (!bestDraft) {
+      console.warn(
+        `[MoA] Aggregation failed AND every successful draft is a printed tool call — ` +
+          `delivering an honest notice instead of the longest markup blob.`
+      );
+      return {
+        text: buildToolMarkupDegradationNotice(settings),
+        degradedToSingleAgent: true,
+        drafts,
+        aggregationLatencyMs: Date.now() - aggStart,
+        totalLatencyMs: Date.now() - totalStart,
+        cumulativeUsage: moaUsage,
+      };
+    }
 
     publishUiSyncEvent({
       topic: "chat",

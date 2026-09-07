@@ -208,6 +208,8 @@ export interface MoAResult {
    * models (free-tier 429s under parallel load — see CLAUDE.md §1).
    */
   degradedToSingleAgent?: boolean;
+  /** WHY it degraded, so `runAgent`'s operator notice names the real cause. */
+  degradedReason?: "markup" | "no-drafts";
   /**
    * Sprint 2 — MoA aggregator collapse (docs/moa-aggregator-collapse.md). When
    * set, the default synthesis aggregator did NOT run: `runAgent`'s final
@@ -567,6 +569,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
           ? buildToolMarkupDegradationNotice(settings)
           : "All MoA proposer agents failed. Please check your model configuration and API keys.",
       degradedToSingleAgent: true,
+      degradedReason: markupDraftCount > 0 ? "markup" : "no-drafts",
       drafts,
       aggregationLatencyMs: 0,
       totalLatencyMs: Date.now() - totalStart,
@@ -1058,6 +1061,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       return {
         text: buildToolMarkupDegradationNotice(settings),
         degradedToSingleAgent: true,
+        degradedReason: "markup",
         drafts,
         aggregationLatencyMs: Date.now() - aggStart,
         totalLatencyMs: Date.now() - totalStart,

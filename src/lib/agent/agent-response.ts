@@ -549,7 +549,7 @@ export function buildToolMarkupDegradationNotice(settings?: AppSettings): string
         settings.freeModeDisplacedTiers?.fast,
       ].find((c) => c?.model && !isFreeModelId(c.model));
       const pointer = paidTier
-        ? ` — you already have \`${paidTier.model.replace(/^~/, "")}\` configured in the proposer tiers`
+        ? ` (you already have \`${paidTier.model.replace(/^~/, "")}\` configured in the proposer tiers)`
         : "";
       return (
         base +

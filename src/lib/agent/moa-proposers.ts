@@ -28,6 +28,7 @@ import { createModel } from "@/lib/providers/llm-provider";
 import { modelSupportsTools } from "@/lib/providers/tool-support";
 import { applyGlobalToolLoopGuard } from "@/lib/agent/tool-guard";
 import { createTokenGovernor } from "@/lib/agent/token-governor";
+import { gateForcedAnswer } from "@/lib/agent/printed-tool-call";
 import {
   detectProposerRole,
   resolveProposerModelConfig,
@@ -569,8 +570,25 @@ export async function runProposerFanOut(
         }
 
           // Delivered non-empty -> heal the breaker and keep this result.
+          //
+          // PM #134 — but "non-empty" is not "answered". Proposers run with
+          // `tools: undefined`, so a model that decides it needs a tool prints
+          // the call as text, and that markup is a fat non-empty string. Healing
+          // the breaker on it is the same defect the forced-answer ladder had:
+          // an endpoint that degrades every turn never accumulates toward
+          // quarantine. The draft is still KEPT — `moa.ts` gates it at the three
+          // places that would ship it to the user, and discarding it here would
+          // silently shrink the ensemble.
           if ((result.text ?? "").trim().length > 0) {
-            recordModelSuccess(resolvedProvider, resolvedModel);
+            if (gateForcedAnswer(result.text ?? "").degraded) {
+              console.warn(
+                `[MoA] Proposer "${proposer.id}" (${resolvedProvider}/${resolvedModel}) PRINTED a tool ` +
+                  `call as text instead of drafting — counting it against the endpoint, not healing it.`
+              );
+              recordModelFailure(resolvedProvider, resolvedModel, "markup");
+            } else {
+              recordModelSuccess(resolvedProvider, resolvedModel);
+            }
             break;
           }
           // Empty body. The breaker counts ONE failure per PROPOSER, recorded
@@ -763,10 +781,18 @@ export async function runProposerFanOut(
 
             // Feed the breaker: the failover model just proved itself (or
             // returned yet another empty body on a loaded free endpoint).
-            if (result.text?.trim()) {
-              recordModelSuccess(fallbackConfig.provider, fallbackConfig.model);
-            } else {
+            // PM #134 — printed markup is neither; it is its own failure kind,
+            // and healing on it is what keeps a degrading endpoint in rotation.
+            if (!result.text?.trim()) {
               recordModelFailure(fallbackConfig.provider, fallbackConfig.model, "empty");
+            } else if (gateForcedAnswer(result.text).degraded) {
+              console.warn(
+                `[MoA] Proposer "${proposer.id}" FALLBACK on ${fallbackConfig.provider}/${fallbackConfig.model} ` +
+                  `PRINTED a tool call as text instead of drafting — counting it against the endpoint.`
+              );
+              recordModelFailure(fallbackConfig.provider, fallbackConfig.model, "markup");
+            } else {
+              recordModelSuccess(fallbackConfig.provider, fallbackConfig.model);
             }
 
             console.log(`[MoA] Proposer "${proposer.id}" (role=${standardRole}, model=${fallbackConfig.provider}/${fallbackConfig.model}) FALLBACK completed in ${latencyMs}ms (${text.length} chars)`);

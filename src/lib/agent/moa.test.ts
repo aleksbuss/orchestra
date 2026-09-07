@@ -2203,3 +2203,161 @@ describe("PM #127 audit — the collapse notice's inputs actually reach the call
     }
   });
 });
+
+/**
+ * PM #134 (MoA half) — a proposer draft that is PRINTED TOOL MARKUP must never
+ * be shipped to the user, on any of the three paths that deliver a draft
+ * verbatim.
+ *
+ * Proposers run with `tools: undefined`, exactly like the forced-answer ladder,
+ * so the same failure applies. `isSuccessfulDraft` only rejects `[Error: …]` and
+ * `(empty draft)` — a 19 KB markup blob passes it as a "successful" draft.
+ */
+describe("printed-markup drafts are never delivered (PM #134)", () => {
+  const MARKUP =
+    "I'll look that up.\n<function=search_web>\n<parameter=query>\n" +
+    "GitHub trending repositories\n</parameter>\n</function>";
+
+  function personas() {
+    return {
+      object: {
+        requiresSwarm: true,
+        personas: [
+          { id: "analyst", role: "Senior Analyst", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "blue" },
+          { id: "implementer", role: "Implementation Engineer", systemPrompt: "[GOAL] a [RULES] b [FORMAT] c", color: "green" },
+        ],
+      },
+    };
+  }
+
+  it("the LONE successful draft: an honest notice, never the markup", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
+    // One proposer prints markup; every other call fails, so exactly one draft
+    // survives `isSuccessfulDraft` and the single-draft shortcut fires.
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: MARKUP } as never)
+      .mockRejectedValue(new Error("503 Service Unavailable"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("printed the call as text");
+    expect(result.degradedToSingleAgent).toBe(true);
+  });
+
+  it("the aggregation-error fallback prefers a CLEAN draft over a longer markup blob", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
+    // The markup blob is deliberately the LONGEST — that is the whole trap: the
+    // fallback picks by length, and degraded models emit the biggest strings.
+    const longMarkup = MARKUP + "x".repeat(4000);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: longMarkup } as never)
+      .mockResolvedValueOnce({ text: "a short but real answer" } as never)
+      .mockRejectedValue(new Error("aggregator exploded"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("a short but real answer");
+  });
+
+  it("aggregation failed AND every draft is markup: an honest notice, not the biggest blob", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: MARKUP + "x".repeat(4000) } as never)
+      .mockResolvedValueOnce({ text: MARKUP } as never)
+      .mockRejectedValue(new Error("aggregator exploded"));
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).toContain("printed the call as text");
+    expect(result.degradedToSingleAgent).toBe(true);
+  });
+
+  it("a TOURNAMENT winner that is markup is DISCARDED at the tournament gate", async () => {
+    // Isolates the tournament gate specifically: with real judges producing a
+    // real winner, the winning draft is returned VERBATIM and synthesis never
+    // runs — so the aggregator-output gate cannot cover this path.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockedGenerateObject
+      .mockResolvedValueOnce(personas() as never) // Router / DPG
+      .mockResolvedValue({ object: { rankedProposerIds: ["analyst", "implementer"] } } as never); // judge
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: {
+        ...fakeSettings(),
+        aggregator: { mode: "tournament", tournamentJudgeCount: 1 },
+      } as never,
+    });
+
+    const warnings = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(warnings).toContain("Tournament winner");
+    expect(warnings).toContain("PRINTED tool call");
+    expect(result.text).not.toContain("<function=");
+    warn.mockRestore();
+  }, 30_000);
+
+  it("a tournament that produces NO winner still never ships markup", async () => {
+    // "The winning draft (verbatim) is the final answer" — so a winner that is
+    // printed markup ships raw XML. Reachable in practice because the
+    // documented all-judges-failed rule is "winner = longest successful draft",
+    // and a markup blob is usually the longest thing a degraded model emits.
+    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: {
+        ...fakeSettings(),
+        aggregator: { mode: "tournament", tournamentJudgeCount: 1 },
+      } as never,
+    });
+
+    expect(result.text).not.toContain("<function=");
+    expect(result.text).not.toContain("<parameter=");
+  }, 30_000);
+
+  it("a proposer that prints markup is counted against its endpoint, not healed", async () => {
+    mockedGenerateObject.mockResolvedValueOnce(personas() as never);
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "find something",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    // Endpoint-agnostic on purpose: which slot the proposers resolve to is
+    // `resolveProposerModelConfig`'s business, and pinning it here would make
+    // this test fail for an unrelated reason.
+    const snapshot = getModelHealthSnapshot();
+    const marked = snapshot.filter((e) => e.markupFailures > 0);
+    expect(marked.length).toBeGreaterThan(0);
+    // The whole point of D2: markup must NOT have healed anything.
+    expect(snapshot.every((e) => e.totalSuccesses === 0)).toBe(true);
+    expect(marked.every((e) => e.lastFailureKind === "markup")).toBe(true);
+  });
+});

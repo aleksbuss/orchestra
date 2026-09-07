@@ -97,7 +97,24 @@ Mutation sweep result over every distinct behaviour in this fix (gate predicate,
 
 Re-verified LIVE on the final code with real OpenRouter calls, since the earlier live differential predated the council fixes: markup rejected, attempt 2 skipped, short budget selected and announced, a real substitute delivered prose in 1.7s, `markupDegradation` null on a delivery, brain `totalSuccesses` 0 / `markupFailures` 1 / `lastFailureKind` markup.
 
-**Known limit, not fixed here:** `moa-proposers.ts` heals the breaker on any non-empty proposer draft with no markup check — the same shape, on a different path (drafts feed an aggregator, not the user). Deliberately deferred; do not re-file as a new discovery.
+**The MoA half, closed 2026-09-07 after the operator asked for it to be tested — and the "deferred limit" turned out to understate the exposure badly.** It was recorded as breaker-healing only ("drafts feed an aggregator, not the user"). That is wrong: `runMoAEnsemble` has FOUR paths that put model text in front of the user, and none of them looked at it.
+
+| path | what it delivers | why it matters |
+| --- | --- | --- |
+| `successfulDrafts.length === 1` | the lone draft, verbatim | `isSuccessfulDraft` rejects only `[Error: ...]` and `(empty draft)` — a 19 KB markup blob passes as "successful" |
+| tournament winner | "the winning draft (verbatim) is the final answer" | synthesis never runs on this path, so no downstream gate can save it |
+| aggregation-error fallback | the LONGEST successful draft | **actively prefers markup**: the blobs measured in the incident chats were 16-19 KB, far longer than any prose draft, and an aggregation failure is exactly what a degraded free tier produces alongside them |
+| the synthesis aggregator's own output | whatever the aggregator model returned | the aggregator is a model too, and this is the last hop before the user |
+
+The fourth was found BY the test for the second: with every proposer printing markup the tournament produced no winner, execution fell through to synthesis, and the synthesised text was itself markup — which shipped, because nothing looked. Gating three of four would have been theatre.
+
+All four now go through `isPrintedMarkupDraft` (`gateForcedAnswer` as a predicate, same discipline as `attemptOnce` — the text that ships is the raw text, so what is judged is what is stored). Where every candidate is markup the honest notice ships instead of the biggest blob, and `pickDeliverableDraft` replaces the longest-of-all reduce.
+
+Proposers no longer heal the breaker on markup either — both sites in `moa-proposers.ts` (the main loop and the failover model) record `"markup"` instead. The draft is still KEPT: `moa.ts` gates it at the delivery points, and discarding it in the fan-out would silently shrink the ensemble.
+
+**Regression coverage:** `moa.test.ts` § "printed-markup drafts are never delivered (PM #134)" — 6 cases driving the real `runMoAEnsemble`: the lone-draft path, the fallback preferring a SHORT clean draft over a longer markup blob, the all-markup fallback, the tournament gate isolated via its own warning (a winner exists there, so synthesis never runs and no downstream gate can mask it), the no-winner path, and the proposer breaker recording `"markup"` with zero successes. Every gate mutation-verified individually.
+
+**Known limit, still NOT fixed:** nothing gates draft text as it is fed INTO the aggregator as context. Markup there is few-shot poison of the kind PM #81 documents ("the model IMITATING the markup sitting in its own transcript"). The delivery paths are closed; the context path is not.
 
 **Cost this buys, and the budget pair it forced:** the cascade now actually runs, and `cascadeBudgetMs()` is 300 000 ms (sized in PM #123 off live cascades measured at 270–427s). That budget was affordable only while the cascade was practically unreachable; markup is common on free models, so the same 300s would now land on a routine interactive turn. A markup-triggered cascade therefore gets its own budget: **90 000 ms aggregate (`ORCHESTRA_MARKUP_CASCADE_BUDGET_MS`) with a 30 000 ms per-attempt deadline (`ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS`)**.
 

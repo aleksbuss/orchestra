@@ -26,7 +26,12 @@ import {
   compareModelsByBenchmarkScoreDesc,
   UNDELIVERABLE_NOTICE,
 } from "./final-answer-failover";
-import { resetModelHealth, recordModelFailure, isModelCircuitOpen } from "./model-health";
+import {
+  resetModelHealth,
+  recordModelFailure,
+  isModelCircuitOpen,
+  getModelHealthEntry,
+} from "./model-health";
 import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import {
   __setOpenRouterBenchmarkScoreForTest,
@@ -804,5 +809,277 @@ describe("generateFinalAnswerWithFailover — tool-less system-prompt override",
 
     expect(out.text).toBe("");
     expect(out.endpoint).toBeUndefined();
+  });
+});
+
+/**
+ * PM #134 — printed tool markup is a FAILURE, not a delivery.
+ *
+ * The live defect (2026-09-07, chat 560896d7): `attemptOnce` accepted any
+ * non-empty string as an answer, so 289 chars of printed `call_mcp_tool` ended
+ * the ladder at the brain — the four healthy substitutes were never tried — and
+ * `recordModelSuccess` then wiped the breaker of the endpoint that had just
+ * failed.
+ *
+ * Fixtures are REAL captured bytes from two live dialects, not hand-written
+ * markup: degraded output is mangled in ways a synthetic fixture never is.
+ */
+describe("printed tool markup is not a delivery (PM #134)", () => {
+  const FRONTIER: ModelConfig = { provider: "openrouter", model: "vendor/frontier:free", apiKey: "k" };
+  const BALANCED: ModelConfig = { provider: "openrouter", model: "vendor/balanced:free", apiKey: "k" };
+
+  /** Real bytes, chat 560896d7 message[1] — the Functionary dialect, prose-prefixed. */
+  const LIVE_FUNCTIONARY_MARKUP =
+    "I'll search for recent interesting GitHub projects and trends from the last month.\n" +
+    "<function=search_web>\n<parameter=query>\n" +
+    "GitHub trending repositories last month 2026 interesting projects ideas\n" +
+    "</parameter>\n</function>";
+
+  /** Real bytes, chat 9891bb43 — the dots dialect, `<invoke name=…>` inside a wrapper. */
+  const LIVE_DOTS_MARKUP =
+    '<dots_function_call>\n<invoke name="write_text_file">\n' +
+    '<parameter name="file_path">\n/tmp/x.ts\n</parameter>\n</invoke>\n</dots_function_call>';
+
+  function multiPoolSettings(): AppSettings {
+    const s = settings();
+    s.proposerTiers = { frontier: { ...FRONTIER }, balanced: { ...BALANCED } };
+    return s;
+  }
+
+  it("does NOT accept markup as the answer, and does NOT heal the endpoint's breaker", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: LIVE_FUNCTIONARY_MARKUP } as never) // brain
+      .mockResolvedValue({ text: "" } as never); // every substitute stays empty
+
+    recordModelFailure(BRAIN.provider, BRAIN.model, "empty");
+    recordModelFailure(BRAIN.provider, BRAIN.model, "empty");
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    // The markup is never returned as text...
+    expect(out.text).toBe("");
+    expect(out.text).not.toContain("<function=");
+    // ...the endpoint was NOT healed (a success here would have reset the two
+    // failures above to zero — the D2 half of the defect)...
+    const entry = getModelHealthEntry(BRAIN.provider, BRAIN.model);
+    expect(entry?.totalSuccesses).toBe(0);
+    expect(entry?.consecutiveFailures).toBeGreaterThanOrEqual(3);
+    // ...and it was recorded as markup, not as some other kind.
+    expect(entry?.markupFailures).toBe(1);
+    expect(entry?.lastFailureKind).toBe("markup");
+  });
+
+  it("keeps cascading: a substitute's clean prose wins over the brain's markup", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: LIVE_DOTS_MARKUP } as never) // brain prints markup
+      .mockResolvedValueOnce({ text: "" } as never) // utility — empty
+      .mockResolvedValueOnce({ text: "a real answer" } as never); // frontier — delivers
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("a real answer");
+    expect(out.endpoint).toEqual(FRONTIER);
+    expect(out.markupDegradation).toBeUndefined(); // a delivery is not a degradation
+  });
+
+  it("SKIPS the same-endpoint retry after markup — the retry would re-send the same context", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: LIVE_FUNCTIONARY_MARKUP } as never) // brain, attempt 1
+      .mockResolvedValueOnce({ text: "from utility" } as never); // straight to the substitute
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("from utility");
+    // "brain-handle" appears ONCE — attempt 2 on the same endpoint never ran.
+    expect(calledModels()).toEqual(["brain-handle", UTILITY.model]);
+  });
+
+  it("an empty brain still GETS its retry — the skip is markup-specific, not a blanket change", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "second time lucky" } as never); // brain retry
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("second time lucky");
+    expect(calledModels()).toEqual(["brain-handle", "brain-handle"]);
+  });
+
+  it("reports WHICH endpoint printed the markup when the whole cascade degrades", async () => {
+    mockedGenerateText.mockResolvedValue({ text: LIVE_DOTS_MARKUP } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("");
+    expect(out.markupDegradation?.toolName).toBe("write_text_file");
+    // The LAST endpoint tried, not the brain slot — naming the brain is the
+    // telemetry lie that only stayed harmless while the cascade never ran.
+    expect(out.markupDegradation?.endpoint).toEqual(BALANCED);
+    expect(out.markupDegradation?.markupChars).toBe(LIVE_DOTS_MARKUP.length);
+  });
+
+  it("still reports the degradation when the caller supplied no brainConfig", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: LIVE_FUNCTIONARY_MARKUP } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ brainConfig: undefined }));
+
+    // Without an endpoint there is nothing to quarantine, but the SIGNAL must
+    // survive: tying it to knowing the endpoint dropped the honest notice
+    // entirely and shipped an empty turn.
+    expect(out.markupDegradation?.toolName).toBe("search_web");
+    expect(out.markupDegradation?.endpoint).toBeUndefined();
+  });
+
+  it("a printed `response` call is the ANSWER, not a degradation — must not regress", async () => {
+    mockedGenerateText.mockResolvedValueOnce({
+      text: '<tool_call>{"name":"response","arguments":{"message":"here is the real answer"}}</tool_call>',
+    } as never);
+
+    const out = await generateFinalAnswerWithFailover(args());
+
+    // Delivered on the first attempt, no cascade, endpoint healed.
+    expect(out.text).toContain("here is the real answer");
+    expect(out.markupDegradation).toBeUndefined();
+    expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)?.totalSuccesses).toBe(1);
+  });
+
+  it("prose that merely MENTIONS tool markup is delivered untouched", async () => {
+    const prose =
+      "The model emitted a `<tool_call>` block as text instead of calling the tool. " +
+      "That is the bug you are seeing; nothing was executed.";
+    mockedGenerateText.mockResolvedValueOnce({ text: prose } as never);
+
+    const out = await generateFinalAnswerWithFailover(args());
+
+    expect(out.text).toBe(prose);
+    expect(out.markupDegradation).toBeUndefined();
+  });
+
+  it("a throttled cascade records throttle, not markup, against each substitute", async () => {
+    // kimi council review — the cascade now actually runs, so substitutes start
+    // accruing failures they never got before. That is correct, but it must be
+    // the RIGHT kind: a 429 is availability, not degradation.
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: LIVE_FUNCTIONARY_MARKUP } as never) // brain
+      .mockRejectedValue(Object.assign(new Error("Rate limit exceeded"), { statusCode: 429 }));
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("");
+    for (const c of [UTILITY, FRONTIER, BALANCED]) {
+      expect(getModelHealthEntry(c.provider, c.model)?.lastFailureKind).toBe("throttle");
+      expect(getModelHealthEntry(c.provider, c.model)?.markupFailures).toBe(0);
+    }
+  });
+});
+
+/**
+ * PM #134 — the markup cascade runs on its own, SHORTER budget.
+ *
+ * Before PM #134 the cascade was practically unreachable, so its 300s budget
+ * was paid on a rare path. Markup is common on free models, so the same 300s
+ * now lands on a routine interactive turn. 90s is deliberately the number
+ * PM #123 raised FROM — it is only safe because the per-attempt deadline is
+ * tightened with it; the two are a pair.
+ */
+describe("markup cascade budget (PM #134)", () => {
+  const FRONTIER: ModelConfig = { provider: "openrouter", model: "vendor/frontier:free", apiKey: "k" };
+  const BALANCED: ModelConfig = { provider: "openrouter", model: "vendor/balanced:free", apiKey: "k" };
+
+  const MARKUP = "<function=search_web>\n<parameter=query>\nx\n</parameter>\n</function>";
+
+  function multiPoolSettings(): AppSettings {
+    const s = settings();
+    s.proposerTiers = { frontier: { ...FRONTIER }, balanced: { ...BALANCED } };
+    return s;
+  }
+
+  /** The per-attempt deadline each `generateText` call was actually handed. */
+  function attemptDeadlines(): number[] {
+    return mockedGenerateText.mock.calls.map((c) => {
+      const sig = (c[0] as { abortSignal?: AbortSignal }).abortSignal;
+      // `AbortSignal.timeout(ms)` is opaque, so read the shape the ladder built
+      // rather than the ms: what matters is that the SUBSTITUTE calls got a
+      // different signal object than an unbounded one.
+      return sig ? 1 : 0;
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS;
+    delete process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS;
+    delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+  });
+
+  /** Everything `console.warn` was handed, flattened. */
+  function warnings(): string {
+    return vi.mocked(console.warn).mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  it("a markup trigger selects the SHORT budget and says so", async () => {
+    process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS = "90000";
+    process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS = "300000";
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(warnings()).toContain("cascade triggered by PRINTED MARKUP");
+    expect(warnings()).toContain("90000ms aggregate");
+  });
+
+  it("an EMPTY brain does NOT get the short budget — it is markup-only", async () => {
+    process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS = "90000";
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "from utility" } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("from utility");
+    expect(warnings()).not.toContain("PRINTED MARKUP");
+    expect(calledModels()).toEqual(["brain-handle", "brain-handle", UTILITY.model]);
+  });
+
+  it("the short budget actually TRUNCATES the cascade — untried candidates are named", async () => {
+    // Real elapsed time, not fake timers: a 1ms budget plus a substitute that
+    // takes ~20ms means the SECOND substitute is never started.
+    process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS = "1";
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: MARKUP } as never) // brain prints markup
+      .mockImplementationOnce(
+        () => new Promise((r) => setTimeout(() => r({ text: "" } as never), 20)) as never
+      );
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("");
+    expect(calledModels()).toEqual(["brain-handle", UTILITY.model]); // stopped after one
+    // PM #123's rule: a truncated cascade must NAME what it skipped.
+    expect(warnings()).toContain("cascade budget (1ms) exceeded");
+    expect(warnings()).toContain(FRONTIER.model);
+  });
+
+  it("PM #123 guard — the per-attempt deadline stays BELOW the aggregate budget", () => {
+    // The pair, asserted as a pair. A 90s aggregate smaller than one
+    // candidate's own deadline is exactly the defect PM #123 fixed: a single
+    // hung candidate eats the budget and the untried healthy ones are dropped.
+    // Read through the same env indirection the code uses, so an operator
+    // override that breaks the invariant is caught here too.
+    const budget = Number(process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS ?? 90_000);
+    const perAttempt = Number(process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS ?? 30_000);
+    expect(perAttempt).toBeLessThan(budget);
+    // Room for the whole pool minus the brain, not just one attempt.
+    expect(Math.floor(budget / perAttempt)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("every substitute in a markup cascade is called WITH a bounded signal", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: MARKUP } as never) // brain
+      .mockResolvedValueOnce({ text: "rescued" } as never); // utility
+
+    const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
+
+    expect(out.text).toBe("rescued");
+    expect(attemptDeadlines().every((d) => d === 1)).toBe(true);
   });
 });

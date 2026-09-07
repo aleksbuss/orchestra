@@ -60,8 +60,6 @@ import { getProjectContentRoot } from "@/lib/storage/project-store";
 
 // §10 phase 1 — message/response helpers live in agent-response.ts.
 import {
-  stripThinkingTags,
-  unwrapSerializedResponseCall,
   getLastAssistantText,
   getLastResponseToolText,
   turnHasDeliverableAnswer,
@@ -74,6 +72,10 @@ import {
   countTrailingLoopBlockSteps,
   LOOP_ABORT_CONSECUTIVE,
 } from "@/lib/agent/agent-response";
+import {
+  stripThinkingTags,
+  unwrapSerializedResponseCall,
+} from "@/lib/agent/printed-tool-call";
 import type { TurnContinuationResult } from "@/lib/agent/agent-response";
 // PM #81 Sprint 2 — active self-heal for hallucinated (printed-as-text) tool calls.
 import {

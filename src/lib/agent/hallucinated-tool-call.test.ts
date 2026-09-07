@@ -10,15 +10,17 @@
 import { describe, expect, it } from "vitest";
 import type { ModelMessage } from "ai";
 import {
-  extractHallucinatedToolCall,
-  printedActionCallName,
   turnHasDeliverableAnswer,
   detectActionHallucination,
   stripHallucinatedTrailingText,
   neutralizeHallucinatedHistory,
   HALLUCINATED_HISTORY_PLACEHOLDER,
-  gateForcedAnswer,
 } from "./agent-response";
+import {
+  extractHallucinatedToolCall,
+  printedActionCallName,
+  gateForcedAnswer,
+} from "./printed-tool-call";
 
 describe("printedActionCallName (PM #109 — catches TRUNCATED markup)", () => {
   // The live bug: the forced-answer output cap truncated a <tool_call>{…} blob

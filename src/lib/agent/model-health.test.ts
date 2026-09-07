@@ -9,6 +9,7 @@ import {
   modelHealthKey,
   tryAcquireProbe,
   classifyModelFailure,
+  isPermanentFailureKind,
 } from "./model-health";
 
 const P = "openrouter";
@@ -559,5 +560,68 @@ describe("PM #127 audit — defects the first cut shipped", () => {
       }),
     });
     expect(classifyModelFailure(wrapped)).toBe("unusable");
+  });
+});
+
+/**
+ * PM #134 — `"markup"` is policed on its own counter, which a success does not
+ * reset.
+ *
+ * Why it needs one: printed-tool-call degradation is context-driven, not an
+ * availability problem, so the same endpoint alternates markup and clean
+ * answers inside one chat. Measured on the three known incident chats
+ * (9891bb43 `..X.X....X`, a8e1a43c `XX……X.`, e20e9bc4 `XX.`) the longest run of
+ * CONSECUTIVE markup turns is 2 — so a reset-on-success counter at threshold 3
+ * would have fired on none of them.
+ */
+describe("markup failures (PM #134)", () => {
+  const MP = "openrouter";
+  const MM = "vendor/prints-markup:free";
+
+  beforeEach(() => {
+    resetModelHealth();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("opens the circuit on the 9891bb43 pattern, which a consecutive counter never would", () => {
+    // ..X.X....X — markup interleaved with clean answers.
+    const seq = [".", ".", "X", ".", "X", ".", ".", ".", ".", "X"];
+    for (const step of seq) {
+      if (step === "X") recordModelFailure(MP, MM, "markup");
+      else recordModelSuccess(MP, MM);
+    }
+    expect(isModelCircuitOpen(MP, MM)).toBe(true);
+  });
+
+  it("a success does NOT clear the markup count — but DOES clear consecutive failures", () => {
+    recordModelFailure(MP, MM, "markup");
+    recordModelFailure(MP, MM, "empty");
+    recordModelSuccess(MP, MM);
+
+    const entry = getModelHealthSnapshot().find((e) => e.model === MM);
+    expect(entry?.consecutiveFailures).toBe(0); // availability healed
+    expect(entry?.markupFailures).toBe(1); // degradation history kept
+    expect(isModelCircuitOpen(MP, MM)).toBe(false);
+  });
+
+  it("two markup answers are not enough — the threshold is not hair-trigger", () => {
+    recordModelFailure(MP, MM, "markup");
+    recordModelFailure(MP, MM, "markup");
+    expect(isModelCircuitOpen(MP, MM)).toBe(false);
+  });
+
+  it("markup is transient, never permanent — a 24h quarantine over one bad context is wrong", () => {
+    for (let i = 0; i < 5; i++) recordModelFailure(MP, MM, "markup");
+    const entry = getModelHealthSnapshot().find((e) => e.model === MM);
+    expect(entry?.openedByKind).toBe("markup");
+    expect(isPermanentFailureKind("markup")).toBe(false);
+  });
+
+  it("other kinds do not touch the markup counter", () => {
+    recordModelFailure(MP, MM, "throttle");
+    recordModelFailure(MP, MM, "empty");
+    recordModelFailure(MP, MM, "server");
+    expect(getModelHealthSnapshot().find((e) => e.model === MM)?.markupFailures).toBe(0);
   });
 });

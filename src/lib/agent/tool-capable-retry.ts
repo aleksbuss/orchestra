@@ -58,11 +58,13 @@ import {
   turnHasDeliverableAnswer,
   getLastAssistantText,
   getLastResponseToolText,
-  unwrapSerializedResponseCall,
-  stripThinkingTags,
   countTrailingLoopBlockSteps,
   LOOP_ABORT_CONSECUTIVE,
 } from "@/lib/agent/agent-response";
+import {
+  unwrapSerializedResponseCall,
+  stripThinkingTags,
+} from "@/lib/agent/printed-tool-call";
 import { convertModelMessageToChatMessages } from "@/lib/agent/agent-messages";
 import {
   buildFinalAnswerPool,

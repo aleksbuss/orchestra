@@ -48,6 +48,7 @@ import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import { governMessages } from "@/lib/agent/token-governor";
 import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
+import { gateForcedAnswer } from "@/lib/agent/printed-tool-call";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   classifyModelFailure,
@@ -140,6 +141,39 @@ function cascadeBudgetMs(): number {
   return Number(process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? 300_000);
 }
 
+/**
+ * PM #134 — the cascade's budget when the brain failed by PRINTING A TOOL CALL
+ * rather than by going silent.
+ *
+ * Before PM #134 the cascade practically never ran (reaching it required both
+ * brain attempts to return falsy text), so the 300s budget above was paid on a
+ * rare path. Markup is common on free models, so that same 300s is now spent on
+ * a routine interactive turn — the operator waits minutes for a chat reply.
+ *
+ * ⚠️ 90s is EXACTLY the number PM #123 raised to 300s, and re-introducing it
+ * naively re-introduces that defect: a 90s aggregate that is smaller than one
+ * candidate's own 120s call deadline lets a single hung candidate eat the whole
+ * budget and silently truncate a pool with healthy, untried models left in it.
+ * So the per-attempt deadline is tightened ALONGSIDE it (below) — 90s only
+ * makes sense as a bound once no single attempt can consume it. The two numbers
+ * are a pair; changing one without the other brings PM #123 back.
+ */
+function markupCascadeBudgetMs(): number {
+  return Number(process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS ?? 90_000);
+}
+
+/**
+ * Per-attempt deadline inside a markup-triggered cascade — the other half of
+ * the pair above. The forced answer is short prose (already capped by
+ * `FORCED_ANSWER_MAX_OUTPUT_TOKENS`), so a candidate that has not produced one
+ * in 30s is not about to; waiting the full 120s only spends the aggregate
+ * budget that the remaining candidates need. Three full-length attempts fit
+ * inside the 90s budget, which is the whole pool minus the brain.
+ */
+function markupAttemptDeadlineMs(): number {
+  return Number(process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS ?? 30_000);
+}
+
 export interface FinalAnswerAttemptArgs {
   model: Parameters<typeof generateText>[0]["model"];
   systemPrompt: string;
@@ -192,6 +226,28 @@ export interface FinalAnswerResult {
    * the error invisible at 0 USD, paid ones do not).
    */
   endpoint?: ModelConfig;
+  /**
+   * PM #134 — set when the ladder ran out of candidates and the LAST thing any
+   * of them produced was un-executed printed tool markup rather than an answer.
+   *
+   * Carried so the call site can still deliver the SPECIFIC "the model printed
+   * the call as text" notice (which names Free Mode and the concrete way out)
+   * instead of degrading to the generic undeliverable notice, and so the
+   * degradation telemetry names the endpoint that actually emitted the markup.
+   * Never carries the markup TEXT: it is never shown, and passing it around is
+   * how it ends up persisted by accident.
+   */
+  markupDegradation?: {
+    toolName: string;
+    /**
+     * Absent when the caller supplied no `brainConfig` — the degradation is
+     * still real and must still be reported. Tying the SIGNAL to knowing the
+     * endpoint dropped the honest notice entirely on that path and shipped an
+     * empty turn (caught by `final-answer-guard.test.ts` while building this).
+     */
+    endpoint?: ModelConfig;
+    markupChars: number;
+  };
 }
 
 /**
@@ -287,6 +343,22 @@ function readUsage(result: unknown): RawUsage | undefined {
   return (result as { usage?: RawUsage }).usage ?? undefined;
 }
 
+/** `provider/model`, or a stable placeholder when the slot is unknown. */
+function endpointLabelFor(endpoint: ModelConfig | undefined): string {
+  return endpoint ? `${endpoint.provider}/${endpoint.model}` : "the brain model";
+}
+
+/**
+ * One attempt's outcome. `text` is non-empty ONLY when the endpoint delivered a
+ * usable answer — `markup` says the attempt produced un-executed printed tool
+ * markup instead, which is a failure wearing an answer's clothes.
+ */
+interface AttemptOutcome {
+  text: string;
+  usage?: RawUsage;
+  markup?: { toolName: string; chars: number };
+}
+
 /**
  * Run ONE tool-less final-answer generation on `model`.
  * Returns `null` when the endpoint produced nothing (or threw).
@@ -294,8 +366,10 @@ function readUsage(result: unknown): RawUsage | undefined {
 async function attemptOnce(
   model: Parameters<typeof generateText>[0]["model"],
   args: Omit<FinalAnswerAttemptArgs, "model">,
-  endpoint?: ModelConfig
-): Promise<{ text: string; usage?: RawUsage } | null> {
+  endpoint?: ModelConfig,
+  /** Override the per-call deadline — see `markupAttemptDeadlineMs`. */
+  deadlineMs?: number
+): Promise<AttemptOutcome | null> {
   try {
     const result = await generateText({
       model,
@@ -313,9 +387,36 @@ async function attemptOnce(
       // PM #98 — the RECOVERY ladder. It runs precisely when the brain has
       // already failed, so an unbounded call here turns a recoverable turn
       // into a total silent failure.
-      abortSignal: callDeadlineSignal(args.abortSignal),
+      abortSignal: callDeadlineSignal(args.abortSignal, deadlineMs),
     });
     const text = (result.text || "").trim();
+    // PM #134 — a non-empty string is NOT proof of an answer. This ladder is
+    // tool-less by construction, so a model that decides the request needs a
+    // tool has no channel to call one and PRINTS the call as text instead. That
+    // text is un-executed work; shipping it is the failure the call-site gate
+    // exists to contain, and returning it HERE ends the ladder at this endpoint
+    // — the substitute cascade below is never entered, and (worse) the endpoint
+    // that just failed gets its breaker healed. Live incident 2026-09-07 (chat
+    // 560896d7): attempt 1 threw, attempt 2 returned 289 chars of printed
+    // `call_mcp_tool`, four healthy substitutes were never tried.
+    //
+    // `gateForcedAnswer` is used as a PREDICATE only. The success path returns
+    // the RAW `text`, byte-identical to what this function has always returned,
+    // so the call sites keep judging and persisting the exact same string.
+    const gate = gateForcedAnswer(text);
+    if (text && gate.degraded) {
+      console.warn(
+        `[Agent] Final-answer attempt on ${endpoint ? `${endpoint.provider}/${endpoint.model}` : "the brain model"} ` +
+          `printed a '${gate.toolName}' tool call as TEXT instead of answering — ` +
+          `not an answer, not a success; trying the next candidate.`
+      );
+      if (endpoint) recordModelFailure(endpoint.provider, endpoint.model, "markup");
+      return {
+        text: "",
+        usage: readUsage(result),
+        markup: { toolName: gate.toolName, chars: gate.text.length },
+      };
+    }
     if (text) {
       if (endpoint) recordModelSuccess(endpoint.provider, endpoint.model);
       return { text, usage: readUsage(result) };
@@ -396,6 +497,19 @@ export async function generateFinalAnswerWithFailover(
   // residual gate at each call site only CONTAINS.
   args = { ...args, systemPrompt: args.systemPrompt + FORCED_ANSWER_TOOL_OVERRIDE };
   let usage: RawUsage | undefined;
+  // PM #134 — the last printed-markup degradation seen on ANY rung, so an
+  // exhausted ladder can still report WHY nothing was delivered specifically
+  // rather than falling back to the generic undeliverable notice.
+  let markupDegradation: FinalAnswerResult["markupDegradation"];
+  const noteMarkup = (attempt: AttemptOutcome | null, endpoint: ModelConfig | undefined) => {
+    if (attempt?.markup) {
+      markupDegradation = {
+        toolName: attempt.markup.toolName,
+        endpoint,
+        markupChars: attempt.markup.chars,
+      };
+    }
+  };
 
   const fold = (u: RawUsage | undefined) => {
     // Attempts are sequential and each one's tokens are billable, so keep the
@@ -413,10 +527,11 @@ export async function generateFinalAnswerWithFailover(
   if (!brainTripped && !args.skipBrainRetry) {
     const first = await attemptOnce(args.model, args, brainConfig);
     fold(first?.usage);
+    noteMarkup(first, brainConfig);
     if (first?.text) return { text: first.text, usage, endpoint: brainConfig };
     if (abortSignal?.aborted) {
       logRecoveryAborted("after brain attempt 1", recoveryStartedAt);
-      return { text: "", usage };
+      return { text: "", usage, markupDegradation };
     }
 
     // ── Attempt 2 — one retry on the brain after a backoff ──────────────────
@@ -425,18 +540,32 @@ export async function generateFinalAnswerWithFailover(
     const nowTripped = brainConfig
       ? isModelCircuitOpen(brainConfig.provider, brainConfig.model)
       : false;
-    if (!nowTripped) {
+    // PM #134 — also skipped when attempt 1 PRINTED a tool call. That is the
+    // same class of evidence `skipBrainRetry` exists for: not a transient blip
+    // this endpoint may shake off in 2.5s, but a model that has lost the
+    // tool-calling channel under this exact context, which attempt 2 hands it
+    // again unchanged. Spending a backoff plus a second full generation to
+    // watch it fail identically only delays the substitute that can deliver.
+    if (first?.markup) {
+      console.warn(
+        `[Agent] Final answer — skipping the same-endpoint retry on ${endpointLabelFor(brainConfig)}: ` +
+          `attempt 1 printed a '${first.markup.toolName}' tool call as text, and the retry would ` +
+          `re-send the same context that caused it. Going straight to a substitute model.`
+      );
+    }
+    if (!nowTripped && !first?.markup) {
       await abortableSleep(retryBackoffMs(), abortSignal);
       if (abortSignal?.aborted) {
         logRecoveryAborted("during brain retry backoff", recoveryStartedAt);
-        return { text: "", usage };
+        return { text: "", usage, markupDegradation };
       }
       const second = await attemptOnce(args.model, args, brainConfig);
       fold(second?.usage);
+      noteMarkup(second, brainConfig);
       if (second?.text) return { text: second.text, usage, endpoint: brainConfig };
       if (abortSignal?.aborted) {
         logRecoveryAborted("after brain attempt 2", recoveryStartedAt);
-        return { text: "", usage };
+        return { text: "", usage, markupDegradation };
       }
     }
   } else if (brainTripped) {
@@ -463,7 +592,7 @@ export async function generateFinalAnswerWithFailover(
     ? `${brainConfig.provider}/${brainConfig.model}`
     : "the configured model";
   if (!brainConfig) {
-    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false), markupDegradation };
   }
 
   // Dedup by endpoint identity — `buildFinalAnswerPool` has none, so a slot
@@ -510,7 +639,7 @@ export async function generateFinalAnswerWithFailover(
         `substitute candidate's circuit is OPEN (${candidates.length} candidate(s): ` +
         `${candidates.map((c) => `${c.provider}/${c.model}`).join(", ") || "none configured"}).`
     );
-    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false), markupDegradation };
   }
 
   // Sprint 4 — the user may have chosen NOT to be silently switched. A
@@ -521,10 +650,24 @@ export async function generateFinalAnswerWithFailover(
       `[Agent] Final answer — ${endpointLabel} delivered nothing and degradation policy is ` +
         `"${policy}"; NOT substituting (${candidates.length} candidate(s) available).`
     );
-    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, true) };
+    return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, true), markupDegradation };
   }
 
-  const budgetMs = cascadeBudgetMs();
+  // PM #134 — the trigger is decided ONCE, here, from what the brain rungs
+  // actually produced, and never re-decided mid-cascade. A substitute that
+  // prints markup later must not retroactively shorten a cascade that started
+  // because the brain went silent: the budget a loop is running under has to be
+  // a constant, or "why did it stop early?" stops being answerable from a log.
+  const markupTriggered = markupDegradation !== undefined;
+  const budgetMs = markupTriggered ? markupCascadeBudgetMs() : cascadeBudgetMs();
+  const attemptDeadlineMs = markupTriggered ? markupAttemptDeadlineMs() : undefined;
+  if (markupTriggered) {
+    console.warn(
+      `[Agent] Final answer — cascade triggered by PRINTED MARKUP on ${endpointLabel}; ` +
+        `running on the short budget (${budgetMs}ms aggregate, ${attemptDeadlineMs}ms per attempt) ` +
+        `so an interactive turn is not spent waiting on a pool of degraded free models.`
+    );
+  }
   const cascadeStartedAt = Date.now();
 
   for (const substitute of candidates) {
@@ -569,8 +712,9 @@ export async function generateFinalAnswerWithFailover(
       continue; // e.g. vault key missing for THIS candidate — try the next one.
     }
 
-    const attempt = await attemptOnce(substituteModel, args, substitute);
+    const attempt = await attemptOnce(substituteModel, args, substitute, attemptDeadlineMs);
     fold(attempt?.usage);
+    noteMarkup(attempt, substitute);
     if (attempt?.text) {
       return {
         text: attempt.text,
@@ -583,11 +727,16 @@ export async function generateFinalAnswerWithFailover(
     }
     if (abortSignal?.aborted) {
       logRecoveryAborted(`after substitute ${substitute.provider}/${substitute.model}`, recoveryStartedAt);
-      return { text: "", usage };
+      return { text: "", usage, markupDegradation };
     }
   }
 
-  return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false) };
+  return {
+    text: "",
+    usage,
+    notice: undeliverableNotice(policy, endpointLabel, false),
+    markupDegradation,
+  };
 }
 
 /**

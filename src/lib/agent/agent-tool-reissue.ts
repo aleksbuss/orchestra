@@ -40,11 +40,13 @@ import {
   recordToolChannelDegradation,
 } from "@/lib/agent/degradation-telemetry";
 import {
-  extractHallucinatedToolCall,
   getLastAssistantText,
   getLastResponseToolText,
-  stripThinkingTags,
 } from "@/lib/agent/agent-response";
+import {
+  extractHallucinatedToolCall,
+  stripThinkingTags,
+} from "@/lib/agent/printed-tool-call";
 import type { AppSettings } from "@/lib/types";
 import type { RawUsage } from "@/lib/cost/accumulator";
 

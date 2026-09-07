@@ -803,10 +803,15 @@ export async function runAgent(options: RunAgentOptions) {
         );
       } else if (
         !moaResult.bypassed &&
+        !moaResult.degradedToSingleAgent &&
         moaResult.drafts.length > 0 &&
         moaResult.text &&
         !moaResult.text.startsWith("All MoA proposer agents failed")
       ) {
+        // `!degradedToSingleAgent` is LOAD-BEARING (PM #134 follow-up): a
+        // degraded result's text is the degradation NOTICE, which the string
+        // literal above does not match, so this branch used to inject it as
+        // "expert consensus" AND swallow the collapse warning below.
         const truncatedConsensus = moaResult.text.length > 5000
           ? moaResult.text.substring(0, 5000) + "\n\n...[TRUNCATED FOR CONTEXT LIMITS]..."
           : moaResult.text;
@@ -827,17 +832,12 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // turn" visible in logs for before/after comparison.
         console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total). A final tool-capable stream follows → 2 brain generations this turn (aggregator + stream).`);
       } else if (moaResult.degradedToSingleAgent) {
-        // Every proposer failed → the swarm produced no consensus and the
-        // stream below answers as a plain single agent WITHOUT the Skeptic
-        // audit. This is UNINTENDED (distinct from a Router bypass), and was
-        // previously silent — the operator saw a normal answer with no hint
-        // the swarm collapsed. Surface it like the sibling crash branch so a
-        // degraded turn is visibly degraded. Root cause is almost always
-        // unreliable proposer models (free-tier 429s — CLAUDE.md §1).
-        // PM #127 — name the cause the drafts actually REPORT, structurally.
-        // The old notice blamed free-tier rate limits for every collapse; when
-        // the provider had refused to serve the model at all, that sent the
-        // operator off to wait out a throttle that did not exist.
+        // The swarm produced no consensus and the stream below answers as a
+        // plain single agent WITHOUT the Skeptic audit. UNINTENDED (distinct
+        // from a Router bypass) and previously silent, so surface it.
+        // PM #127 — name the cause the drafts actually REPORT, structurally:
+        // blaming rate limits for a provider REFUSAL sent the operator off to
+        // wait out a throttle that did not exist.
         const refusedEndpoints = [
           ...new Set(
             moaResult.drafts
@@ -845,8 +845,12 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               .map((d) => `${d.resolvedProvider}/${d.resolvedModel}`)
           ),
         ];
+        // PM #134 follow-up — markup is now the common way here, and for it
+        // "rate limits" is false: every proposer ANSWERED. Read the reason.
         const causeLine =
-          refusedEndpoints.length > 0
+          moaResult.degradedReason === "markup"
+            ? "The proposers ANSWERED but printed their tool calls as text instead of executing them — a model-capability limit, not a rate limit. Use a stronger proposer model, or ask for a smaller, targeted change."
+            : refusedEndpoints.length > 0
             ? `The provider REFUSED to serve ${refusedEndpoints.join(", ")} to this account/app — no retry or wait will fix it. Pick a different proposer model` +
               (settings.freeMode?.enabled
                 ? ", or allow the paid fallback (Settings → Free Mode)."

@@ -124,14 +124,17 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
     ...actual,
     createModel: () =>
       new MockLanguageModelV3({
-        doGenerate: async () =>
-          ({
+        doGenerate: async (options) => {
+          promptLog.generates.push(JSON.stringify(options?.prompt ?? []));
+          return {
             content: [{ type: "text", text: modelOut.genText ?? modelOut.text }],
             finishReason: "stop",
             usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
             warnings: [],
-          }) as unknown as LanguageModelV3GenerateResult,
-        doStream: async () => {
+          } as unknown as LanguageModelV3GenerateResult;
+        },
+        doStream: async (options) => {
+          promptLog.streams.push(JSON.stringify(options?.prompt ?? []));
           if (modelOut.streamThrows) {
             const err = new Error(modelOut.streamThrows) as Error & { statusCode?: number };
             err.statusCode = 400; // matches the real AI_APICallError shape (postmortem evidence)
@@ -177,6 +180,18 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
 // double-counting"). Recording the `sources` shape therefore pins the
 // EXCLUSION directly, instead of doing arithmetic over a mutable store where a
 // double-count plus a compensating under-count would still sum correctly.
+/**
+ * Every prompt that actually reached the model, in call order — `doStream` into
+ * `streams`, `doGenerate` into `generates`. Without this the harness can assert
+ * what the model RETURNED but never what it was TOLD, and "what the final
+ * tool-capable stream was told" is exactly the surface the MoA injection
+ * branches decide (PM #134 follow-up).
+ */
+const promptLog = vi.hoisted(() => ({
+  streams: [] as string[],
+  generates: [] as string[],
+}));
+
 const foldCalls = vi.hoisted(() => ({ sources: [] as Array<Record<string, unknown>> }));
 
 vi.mock("@/lib/cost/accumulator", async (orig) => {
@@ -288,6 +303,8 @@ function resetHarness() {
   chatStoreFaults.failNextUpdateChat = 0;
   uiEvents.published.length = 0;
   uiEvents.throwOnPublish = false;
+  promptLog.streams.length = 0;
+  promptLog.generates.length = 0;
 }
 
 /** Total prompt+completion tokens the accumulator recorded for a chat. */
@@ -930,5 +947,81 @@ describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", {
       chat = await getChat(chatId);
     }
     expect(totalTokens(chat?.cumulativeUsage)).toBeGreaterThanOrEqual(65);
+  });
+});
+
+/**
+ * PM #134 follow-up — what the FINAL tool-capable stream is told when the swarm
+ * degraded.
+ *
+ * `runAgent` picks one of four MoA injection branches. The consensus branch used
+ * to be tested by nothing, and it matched first on any `moaResult.text` that was
+ * not the literal "All MoA proposer agents failed" string — which, once markup
+ * drafts started being dropped at assembly, included the degradation NOTICE. The
+ * degraded turn therefore injected "⚠️ the model printed a tool call as text"
+ * into the stream as "high-quality reference material from N expert agents", and
+ * swallowed the operator-facing collapse warning, because the branch that
+ * publishes it sat one `else if` later.
+ *
+ * The Router is a `generateObject` against a text-only mock, so it fails and
+ * falls back to the static personas — which is what makes this reachable: every
+ * static proposer then returns `modelOut.genText`.
+ */
+describe("agent integration — MoA injection branches (swarm)", { timeout: 60_000 }, () => {
+  const MARKUP =
+    "I'll write that file.\n<function=write_text_file>\n<parameter=file_path>x.ts</parameter>";
+
+  async function runSwarmTurn(chatId: string, genText: string) {
+    resetHarness();
+    modelOut.genText = genText;
+    modelOut.text = "FINAL_STREAM_ANSWER";
+    const { runAgent } = await import("./agent");
+    const { createChat } = await import("@/lib/storage/chat-store");
+    await createChat(chatId, "moa-injection");
+    const result = await runAgent({ chatId, userMessage: "do the thing", swarmEnabled: true });
+    await drain(result);
+    // The final tool-capable stream is the LAST doStream call of the turn.
+    return promptLog.streams.at(-1) ?? "";
+  }
+
+  it("a degraded turn injects NO consensus and DOES warn the operator", async () => {
+    const prompt = await runSwarmTurn(`integ-moa-degraded-${Date.now()}`, MARKUP);
+
+    // The notice must not be dressed up as expert consensus…
+    expect(prompt).not.toContain("Expert Consensus");
+    expect(prompt).not.toContain("printed the call as text");
+    expect(prompt).not.toContain("Expert Drafts to Synthesize");
+    // …and the markup itself must not be in the prompt either (the assembly
+    // filter), which is the other half of the same fix.
+    expect(prompt).not.toContain("<function=write_text_file>");
+    // …and the collapse must be SURFACED, not swallowed by the branch above it.
+    const reasons = uiEvents.published.map((e) => e.reason ?? "").join("\n");
+    expect(reasons).toContain("Swarm stopped");
+    // …naming the REAL cause. Every proposer answered, so the stock
+    // "unreliable models / rate limits" line would send the operator to wait
+    // out a throttle that does not exist (the PM #127 lesson, one branch over).
+    expect(reasons).toContain("printed their tool calls as text");
+    expect(reasons).not.toContain("rate limits");
+  });
+
+  it("control arm — a healthy swarm turn DOES put its drafts in the final stream's prompt", async () => {
+    // Without this the assertion above would pass just as well if the swarm
+    // never ran, or if MoA injected nothing at all on any turn.
+    //
+    // It asserts the DRAFT text rather than the "Expert Consensus" heading on
+    // purpose: `DEFAULT_SETTINGS` ships `aggregator.inlineSynthesis: true`, so a
+    // healthy synthesis turn takes the COLLAPSE branch (drafts injected via
+    // `buildInlineSynthesisInjection` under "Expert Drafts to Synthesize") and
+    // never reaches the consensus block. The first draft of this test asserted
+    // the heading and failed for exactly that reason.
+    const prompt = await runSwarmTurn(
+      `integ-moa-healthy-${Date.now()}`,
+      "A real expert draft with enough substance to survive every filter."
+    );
+
+    expect(prompt).toContain("A real expert draft");
+    expect(prompt).toContain("Expert Drafts to Synthesize");
+    const reasons = uiEvents.published.map((e) => e.reason ?? "").join("\n");
+    expect(reasons).not.toContain("Swarm stopped");
   });
 });

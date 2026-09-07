@@ -863,7 +863,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
           topic: "chat",
           chatId: options.chatId,
           projectId: options.projectId ?? null,
-          reason: `[MoA] Swarm stopped: all ${moaResult.drafts.length} expert proposers failed. This answer is from a single agent with no Skeptic audit. ${causeLine}`,
+          reason: `[MoA] Swarm stopped: no usable draft from ${moaResult.drafts.length} expert proposers. This answer is from a single agent with no Skeptic audit. ${causeLine}`,
         });
       } else if (moaResult.bypassed) {
         console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);

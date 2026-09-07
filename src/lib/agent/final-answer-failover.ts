@@ -156,10 +156,21 @@ function cascadeBudgetMs(): number {
  * budget and silently truncate a pool with healthy, untried models left in it.
  * So the per-attempt deadline is tightened ALONGSIDE it (below) — 90s only
  * makes sense as a bound once no single attempt can consume it. The two numbers
- * are a pair; changing one without the other brings PM #123 back.
+ * are a pair, and `markupAttemptDeadlineMs` CLAMPS to keep them one.
+ *
+ * What this bounds, precisely: the CASCADE, not the turn. Brain attempt 1 runs
+ * before `cascadeStartedAt` on the default 120s call deadline, and the aggregate
+ * is checked before STARTING an attempt, so an attempt already in flight runs
+ * its own deadline out. Worst case on a markup-triggered turn is therefore about
+ * 120s (brain) + 90s (cascade) + 30s (last attempt overshoot) ≈ 240s, not 90s.
+ * Attempt 2 is skipped on markup, which is what keeps it from being 360s.
  */
 function markupCascadeBudgetMs(): number {
-  return Number(process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS ?? 90_000);
+  const raw = Number(process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS ?? 90_000);
+  // A typo must not silently disable the bound. `NaN > x` is false, so an
+  // unparseable value would make the budget check never fire — an UNBOUNDED
+  // cascade, which is the opposite of what this function exists for.
+  return Number.isFinite(raw) && raw > 0 ? raw : 90_000;
 }
 
 /**
@@ -171,7 +182,15 @@ function markupCascadeBudgetMs(): number {
  * inside the 90s budget, which is the whole pool minus the brain.
  */
 function markupAttemptDeadlineMs(): number {
-  return Number(process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS ?? 30_000);
+  const raw = Number(process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS ?? 30_000);
+  const wanted = Number.isFinite(raw) && raw > 0 ? raw : 30_000;
+  // CLAMP, do not merely document (council review, 2026-09-07). The pair
+  // invariant was asserted only in a test, which means it held for the DEFAULTS
+  // and for nothing else: `ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS=120000` against
+  // the 90s budget re-creates PM #123 exactly — one hung candidate eats the
+  // whole aggregate and the healthy untried candidates are dropped. A third of
+  // the budget keeps room for the whole pool minus the brain.
+  return Math.min(wanted, Math.floor(markupCascadeBudgetMs() / 3));
 }
 
 export interface FinalAnswerAttemptArgs {
@@ -497,11 +516,23 @@ export async function generateFinalAnswerWithFailover(
   // residual gate at each call site only CONTAINS.
   args = { ...args, systemPrompt: args.systemPrompt + FORCED_ANSWER_TOOL_OVERRIDE };
   let usage: RawUsage | undefined;
-  // PM #134 — the last printed-markup degradation seen on ANY rung, so an
+  // PM #134 — the printed-markup degradation that TRIGGERED this recovery, so an
   // exhausted ladder can still report WHY nothing was delivered specifically
   // rather than falling back to the generic undeliverable notice.
+  //
+  // FIRST writer wins, not last (council review, 2026-09-07). The first cut kept
+  // the last markup seen on any rung, which is incoherent with the budget being
+  // decided once from the trigger, and misattributes the two consumers that
+  // matter. Concretely: the brain prints 289 chars of `call_mcp_tool`, a
+  // substitute then prints 40 chars of `search_web`, the ladder exhausts — and
+  // last-wins reports `search_web` on the SUBSTITUTE. The PM #82 compaction
+  // backstop then reads a degradation blamed on an endpoint whose context is not
+  // the one that needs compacting, and the operator notice attaches its
+  // Free-Mode steer to a model that may not even be the free one. The trigger is
+  // the causal answer to "why did failover run?", so it is the one to keep.
   let markupDegradation: FinalAnswerResult["markupDegradation"];
   const noteMarkup = (attempt: AttemptOutcome | null, endpoint: ModelConfig | undefined) => {
+    if (markupDegradation) return; // first wins — see above
     if (attempt?.markup) {
       markupDegradation = {
         toolName: attempt.markup.toolName,
@@ -665,7 +696,7 @@ export async function generateFinalAnswerWithFailover(
     console.warn(
       `[Agent] Final answer — cascade triggered by PRINTED MARKUP on ${endpointLabel}; ` +
         `running on the short budget (${budgetMs}ms aggregate, ${attemptDeadlineMs}ms per attempt) ` +
-        `so an interactive turn is not spent waiting on a pool of degraded free models.`
+        `so the substitute pool is not walked at full length on a degraded free tier.`
     );
   }
   const cascadeStartedAt = Date.now();

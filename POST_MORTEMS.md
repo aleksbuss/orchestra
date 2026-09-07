@@ -72,6 +72,20 @@ Note the asymmetry that hid this: the sibling recovery path (`tool-capable-retry
 
 ⚠️ The council run was itself degraded: 1 of 6 free models answered and its response was truncated by an output cap. Treat that review as partial coverage, not a clean bill.
 
+**Second council review (protake, 3 of 4 models, 2026-09-07) — three real defects in the first cut, all fixed; three claims refuted:**
+
+FIXED:
+- **A cancelled turn was recorded as a model degradation.** In `primary-stream-recovery.ts` the new telemetry block sat BEFORE the abort check. The ladder returns its `markupDegradation` on the abort paths too, so pressing stop right after the brain printed markup flagged the chat as degraded — and a flagged chat compacts harder on the next turn (PM #82). A cancel is not evidence about the model. The abort check now runs first. ⚠️ The regression test for this was VACUOUS on its first cut: an already-aborted signal returns at the guard on function entry and never reaches the branch, so the mutant survived. It now aborts the controller from inside the failover mock — abort DURING the ladder — and asserts the ladder was actually called.
+- **`markupDegradation` was last-writer-wins; it is now FIRST.** Last-wins is incoherent with the budget being decided once from the trigger, and misattributes both consumers: brain prints 289 chars of `call_mcp_tool`, a substitute then prints 40 chars of `search_web`, ladder exhausts — and the report named `search_web` on the SUBSTITUTE. PM #82's compaction backstop would then act on an endpoint whose context is not the one to compact, and the notice would attach its Free-Mode steer to a model that may not be the free one.
+- **The 90s/30s invariant was asserted only in a test, i.e. it held for the DEFAULTS and nothing else.** `ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS=120000` against the 90s budget re-created PM #123 exactly. The per-attempt deadline now CLAMPS to a third of the budget at runtime, and both getters reject non-finite/non-positive values — `NaN > x` is false, so a typo would have made the budget check never fire, i.e. an unbounded cascade.
+
+Also corrected, no code change: the short-budget log line claimed it kept an "interactive turn" from waiting. It bounds the CASCADE, not the turn — brain attempt 1 runs before `cascadeStartedAt` on the default 120s deadline, and the aggregate is checked before STARTING an attempt, so worst case is ~120 + 90 + 30 ≈ 240s. Skipping attempt 2 on markup is what keeps it from being ~360s.
+
+REFUTED against the code:
+- *"`primary-stream-recovery.ts` never re-runs `gateForcedAnswer`, unlike the other call site."* It does — the PM #132 gate is still there below the changed hunk. The reviewer saw the diff, not the file.
+- *"`skipBrainRetry` is set precisely when the primary stream printed markup, so the path that most needs the short budget never gets it."* `skipBrainRetry = isDeterministicClientError(args.error)` — it is set on a deterministic 4xx, not on markup. The premise is false.
+- *"A candidate can start just under the budget and overshoot it."* True, and pre-existing DOCUMENTED semantics shared with the 300s budget ("don't START a new attempt past budget; one already in flight keeps its own deadline"). Proportionally the short pair overshoots less (90+30 vs 300+120).
+
 **Known limit, not fixed here:** `moa-proposers.ts` heals the breaker on any non-empty proposer draft with no markup check — the same shape, on a different path (drafts feed an aggregator, not the user). Deliberately deferred; do not re-file as a new discovery.
 
 **Cost this buys, and the budget pair it forced:** the cascade now actually runs, and `cascadeBudgetMs()` is 300 000 ms (sized in PM #123 off live cascades measured at 270–427s). That budget was affordable only while the cascade was practically unreachable; markup is common on free models, so the same 300s would now land on a routine interactive turn. A markup-triggered cascade therefore gets its own budget: **90 000 ms aggregate (`ORCHESTRA_MARKUP_CASCADE_BUDGET_MS`) with a 30 000 ms per-attempt deadline (`ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS`)**.

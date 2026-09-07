@@ -2440,6 +2440,35 @@ describe("printed-markup drafts are never delivered (PM #134)", () => {
     expect(result.text).toContain("printed the call as text");
   }, 30_000);
 
+  it("an AGGREGATOR that prints markup flags the result, so agent.ts cannot inject the notice as consensus", async () => {
+    // protake review found the hole this closes. The aggregator/revisor gates
+    // replace `finalText` with the NOTICE — but that return carried no flag, so
+    // `runAgent`'s consensus branch (which only excludes `degradedToSingleAgent`
+    // and one string literal) injected the notice as "a pre-computed consensus
+    // from N expert agents". Fixing the markup and leaving its REPLACEMENT to do
+    // the same thing is not a fix.
+    mockedGenerateObject.mockResolvedValueOnce(personas(3) as never);
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "draft one" } as never)
+      .mockResolvedValueOnce({ text: "draft two" } as never)
+      .mockResolvedValueOnce({ text: "draft three" } as never)
+      // clean drafts, then the AGGREGATOR degrades
+      .mockResolvedValueOnce({ text: MARKUP } as never);
+
+    const result = await runMoAEnsemble({
+      chatId: "c1",
+      userMessage: "do a thing",
+      history: [],
+      settings: fakeSettings(),
+    });
+
+    expect(result.text).toContain("printed the call as text");
+    expect(result.degradedReason).toBe("markup");
+    // NOT a proposer collapse — the drafts were fine, so the operator notice
+    // must not claim otherwise.
+    expect(result.degradedToSingleAgent).toBeFalsy();
+  });
+
   it("a degraded turn is never captured as a trace (the few-shot pool stays clean)", async () => {
     // `computeQualityScore` reads ENSEMBLE signals only — proposer ratio here is
     // a perfect 3/3 — so a turn whose text is the degradation notice scores well

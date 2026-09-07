@@ -508,9 +508,17 @@ const STEP_LIMIT_PAUSE_NOTICE =
  * The phrase "printed the call as text" is asserted by `final-answer-guard.test.ts`
  * — keep it in the base sentence.
  */
-/** A `:free` OpenRouter id — the suffix is the whole signal (`free-mode.ts`). */
+/**
+ * A free OpenRouter id. The `:free` SUFFIX is the usual signal, but it is not
+ * the only one: `openrouter/free` is the free auto-router and carries no suffix
+ * at all — and it is a real value in this operator's config (`utilityModel`).
+ * Missing it would put the notice back in the exact failure this fix exists to
+ * remove: telling the operator to switch to a "stronger" model that is free too
+ * (protake review). Anchored, so a model merely NAMED "…free-tier" is unaffected.
+ */
 function isFreeModelId(model: string | undefined): boolean {
-  return /:free$/i.test((model ?? "").trim());
+  const id = (model ?? "").trim();
+  return /:free$/i.test(id) || /(^|\/)free$/i.test(id);
 }
 
 export function buildToolMarkupDegradationNotice(settings?: AppSettings): string {

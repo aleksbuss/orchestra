@@ -1038,6 +1038,10 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
     return {
       text: finalText,
+      // The two gates above may have replaced `finalText` with the NOTICE. A
+      // notice is not a consensus — without this flag `agent.ts` injects it as
+      // "a pre-computed consensus from N expert agents" (PM #134 follow-up 2).
+      ...(degradedText ? { degradedReason: "markup" as const } : {}),
       drafts,
       aggregationLatencyMs,
       totalLatencyMs,

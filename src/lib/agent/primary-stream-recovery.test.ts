@@ -717,6 +717,28 @@ describe("recoverPrimaryStreamFailure — a cancel is not a degradation (PM #134
     expect(mockedRecordDegradation).not.toHaveBeenCalled();
   });
 
+  it("names the SUBSTITUTE that printed the markup, not the brain slot", async () => {
+    // Self-audit gap: replacing `markupDegradation.endpoint ?? args.brainConfig`
+    // with a bare `args.brainConfig` left the whole suite green. Reachable
+    // whenever the brain rungs are skipped and the FIRST markup comes from a
+    // substitute.
+    const SUB: ModelConfig = { provider: "openrouter", model: "vendor/substitute:free" };
+    mockedFailover.mockResolvedValueOnce({
+      text: "",
+      usage: { totalTokens: 10 },
+      markupDegradation: { toolName: "search_web", endpoint: SUB, markupChars: 219 },
+    } as never);
+
+    await recoverPrimaryStreamFailure(baseArgs({ brainConfig: BRAIN_EP }));
+
+    expect(mockedRecordDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: SUB.provider, model: SUB.model })
+    );
+    expect(mockedRecordDegradation).not.toHaveBeenCalledWith(
+      expect.objectContaining({ model: BRAIN_EP.model })
+    );
+  });
+
   it("DOES record it when nothing was aborted — the abort check must not swallow the real case", async () => {
     mockedFailover.mockResolvedValueOnce({
       text: "",

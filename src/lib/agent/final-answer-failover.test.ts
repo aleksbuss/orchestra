@@ -1127,3 +1127,23 @@ describe("markup budget config guards (PM #134)", () => {
     expect(warnings()).toContain("90000ms aggregate");
   });
 });
+
+/**
+ * PM #134 self-audit — the ladder must NAME the endpoint that actually printed
+ * the markup even when the brain rungs never ran.
+ */
+describe("markup attribution when the brain is skipped (PM #134)", () => {
+  const MARKUP = "<function=search_web>\n<parameter=query>\nx\n</parameter>\n</function>";
+
+  it("attributes to the SUBSTITUTE when skipBrainRetry bypassed the brain", async () => {
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    const out = await generateFinalAnswerWithFailover(args({ skipBrainRetry: true }));
+
+    expect(out.text).toBe("");
+    // First-wins, and the brain never ran — so the first markup is the utility
+    // substitute's, and BRAIN must not be what the caller blames.
+    expect(out.markupDegradation?.endpoint).toEqual(UTILITY);
+    expect(out.markupDegradation?.endpoint).not.toEqual(BRAIN);
+  });
+});

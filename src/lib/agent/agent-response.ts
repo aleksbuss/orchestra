@@ -808,9 +808,18 @@ export async function resolveTurnContinuation(args: {
     // PM #134 — the ladder now rejects printed markup itself and keeps
     // cascading, so a degradation can reach here two ways: as text this gate
     // catches (defence in depth — the ladder is not the only producer of
-    // `attempt.text`), or as an EXHAUSTED ladder that reports the last markup it
-    // saw. Both deserve the same specific notice; the generic undeliverable one
-    // would drop the Free-Mode steer that tells the operator what to actually do.
+    // `attempt.text`), or as an EXHAUSTED ladder reporting the markup that
+    // TRIGGERED the recovery. Both deserve the same specific notice; the generic
+    // undeliverable one would drop the Free-Mode steer that tells the operator
+    // what to actually do.
+    //
+    // The `!text` guard on the second branch is load-bearing (self-audit
+    // 2026-09-07). Today no success path carries `markupDegradation`, so a
+    // rescued turn cannot reach it — but without the guard, adding that field to
+    // one success return for "telemetry completeness" would make this branch
+    // throw away a substitute's real answer and ship the degradation notice in
+    // its place. A cheap structural impossibility beats a convention nobody will
+    // remember.
     const degraded: { toolName: string; endpoint?: ModelConfig; markupChars: number } | null =
       gate.degraded
         ? {
@@ -821,7 +830,7 @@ export async function resolveTurnContinuation(args: {
             endpoint: attempt.endpoint ?? brainConfig,
             markupChars: text.length,
           }
-        : attempt.markupDegradation
+        : !text && attempt.markupDegradation
           ? {
               toolName: attempt.markupDegradation.toolName,
               endpoint: attempt.markupDegradation.endpoint ?? brainConfig,

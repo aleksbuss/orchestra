@@ -61,7 +61,8 @@ export type ModelFailureKind =
   | "throttle"
   | "server"
   | "unreachable"
-  | "unusable";
+  | "unusable"
+  | "markup";
 
 export interface ModelHealthEntry {
   provider: string;
@@ -86,6 +87,21 @@ export interface ModelHealthEntry {
   lastFailureAt: number | null;
   totalFailures: number;
   totalSuccesses: number;
+  /**
+   * PM #134 — `"markup"` failures counted on their OWN axis, which
+   * `recordModelSuccess` deliberately does NOT reset.
+   *
+   * `consecutiveFailures` is the right counter for availability: an endpoint
+   * that answers is up, so a success genuinely invalidates the failure run.
+   * Printed-tool-call degradation is not availability — it is context-driven,
+   * so the SAME endpoint alternates markup and clean answers within one chat
+   * and a consecutive counter can never reach a threshold. Measured on the
+   * three known incident chats (9891bb43, a8e1a43c, e20e9bc4): the longest run
+   * of consecutive markup turns is 2, so a reset-on-success counter at
+   * threshold 3 would have fired on 0 of 3. Counting markup separately fires on
+   * 2 of 3 (the third chat ends after two).
+   */
+  markupFailures: number;
   /** A half-open probe has been handed out and has not reported back yet. */
   probeInFlight: boolean;
 }
@@ -187,6 +203,7 @@ function entryFor(provider: string, model: string): ModelHealthEntry {
     lastFailureAt: null,
     totalFailures: 0,
     totalSuccesses: 0,
+    markupFailures: 0,
     probeInFlight: false,
   };
   store().set(key, fresh);
@@ -210,11 +227,16 @@ export function recordModelFailure(
   const entry = entryFor(provider, model);
   entry.consecutiveFailures += 1;
   entry.totalFailures += 1;
+  if (kind === "markup") entry.markupFailures += 1;
   entry.lastFailureKind = kind;
   entry.lastFailureAt = Date.now();
   entry.probeInFlight = false;
 
   const policy = policyFor(kind);
+  // `"markup"` is policed on its own non-resetting counter — see the field's
+  // doc comment for the measurement that forced this. Every other kind keeps
+  // the consecutive-run semantics, which are correct for availability.
+  const count = kind === "markup" ? entry.markupFailures : entry.consecutiveFailures;
 
   if (entry.openedAt !== null) {
     // A half-open probe (or a sibling proposer in the same fan-out) just
@@ -227,7 +249,7 @@ export function recordModelFailure(
     if (isPermanentFailureKind(kind)) entry.openedByKind = kind;
     return;
   }
-  if (entry.consecutiveFailures >= policy.threshold) {
+  if (count >= policy.threshold) {
     entry.openedAt = Date.now();
     entry.openedByKind = kind;
     const forSeconds = Math.round(policy.cooldownMs / 1000);
@@ -236,14 +258,32 @@ export function recordModelFailure(
         ? `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
             `the provider REFUSED to serve this model to this account/app. ` +
             `No retry can fix it; quarantining for ${forSeconds}s and substituting.`
-        : `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
-            `${entry.consecutiveFailures} consecutive failures (last: ${kind}). ` +
-            `Skipping this endpoint for ${forSeconds}s.`
+        : kind === "markup"
+          ? `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
+              `${entry.markupFailures} answers were printed tool calls rather than answers ` +
+              `(not necessarily consecutive). Skipping this endpoint for ${forSeconds}s.`
+          : `[ModelHealth] Circuit OPEN for ${modelHealthKey(provider, model)} — ` +
+              `${entry.consecutiveFailures} consecutive failures (last: ${kind}). ` +
+              `Skipping this endpoint for ${forSeconds}s.`
     );
   }
 }
 
-/** Record a successful (non-empty) generation — fully heals the endpoint. */
+/**
+ * Record a successful generation — heals the endpoint's AVAILABILITY state.
+ *
+ * PM #134 — deliberately does NOT clear `markupFailures`. A clean answer proves
+ * the endpoint is reachable and willing; it does not retract the fact that it
+ * has printed tool calls as text N times, because that degradation is driven by
+ * context, not by the endpoint being down. Consequence, on purpose: once an
+ * endpoint has reached the markup threshold, a post-cooldown probe that
+ * succeeds re-closes the circuit, but the NEXT markup answer re-opens it
+ * immediately rather than starting the count over.
+ *
+ * Callers must never "heal" an endpoint on output they have not judged — see
+ * `attemptOnce` in `final-answer-failover.ts`, where treating any non-empty
+ * string as success is the defect this note exists for.
+ */
 export function recordModelSuccess(provider: string, model: string): void {
   if (isDisabled()) return;
   const entry = entryFor(provider, model);

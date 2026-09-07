@@ -67,7 +67,9 @@ import {
   allowsModelSubstitution,
 } from "@/lib/agent/degradation-policy";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
-import { gateForcedAnswer } from "@/lib/agent/agent-response";
+import {
+  gateForcedAnswer,
+} from "@/lib/agent/printed-tool-call";
 import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import { updateChat } from "@/lib/storage/chat-store";
@@ -307,7 +309,25 @@ export async function recoverPrimaryStreamFailure(
       skipBrainRetry,
     });
 
-    if (!attempt.text) return { recovered: false };
+    if (!attempt.text) {
+      // PM #134 — the ladder now rejects printed markup and keeps cascading, so
+      // "no text" can mean "every candidate printed a tool call". Record that
+      // before giving up: the whole point of the degradation telemetry is that
+      // the NEXT turn compacts harder (PM #82 backstop), and an exhausted
+      // cascade is exactly when that matters most.
+      if (attempt.markupDegradation) {
+        recordToolChannelDegradation({
+          stage: "stream-recovery",
+          chatId: args.chatId,
+          provider: (attempt.markupDegradation.endpoint ?? args.brainConfig)?.provider,
+          model: (attempt.markupDegradation.endpoint ?? args.brainConfig)?.model,
+          toolName: attempt.markupDegradation.toolName,
+          markupChars: attempt.markupDegradation.markupChars,
+          promptTokens: attempt.usage?.inputTokens ?? attempt.usage?.promptTokens,
+        });
+      }
+      return { recovered: false };
+    }
     // A cancel that landed mid-recovery — don't persist an unwanted message.
     if (args.abortSignal?.aborted) return { recovered: false };
 

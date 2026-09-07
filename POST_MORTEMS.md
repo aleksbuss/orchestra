@@ -38,6 +38,60 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 134. The recovery ladder treated printed tool markup as a delivered answer, so the substitute cascade never ran and the failing endpoint got its breaker healed
+
+**Date:** 2026-09-07
+**Status:** RESOLVED
+**Severity:** P1 — every turn whose forced answer degraded ended with an honest-but-terminal notice while healthy substitute models sat unused, and the endpoint that degraded was actively kept in rotation.
+
+**Symptoms:** Operator report, "почему не запустился failover". Live turn (trace `7208c9d5`, chat `560896d7`, 2026-09-07 06:19:43Z, Free Mode, swarm off): the UI showed the violet `recovering` banner ("Model unavailable — trying another"), then the printed-tool-call notice. No substitute model was ever tried. Four healthy candidates were available.
+
+**Detection:** Reading the server log for the trace, then arguing from the ABSENCE of log lines. Every other exit path in `generateFinalAnswerWithFailover` logs (PM #118/#120/#123 made sure of that); the log carried exactly one `[Agent] Final-answer attempt failed … Invalid JSON response` and none of the cascade's six branch warnings. The one unlogged path is success — so attempt 2 had "succeeded", 18s after turn start, and the thing it succeeded with was 289 chars of printed `call_mcp_tool` (`tool_channel_degradation` telemetry, same trace).
+
+**Root Cause:** Two defects on one line in `attemptOnce` (`final-answer-failover.ts`, grep `if (text) {` above `recordModelSuccess`):
+
+1. **Non-empty ≠ answered.** The ladder is tool-less by construction, so a model that decides it needs a tool has no channel to call one and prints the call as text. That is a fat, non-empty string, so `if (text)` returned it and the function exited at the brain. Reaching the substitute cascade required BOTH brain attempts to yield falsy text (threw, or HTTP 200 with an empty body) — the ladder could rescue "the model went silent" and was blind to "the model returned garbage". The residual-markup gate DID exist, but one layer ABOVE, at each call site, running AFTER the ladder returned — too late to try another model.
+2. **The markup healed the breaker.** The same line called `recordModelSuccess`, which zeroes `consecutiveFailures` and clears `openedByKind`. A chronically degrading endpoint therefore never accumulated toward quarantine and Free Mode re-seated it the next turn.
+
+Note the asymmetry that hid this: the sibling recovery path (`tool-capable-retry.ts`) gates its `recordModelSuccess` on `turnHasDeliverableAnswer`, which has rejected printed markup since PM #81. The tool-less ladder never got that check.
+
+**Resolution:**
+- `printed-tool-call.ts` — new leaf module holding the pure detector (`stripThinkingTags`, `unwrapSerializedResponseCall`, `extractHallucinatedToolCall`, `printedActionCallName`, `gateForcedAnswer`, `asRecord`). Extracted because `agent-response.ts` imports the ladder, so the ladder importing the gate back out of it would be a runtime cycle (`import-cycle-contract.test.ts`). No re-export shim: the ~10 consumers were rewritten in the same commit, since a shim is a second permanent name for one half of one pipeline.
+- `attemptOnce` runs `gateForcedAnswer` as a PREDICATE. Markup ⇒ warn, `recordModelFailure(…, "markup")`, return no delivery. The success path returns the RAW text, byte-identical to before, so every call site still judges and persists the exact same string.
+- Sixth `ModelFailureKind`, `"markup"`, counted on its OWN `markupFailures` field that `recordModelSuccess` deliberately does not reset. **Measured, and this is why:** printed-markup degradation is context-driven, not availability, so an endpoint alternates markup and clean answers inside one chat. Marking the degraded turns in the three known incident chats gives `9891bb43: ..X.X....X`, `a8e1a43c: XX……X.`, `e20e9bc4: XX.` — longest CONSECUTIVE run is 2, so a reset-on-success counter at threshold 3 would have fired on 0 of 3. The separate counter fires on 2 of 3 (the third chat ends after two turns). Transient policy, not `"unusable"`: the same model answers fine in a fresh chat, so a 24h quarantine over one bad context is wrong.
+- The same-endpoint retry (attempt 2) is SKIPPED after markup — same class of evidence `skipBrainRetry` exists for. The retry re-sends the context that caused the degradation; spending a backoff plus a full generation to watch it fail identically only delays the substitute that can deliver.
+- `FinalAnswerResult.markupDegradation` carries the last markup seen on ANY rung (tool name, endpoint, char count — never the markup TEXT) so an exhausted ladder still emits the SPECIFIC notice, which names Free Mode and the concrete way out, instead of the generic undeliverable one. Its `endpoint` is optional: an early cut tied the signal to knowing the endpoint, which dropped the honest notice entirely on the `brainConfig: undefined` path and shipped an empty turn. `final-answer-guard.test.ts` caught it.
+- Both call sites now attribute the degradation to `attempt.endpoint ?? brainConfig`, not the brain slot. That was harmless only while the cascade never ran; it is a lie the moment it does.
+
+**False-positive rate, measured before merging** (the council's gate, threshold 0.1%): `printedActionCallName` over the full local corpus — 505 real assistant messages across 133 chats — flags 9, and **all 9 are true positives** from the known incident chats (`560896d7`, `9891bb43`, `a8e1a43c`, `e20e9bc4`). 0 false positives. This is also the frequency measurement PM #132's residual-gap paragraph asked for before anyone widens the strict path.
+
+**Known limit, not fixed here:** `moa-proposers.ts` heals the breaker on any non-empty proposer draft with no markup check — the same shape, on a different path (drafts feed an aggregator, not the user). Deliberately deferred; do not re-file as a new discovery.
+
+**Cost this buys, and the budget pair it forced:** the cascade now actually runs, and `cascadeBudgetMs()` is 300 000 ms (sized in PM #123 off live cascades measured at 270–427s). That budget was affordable only while the cascade was practically unreachable; markup is common on free models, so the same 300s would now land on a routine interactive turn. A markup-triggered cascade therefore gets its own budget: **90 000 ms aggregate (`ORCHESTRA_MARKUP_CASCADE_BUDGET_MS`) with a 30 000 ms per-attempt deadline (`ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS`)**.
+
+⚠️ **90s is EXACTLY the number PM #123 raised to 300s, and the two constants are a PAIR.** PM #123's defect was an aggregate budget smaller than one candidate's own 120s call deadline: a single hung candidate ate the whole budget and silently truncated a pool that still had healthy, untried models in it. 90s is only safe because the per-attempt deadline drops to 30s alongside it, so three full-length attempts — the whole pool minus the brain — fit inside the budget. **Changing one number without the other brings PM #123 back**; `final-answer-failover.test.ts` asserts the invariant (`perAttempt < budget`, and `budget / perAttempt >= 3`) through the same env indirection the code reads, so an operator override that breaks it fails the suite too. The trigger is decided ONCE at cascade entry from what the brain rungs produced and never re-decided mid-loop: a substitute that prints markup later must not retroactively shorten a cascade that started because the brain went silent.
+
+**Regression Coverage:** `final-answer-failover.test.ts` § "printed tool markup is not a delivery (PM #134)" — 9 cases on REAL captured bytes from two live dialects: no delivery, no heal, `"markup"` recorded, cascade continues to a substitute's prose, attempt 2 skipped, an EMPTY brain still gets its retry, endpoint attribution on an exhausted cascade, the no-`brainConfig` path, a printed `response` call still delivered, prose that merely mentions markup untouched, and a throttled cascade recording `throttle` not `markup`. `model-health.test.ts` § "markup failures (PM #134)" — 5 cases including the `9891bb43` interleaved pattern. `final-answer-failover.test.ts` § "markup cascade budget (PM #134)" — 5 more: the short budget is selected and announced, an empty brain does NOT get it, the budget really truncates and NAMES the untried candidates, the PM #123 pair invariant, and every substitute call carrying a bounded signal. All three fixes mutation-verified: reverting the gate turns 6 of 9 red (the 3 survivors are the negative cases, by design); making `recordModelSuccess` reset `markupFailures` turns 2 of 5 red; ignoring the markup budget turns 2 of 5 red.
+
+**Proven live, not only in tests** (2026-09-07, isolated data dir, real OpenRouter calls). The brain handle was stubbed with the real captured markup from chat `560896d7`; every substitute was built and called over the wire. Differential against the same code with the gate disabled:
+
+| | gate disabled (old) | fixed |
+| --- | --- | --- |
+| brain generations | 1 | 1 (attempt 2 skipped) |
+| answer delivered by | the brain | `z-ai/glm-5.2`, a real network call |
+| text is markup | **yes**, 219 chars | no — `«Два плюс два будет четыре.»` |
+| brain `totalSuccesses` | **1 — the breaker was healed** | 0 |
+| brain `markupFailures` / `lastFailureKind` | 0 / null | 1 / `markup` |
+| substitute attempted | **never** | yes |
+
+And the routing payoff, on the measured `9891bb43` pattern (markup interleaved with clean turns): `markupFailures` climbs 1→2→3 while `consecutiveFailures` is reset to 0 by every clean turn — the old counter would never have fired — the circuit opens on the third, and `selectFreeModels` then reports `excludedUnhealthy: 1` and seats a different brain. ⚠️ That last check is only valid with a WARM catalogue: a cold `tsx` probe has 0 catalogue ids and `selectFreeModels` falls back to the curated `FREE_*_FALLBACKS` lists, which bypass the circuit-health filter entirely. The first run of this check reported "did not route away" for exactly that reason. Call `loadCachedOpenRouterPricing()` first and assert the id count, or you are measuring the instrument.
+
+**Doc Updates:** this entry; `CLAUDE.md` § Agent runtime rule 15b.
+
+**Rule:** A generation is not a delivery. Before recording a model SUCCESS, judge the output — a tool-less path that accepts any non-empty string will accept printed tool markup, end the failover ladder at the endpoint that just failed, and heal its breaker on the way out.
+
+---
+
 ## 133. A write that lands AFTER the last green verification silently invalidates it, and the completion-honesty backstop cannot see it
 
 **Date:** 2026-09-06

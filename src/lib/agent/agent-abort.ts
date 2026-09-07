@@ -28,7 +28,9 @@ import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { reportTurnError, type TurnErrorContext } from "@/lib/agent/agent-stream";
 import { logStreamStall, type StreamWatchdog } from "@/lib/agent/stream-watchdog";
-import { stripThinkingTags } from "@/lib/agent/agent-response";
+import {
+  stripThinkingTags,
+} from "@/lib/agent/printed-tool-call";
 
 /**
  * Accumulates streamed prose so an aborted turn can keep what the user was

@@ -8,7 +8,10 @@
  */
 import type { ModelMessage } from "ai";
 import type { ChatMessage } from "@/lib/types";
-import { stripThinkingTags, unwrapSerializedResponseCall } from "@/lib/agent/agent-response";
+import {
+  stripThinkingTags,
+  unwrapSerializedResponseCall,
+} from "@/lib/agent/printed-tool-call";
 import { truncateToolOutputForHistory } from "@/lib/tools/output-truncate";
 
 const LLM_LOG_BORDER = "═".repeat(60);

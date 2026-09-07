@@ -1,5 +1,10 @@
 import type { ToolSet, ToolExecutionOptions } from "ai";
-import { asRecord, LOOP_GUARD_REPEAT_MARKER } from "@/lib/agent/agent-response";
+import {
+  LOOP_GUARD_REPEAT_MARKER,
+} from "@/lib/agent/agent-response";
+import {
+  asRecord,
+} from "@/lib/agent/printed-tool-call";
 import { publishUiSyncEvent } from "@/lib/realtime/event-bus";
 import { capToolResultSize } from "@/lib/agent/token-governor";
 

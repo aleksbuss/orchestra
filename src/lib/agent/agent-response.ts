@@ -482,15 +482,37 @@ const STEP_LIMIT_PAUSE_NOTICE =
  *
  * Free-Mode-aware because that is the exact configuration the operator hits: Free
  * Mode overlays a FREE model onto the brain slot, and free models are the ones
- * that drop the tool-calling channel on long builds. In that state the operator's
- * OWN configured `chatModel` (held unchanged under the overlay) is the stronger
- * option, so we NAME it and tell them precisely how to reach it. Off Free Mode we
- * fall back to the generic steer. Pure string builder in the failure branch — no
- * hot-path logic, no behavioural change to a healthy turn.
+ * that drop the tool-calling channel on long builds.
+ *
+ * CORRECTED (PM #134 follow-up). The paragraph here used to claim the overlay
+ * held `chatModel` UNCHANGED, and the code read `settings.chatModel` on that
+ * belief. Both were false: `applyFreeMode` (`free-mode.ts`) replaces the brain
+ * slot, and every call site hands this function POST-overlay settings, so the
+ * notice printed the RUNNING free brain under the label "your configured model …
+ * NOT the one running right now" — wrong model AND wrong claim. It now reads
+ * `freeModeDisplacedChatModel`, the carrier the overlay writes for exactly this.
+ *
+ * Second correction, same defect class one layer down: "turn off Free Mode, your
+ * own model is stronger" is only true if the displaced brain IS stronger. The
+ * operator's configured brain is itself a `:free` id
+ * (`nvidia/nemotron-3-ultra-550b-a55b:free`, read from `data/settings` 2026-09-07),
+ * so that advice lands them on another free model and the same dropout. When the
+ * displaced brain is free we say so and point at a displaced PAID tier instead —
+ * `freeModeDisplacedTiers` (PM #127) already carries those. Naming a model we
+ * cannot verify is stronger is how this bug happened; the branches below only
+ * ever claim what the settings actually support.
+ *
+ * Pure string builder in the failure branch — no hot-path logic, no behavioural
+ * change to a healthy turn.
  *
  * The phrase "printed the call as text" is asserted by `final-answer-guard.test.ts`
  * — keep it in the base sentence.
  */
+/** A `:free` OpenRouter id — the suffix is the whole signal (`free-mode.ts`). */
+function isFreeModelId(model: string | undefined): boolean {
+  return /:free$/i.test((model ?? "").trim());
+}
+
 export function buildToolMarkupDegradationNotice(settings?: AppSettings): string {
   const base =
     "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
@@ -498,17 +520,56 @@ export function buildToolMarkupDegradationNotice(settings?: AppSettings): string
     "accumulated context makes them drop the tool-calling channel.";
 
   if (settings?.freeMode?.enabled) {
-    const strong = settings.chatModel?.model?.replace(/^~/, "");
-    const named = strong
-      ? `your configured model \`${strong}\` is stronger and is NOT the one running right now`
-      : "your configured (non-free) model is stronger and is NOT the one running right now";
+    const preamble =
+      " **You are in Free Mode**, which overlays a free model onto the brain slot — that free model, not " +
+      "your configured one, is what degraded here.";
+    const quickUnblock =
+      " For a quick unblock without switching, ask for a **smaller, targeted change** (the agent will " +
+      "use `replace_in_file` on a small span).";
+    const displaced = settings.freeModeDisplacedChatModel?.model?.replace(/^~/, "");
+
+    // The strongest concrete steer the settings actually support, in order.
+    if (displaced && !isFreeModelId(displaced)) {
+      return (
+        base +
+        preamble +
+        ` To finish this build: your configured model \`${displaced}\` is stronger and is NOT the one ` +
+        "running right now, so **turn off Free Mode** and resend the task in a **fresh chat** (a fresh chat " +
+        "also drops the accumulated context that triggers this)." +
+        quickUnblock
+      );
+    }
+
+    if (displaced) {
+      // The displaced brain is `:free` too — turning Free Mode off just swaps
+      // one free model for another. Name a displaced PAID tier if one exists.
+      const paidTier = [
+        settings.freeModeDisplacedTiers?.frontier,
+        settings.freeModeDisplacedTiers?.balanced,
+        settings.freeModeDisplacedTiers?.fast,
+      ].find((c) => c?.model && !isFreeModelId(c.model));
+      const pointer = paidTier
+        ? ` — you already have \`${paidTier.model.replace(/^~/, "")}\` configured in the proposer tiers`
+        : "";
+      return (
+        base +
+        preamble +
+        ` But turning Free Mode OFF will not fix this: your own chat model \`${displaced}\` is a \`:free\` ` +
+        "model too, so you would land on the same dropout. To finish this build, point the **chat model at a " +
+        `paid one**${pointer}, and resend the task in a **fresh chat** (a fresh chat also drops the ` +
+        "accumulated context that triggers this)." +
+        quickUnblock
+      );
+    }
+
+    // No displaced record (settings never went through the overlay). Say only
+    // what is true: a free model degraded, and context is the trigger.
     return (
       base +
-      " **You are in Free Mode**, which overlays a free model onto the brain slot — that free model, not " +
-      `your configured one, is what degraded here. To finish this build: ${named}, so **turn off Free Mode** ` +
-      "and resend the task in a **fresh chat** (a fresh chat also drops the accumulated context that triggers " +
-      "this). For a quick unblock without switching, ask for a **smaller, targeted change** (the agent will " +
-      "use `replace_in_file` on a small span)."
+      preamble +
+      " To finish this build, switch the chat model to a paid one and resend the task in a **fresh chat** " +
+      "(a fresh chat also drops the accumulated context that triggers this)." +
+      quickUnblock
     );
   }
 

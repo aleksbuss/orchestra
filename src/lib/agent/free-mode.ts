@@ -521,6 +521,15 @@ export function applyFreeMode(settings: AppSettings): {
         frontier: settings.proposerTiers?.frontier,
         skeptic: settings.proposerTiers?.skeptic,
       },
+      // PM #134 follow-up — same for the BRAIN slot, which `chatModel` above is
+      // about to overwrite. Without this the only surviving record of the
+      // operator's own brain is gone by the time anything downstream wants to
+      // NAME it, and `settings.chatModel` silently means "the free overlay"
+      // (the degradation notice read it as "your configured model"). First
+      // capture wins, exactly like the tiers: re-applying the overlay to
+      // already-overlaid settings must not record a FREE model as "displaced".
+      freeModeDisplacedChatModel:
+        settings.freeModeDisplacedChatModel ?? settings.chatModel,
     },
     selection,
     suppressedByPrivacyMode: false,

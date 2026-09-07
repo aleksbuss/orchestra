@@ -24,6 +24,7 @@ import {
   buildToolMarkupDegradationNotice,
 } from "./agent-response";
 import { isChatDegraded, resetChatDegradation } from "./degradation-telemetry";
+import { applyFreeMode } from "./free-mode";
 import { subscribeUiSyncEvents } from "@/lib/realtime/event-bus";
 import type { UiSyncEvent } from "@/lib/realtime/types";
 
@@ -270,22 +271,93 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.uiNotice).toContain("write_text_file");
   });
 
-  it("Free-Mode-aware notice NAMES the configured strong model and steers off Free Mode", () => {
-    // The council-endorsed steer (memory: orchestra-free-model-toolcall-limit):
-    // when Free Mode is on, the degraded brain is the FREE overlay, and the
-    // operator's own configured chatModel is the stronger option — name it.
-    const freeSettings = {
+  // PM #134 follow-up — these four run the notice on settings produced by the
+  // REAL overlay (`applyFreeMode`), never on a hand-built object.
+  //
+  // The test they replace built `freeMode.enabled` next to a PAID `chatModel`
+  // and asserted the notice named it. Production cannot reach that state: the
+  // overlay overwrites `chatModel` before any call site sees the settings, so
+  // the assertion passed while the shipped notice printed the RUNNING free
+  // brain and called it "your configured model … NOT the one running right
+  // now". A green test over an impossible state is the bug's hiding place, so
+  // the shape under test is now the shape production builds.
+  it("Free-Mode notice names the DISPLACED brain, never the running free overlay", () => {
+    const raw = {
       chatModel: { provider: "openrouter", model: "~deepseek/deepseek-v4-flash-latest", apiKey: "k" },
       freeMode: { enabled: true },
     } as unknown as AppSettings;
-    const notice = buildToolMarkupDegradationNotice(freeSettings);
-    // Base phrase pinned elsewhere stays present.
+    const { settings: overlaid } = applyFreeMode(raw);
+
+    // Precondition the old test silently violated: the overlay REPLACED the brain.
+    expect(overlaid.chatModel.model).not.toBe("~deepseek/deepseek-v4-flash-latest");
+
+    const notice = buildToolMarkupDegradationNotice(overlaid);
     expect(notice).toContain("printed the call as text");
-    // Names the configured model, tilde stripped, and the Free-Mode escalation.
+    // Names the DISPLACED model, tilde stripped …
     expect(notice).toContain("deepseek/deepseek-v4-flash-latest");
     expect(notice).not.toContain("~deepseek");
-    expect(notice).toContain("Free Mode");
+    // … and never the free model that is actually running.
+    expect(notice).not.toContain(overlaid.chatModel.model);
+    expect(notice).toContain("turn off Free Mode");
     expect(notice).toContain("fresh chat");
+  });
+
+  it("Free-Mode notice does NOT say 'turn off Free Mode' when the displaced brain is itself :free", () => {
+    // The operator's real configuration (data/settings, 2026-09-07): the
+    // configured brain is a `:free` id, so "turn Free Mode off, your model is
+    // stronger" lands them on another free model and the same dropout.
+    const raw = {
+      chatModel: {
+        provider: "openrouter",
+        model: "nvidia/nemotron-3-ultra-550b-a55b:free",
+        apiKey: "k",
+      },
+      proposerTiers: {
+        frontier: { provider: "openrouter", model: "deepseek/deepseek-chat", apiKey: "k" },
+      },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(applyFreeMode(raw).settings);
+
+    expect(notice).toContain("printed the call as text");
+    expect(notice).not.toContain("turn off Free Mode");
+    expect(notice).toContain("will not fix this");
+    // Points at the displaced PAID tier instead of a free one.
+    expect(notice).toContain("deepseek/deepseek-chat");
+    expect(notice).toContain("fresh chat");
+  });
+
+  it("Free-Mode notice claims nothing about a stronger model when no paid tier was displaced", () => {
+    const raw = {
+      chatModel: { provider: "openrouter", model: "z-ai/glm-5.2:free", apiKey: "k" },
+      proposerTiers: {
+        frontier: { provider: "openrouter", model: "some/other:free", apiKey: "k" },
+      },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(applyFreeMode(raw).settings);
+
+    expect(notice).not.toContain("turn off Free Mode");
+    expect(notice).toContain("will not fix this");
+    // No paid tier exists, so no model is offered as the alternative.
+    expect(notice).not.toContain("configured in the proposer tiers");
+    expect(notice).not.toContain("some/other:free");
+  });
+
+  it("Free-Mode notice stays honest when settings never went through the overlay", () => {
+    // Defensive branch: `freeMode.enabled` with no displaced record. It must not
+    // invent a stronger model — naming one it cannot verify is how this bug began.
+    const noOverlay = {
+      chatModel: { provider: "openrouter", model: "z-ai/glm-5.2:free", apiKey: "k" },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(noOverlay);
+
+    expect(notice).toContain("printed the call as text");
+    expect(notice).toContain("Free Mode");
+    expect(notice).toContain("switch the chat model to a paid one");
+    expect(notice).not.toContain("turn off Free Mode");
+    expect(notice).not.toContain("z-ai/glm-5.2:free");
   });
 
   it("Off Free Mode the notice keeps the generic steer and names no overlay", () => {

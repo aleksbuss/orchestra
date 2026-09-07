@@ -239,6 +239,20 @@ export interface AppSettings {
     Record<"fast" | "balanced" | "frontier" | "skeptic", ModelConfig>
   >;
   /**
+   * INTERNAL — the BRAIN slot the Free Mode overlay displaced, same discipline
+   * and same first-capture-wins rule as `freeModeDisplacedTiers` above.
+   *
+   * PM #134 follow-up. The overlay replaces `chatModel` too
+   * (`applyFreeMode`), so any post-overlay reader of `settings.chatModel` is
+   * looking at the RUNNING free model, not the operator's configuration. The
+   * degradation notice read exactly that and printed the free brain under the
+   * label "your configured model … NOT the one running right now" — both halves
+   * false. The tiers got a carrier in PM #127 and the brain never did; this is
+   * it. Nothing routes on this field — it exists so an operator-facing message
+   * can name what the overlay took away.
+   */
+  freeModeDisplacedChatModel?: ModelConfig;
+  /**
    * Persistent successful-trace memory (PM #51). When enabled, Orchestra
    * captures MoA runs that meet a quality bar (proposer consensus,
    * clean critic, low latency) and stores them under `data/traces/`.

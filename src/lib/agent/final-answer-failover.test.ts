@@ -904,16 +904,19 @@ describe("printed tool markup is not a delivery (PM #134)", () => {
     expect(calledModels()).toEqual(["brain-handle", "brain-handle"]);
   });
 
-  it("reports WHICH endpoint printed the markup when the whole cascade degrades", async () => {
-    mockedGenerateText.mockResolvedValue({ text: LIVE_DOTS_MARKUP } as never);
+  it("reports the TRIGGERING markup when the whole cascade degrades — first wins, not last", async () => {
+    // Council review 2026-09-07: last-wins misattributes both consumers. The
+    // brain's markup is the causal answer to "why did failover run?", and it is
+    // the brain's context that PM #82's compaction backstop must act on.
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: LIVE_DOTS_MARKUP } as never) // brain — write_text_file
+      .mockResolvedValue({ text: LIVE_FUNCTIONARY_MARKUP } as never); // substitutes — search_web
 
     const out = await generateFinalAnswerWithFailover(args({ settings: multiPoolSettings() }));
 
     expect(out.text).toBe("");
-    expect(out.markupDegradation?.toolName).toBe("write_text_file");
-    // The LAST endpoint tried, not the brain slot — naming the brain is the
-    // telemetry lie that only stayed harmless while the cascade never ran.
-    expect(out.markupDegradation?.endpoint).toEqual(BALANCED);
+    expect(out.markupDegradation?.toolName).toBe("write_text_file"); // the brain's, not search_web
+    expect(out.markupDegradation?.endpoint).toEqual(BRAIN);
     expect(out.markupDegradation?.markupChars).toBe(LIVE_DOTS_MARKUP.length);
   });
 
@@ -1081,5 +1084,46 @@ describe("markup cascade budget (PM #134)", () => {
 
     expect(out.text).toBe("rescued");
     expect(attemptDeadlines().every((d) => d === 1)).toBe(true);
+  });
+});
+
+/**
+ * PM #134, council review 2026-09-07 — the budget pair must hold at RUNTIME,
+ * not only for the defaults a test happens to read.
+ */
+describe("markup budget config guards (PM #134)", () => {
+  const MARKUP = "<function=search_web>\n<parameter=query>\nx\n</parameter>\n</function>";
+
+  afterEach(() => {
+    delete process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS;
+    delete process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS;
+  });
+
+  function warnings(): string {
+    return vi.mocked(console.warn).mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  it("clamps a per-attempt deadline that would exceed the budget — PM #123 cannot be re-created by env", async () => {
+    // The exact hostile config: one attempt allowed to outlive the whole budget.
+    process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS = "90000";
+    process.env.ORCHESTRA_MARKUP_ATTEMPT_DEADLINE_MS = "120000";
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    await generateFinalAnswerWithFailover(args());
+
+    // Clamped to a third of the budget, so the whole pool still fits.
+    expect(warnings()).toContain("30000ms per attempt");
+    expect(warnings()).not.toContain("120000ms per attempt");
+  });
+
+  it("an unparseable budget falls back to the default instead of disabling the bound", async () => {
+    // `NaN > x` is false, so a garbage value would make the budget check never
+    // fire — an UNBOUNDED cascade, the opposite of the intent.
+    process.env.ORCHESTRA_MARKUP_CASCADE_BUDGET_MS = "not-a-number";
+    mockedGenerateText.mockResolvedValue({ text: MARKUP } as never);
+
+    await generateFinalAnswerWithFailover(args());
+
+    expect(warnings()).toContain("90000ms aggregate");
   });
 });

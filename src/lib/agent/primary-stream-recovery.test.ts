@@ -679,3 +679,61 @@ describe("recoverPrimaryStreamFailure — residual markup gate (PM #132)", () =>
     expect(mockedRecordDegradation).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * PM #134, council review 2026-09-07 — a CANCELLED turn must not be recorded as
+ * a model degradation.
+ *
+ * The ladder returns its `markupDegradation` on the abort paths too, so the
+ * first cut — which recorded telemetry and only then checked the abort signal —
+ * flagged the chat as degraded for a turn the USER stopped. A flagged chat
+ * compacts harder on the next turn (PM #82 backstop), so this quietly punishes
+ * the operator for pressing stop.
+ */
+describe("recoverPrimaryStreamFailure — a cancel is not a degradation (PM #134)", () => {
+  const BRAIN_EP: ModelConfig = { provider: "openrouter", model: "vendor/brain:free" };
+
+  it("does NOT record degradation telemetry when the caller aborted MID-LADDER", async () => {
+    // The abort must land DURING the ladder, not before it. An
+    // already-aborted signal returns at the guard on entry and never reaches
+    // the branch under test — the first version of this test did exactly that
+    // and survived mutation, i.e. proved nothing.
+    const controller = new AbortController();
+    mockedFailover.mockImplementationOnce(async () => {
+      controller.abort(); // the operator presses stop while the ladder runs
+      return {
+        text: "",
+        usage: { totalTokens: 10 },
+        markupDegradation: { toolName: "search_web", endpoint: BRAIN_EP, markupChars: 219 },
+      } as never;
+    });
+
+    const out = await recoverPrimaryStreamFailure(
+      baseArgs({ abortSignal: controller.signal, brainConfig: BRAIN_EP })
+    );
+
+    expect(mockedFailover).toHaveBeenCalled(); // the branch was actually reached
+    expect(out.recovered).toBe(false);
+    expect(mockedRecordDegradation).not.toHaveBeenCalled();
+  });
+
+  it("DOES record it when nothing was aborted — the abort check must not swallow the real case", async () => {
+    mockedFailover.mockResolvedValueOnce({
+      text: "",
+      usage: { totalTokens: 10 },
+      markupDegradation: { toolName: "search_web", endpoint: BRAIN_EP, markupChars: 219 },
+    } as never);
+
+    const out = await recoverPrimaryStreamFailure(baseArgs({ brainConfig: BRAIN_EP }));
+
+    expect(out.recovered).toBe(false);
+    expect(mockedRecordDegradation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "stream-recovery",
+        toolName: "search_web",
+        model: BRAIN_EP.model,
+        markupChars: 219,
+      })
+    );
+  });
+});

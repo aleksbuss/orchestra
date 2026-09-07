@@ -315,6 +315,14 @@ export async function recoverPrimaryStreamFailure(
       // before giving up: the whole point of the degradation telemetry is that
       // the NEXT turn compacts harder (PM #82 backstop), and an exhausted
       // cascade is exactly when that matters most.
+      //
+      // The abort check comes FIRST (council review, 2026-09-07). The ladder
+      // returns its `markupDegradation` on the abort paths too, so recording
+      // before this check flags the chat as degraded for a turn the USER
+      // cancelled — and a flagged chat compacts harder on the next turn. A
+      // cancel is not evidence about the model. The first cut had these two
+      // the wrong way round.
+      if (args.abortSignal?.aborted) return { recovered: false };
       if (attempt.markupDegradation) {
         recordToolChannelDegradation({
           stage: "stream-recovery",

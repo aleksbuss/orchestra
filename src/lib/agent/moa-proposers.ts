@@ -576,9 +576,11 @@ export async function runProposerFanOut(
           // the call as text, and that markup is a fat non-empty string. Healing
           // the breaker on it is the same defect the forced-answer ladder had:
           // an endpoint that degrades every turn never accumulates toward
-          // quarantine. The draft is still KEPT — `moa.ts` gates it at the three
-          // places that would ship it to the user, and discarding it here would
-          // silently shrink the ensemble.
+          // quarantine. The draft is still RETURNED from here — the fan-out's job
+          // is to report what each proposer produced, including the failure kind.
+          // `moa.ts` drops it where `successfulDrafts` is assembled, so it reaches
+          // neither a delivery path nor a prompt (PM #134 follow-up); returning it
+          // keeps the full record in `MoAResult.drafts` for the DAG and telemetry.
           if ((result.text ?? "").trim().length > 0) {
             if (gateForcedAnswer(result.text ?? "").degraded) {
               console.warn(

@@ -84,38 +84,16 @@ export {
 
 import { generateDynamicSwarm, type RouterGoalContext } from "@/lib/agent/moa-router";
 import { getActiveGoal } from "@/lib/storage/goal-store";
-import { gateForcedAnswer } from "@/lib/agent/printed-tool-call";
+// The printed-markup draft predicate + the "longest CLEAN draft" picker live in
+// the leaf module (PM #134): they are pure string logic, and keeping them there
+// lets their tests reach them directly now that the assembly filter below makes
+// the per-path backstops unreachable through `runMoAEnsemble`.
+import {
+  isPrintedMarkupDraft,
+  pickDeliverableDraft,
+} from "@/lib/agent/printed-tool-call";
 import { buildToolMarkupDegradationNotice } from "@/lib/agent/agent-response";
 import type { GoalTask } from "@/lib/types";
-
-/**
- * PM #134 (MoA half) — a proposer draft that is PRINTED TOOL MARKUP is
- * un-executed work, not an answer.
- *
- * Proposers run with `tools: undefined`, exactly like the forced-answer ladder,
- * so the same failure applies: a model that decides it needs a tool has no
- * channel to call one and prints the call as text. `moa.ts` had THREE paths that
- * ship a draft to the user verbatim and none of them looked:
- *   1. `successfulDrafts.length === 1` — the lone draft is returned as-is.
- *   2. the tournament winner — "the winning draft (verbatim) is the final answer".
- *   3. the aggregation-error fallback — the LONGEST draft.
- * Path 3 is the sharp one: markup blobs measured 16–19 KB in the incident chats,
- * so "longest" actively PREFERS the garbage, and an aggregation failure is
- * exactly what a degraded free tier produces alongside the markup.
- *
- * Used as a PREDICATE only, the same discipline as `attemptOnce`: the text that
- * ships is the raw draft, so what is judged is what is stored.
- */
-function isPrintedMarkupDraft(text: string): boolean {
-  return gateForcedAnswer(text ?? "").degraded;
-}
-
-/** The longest draft that is not printed markup, or null when every one is. */
-function pickDeliverableDraft<T extends { text: string }>(drafts: readonly T[]): T | null {
-  const clean = drafts.filter((d) => !isPrintedMarkupDraft(d.text));
-  if (clean.length === 0) return null;
-  return clean.reduce((a, b) => (a.text.length > b.text.length ? a : b));
-}
 
 /** Depth-first flatten of a goal tree — subtasks count as real work too. */
 function flattenGoalTasks(tasks: readonly GoalTask[] | undefined): GoalTask[] {
@@ -547,8 +525,25 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     })
   );
 
-  const successfulDrafts = drafts.filter((d) => isSuccessfulDraft(d.text));
-  console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded.`);
+  // PM #134 follow-up — a printed tool call is not a DRAFT either. The first cut
+  // gated only the paths that DELIVER a draft, leaving the CONTEXT path open:
+  // `successfulDrafts` also feeds the inline-synthesis SYSTEM prompt of the final
+  // TOOL-CAPABLE stream, the aggregator prompt, the tournament judges, and the
+  // disagreement embeddings — markup there is PM #81 few-shot poison. Filtered
+  // HERE, at the single assembly point, because four readers that must each
+  // remember to sanitize is the drift that left `primary-stream-recovery.ts`
+  // ungated in PM #132. Full write-up + the four surfaces: PM #134.
+  const answered = drafts.filter((d) => isSuccessfulDraft(d.text));
+  const successfulDrafts: typeof answered = [];
+  let markupDraftCount = 0;
+  for (const d of answered) {
+    // One gate pass per draft — these blobs are kilobytes, the regexes are not free.
+    if (isPrintedMarkupDraft(d.text)) markupDraftCount++;
+    else successfulDrafts.push(d);
+  }
+  const droppedNote =
+    markupDraftCount > 0 ? ` (${markupDraftCount} printed a tool call as text and was dropped).` : ".";
+  console.log(`[MoA] All proposers done in ${proposerLatency}ms. ${successfulDrafts.length}/${drafts.length} succeeded${droppedNote}`);
 
   // If zero drafts succeeded, return a fallback. The `degradedToSingleAgent`
   // flag lets `runAgent` surface the collapse to the operator (the swarm was
@@ -557,8 +552,20 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
   // matched "All MoA proposer agents failed" text skips consensus injection
   // and the turn looks like a healthy single-agent answer.
   if (successfulDrafts.length === 0) {
+    // Two causes, two messages: when every draft that ANSWERED was printed
+    // markup, the keys are fine and the MODEL is degraded — "check your model
+    // configuration and API keys" would send the operator to the wrong place.
+    if (markupDraftCount > 0) {
+      console.warn(
+        `[MoA] All ${markupDraftCount} draft(s) that answered are PRINTED tool calls, not answers — ` +
+          `delivering an honest notice instead of markup.`
+      );
+    }
     return {
-      text: "All MoA proposer agents failed. Please check your model configuration and API keys.",
+      text:
+        markupDraftCount > 0
+          ? buildToolMarkupDegradationNotice(settings)
+          : "All MoA proposer agents failed. Please check your model configuration and API keys.",
       degradedToSingleAgent: true,
       drafts,
       aggregationLatencyMs: 0,
@@ -569,22 +576,6 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
 
   // If only one draft succeeded, skip aggregation
   if (successfulDrafts.length === 1) {
-    // PM #134 — but a lone draft that is PRINTED MARKUP is not an answer, and
-    // this path ships it verbatim. `isSuccessfulDraft` only checks for a body.
-    if (isPrintedMarkupDraft(successfulDrafts[0].text)) {
-      console.warn(
-        `[MoA] The only successful draft is a PRINTED tool call, not an answer — ` +
-          `delivering an honest notice instead of ${successfulDrafts[0].text.length} chars of markup.`
-      );
-      return {
-        text: buildToolMarkupDegradationNotice(settings),
-        degradedToSingleAgent: true,
-        drafts,
-        aggregationLatencyMs: 0,
-        totalLatencyMs: Date.now() - totalStart,
-        cumulativeUsage: moaUsage,
-      };
-    }
     console.log(`[MoA] Only 1 draft succeeded, skipping aggregation.`);
     return {
       text: successfulDrafts[0].text,
@@ -798,6 +789,7 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       // are supposed to rank markup last, but the documented all-judges-failed
       // rule is "winner = longest successful draft", and a markup blob is
       // usually the longest thing a degraded model emits.
+      // BACKSTOP — the assembly filter keeps markup off the judges entirely.
       if (tournament.winningText && isPrintedMarkupDraft(tournament.winningText)) {
         console.warn(
           `[MoA] Tournament winner ${tournament.winnerProposerId} is a PRINTED tool call, ` +
@@ -924,13 +916,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     const aggregationLatencyMs = Date.now() - aggStart;
     let finalText = aggResult.text?.trim() || "(aggregation produced empty output)";
 
-    // PM #134 — the aggregator is a MODEL too, and this is the LAST hop before
-    // the user. Found while testing the tournament gate: with every proposer
-    // printing markup, the tournament produced no winner, execution fell
-    // through to synthesis, and the synthesised text was itself markup — which
-    // shipped verbatim because nothing here looked. Gating the three
-    // draft-delivery paths and leaving this one open would have been theatre.
-    if (isPrintedMarkupDraft(finalText)) {
+    // PM #134 — the aggregator is a MODEL too. Found while testing the
+    // tournament gate: every proposer printed markup, no winner, fall-through
+    // to synthesis, and the synthesised text was markup — which shipped,
+    // because nothing here looked. NOT a backstop; a clean input can still
+    // produce markup here, so this gate stays reachable.
+    let degradedText = isPrintedMarkupDraft(finalText);
+    if (degradedText) {
       console.warn(
         `[MoA] The AGGREGATOR printed a tool call as text instead of synthesising ` +
           `(${finalText.length} chars) — delivering an honest notice instead.`
@@ -968,7 +960,14 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
       chatId,
       abortSignal,
     });
-    finalText = reflectionResult.finalText;
+    // The REVISOR is another model generation and it runs AFTER the gate above,
+    // so its markup would land in the `<expert_consensus>` block `agent.ts`
+    // injects into the final tool-capable stream. Gate what LEAVES this function.
+    if (!degradedText) {
+      degradedText = isPrintedMarkupDraft(reflectionResult.finalText);
+      if (degradedText) console.warn(`[MoA] The REVISOR printed a tool call as text — honest notice instead.`);
+      finalText = degradedText ? buildToolMarkupDegradationNotice(settings) : reflectionResult.finalText;
+    }
     moaUsage = reflectionResult.usage;
     const reflectionRevisionsExecuted = reflectionResult.reflectionRevisionsExecuted;
     const reflectionHitCap = reflectionResult.reflectionHitCap;
@@ -1009,14 +1008,13 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
         // traces by aggregator path. Default = "synthesis" here.
         aggregatorMode: "synthesis",
       };
-      const captureResult = await captureSuccessfulTrace({
-        userPrompt: userMessage,
-        finalText,
-        signals: traceSignals,
-        brainConfig,
-        settings,
-        projectId,
-      });
+      // A degraded turn is never a trace. `computeQualityScore` reads only the
+      // ENSEMBLE signals, which look excellent on a turn whose text is the
+      // notice — and a trace is re-injected as a FEW-SHOT EXAMPLE in the Router
+      // prompt, so one capture teaches the pool to answer with a notice.
+      const captureResult = degradedText
+        ? { captured: false, reason: "degraded turn (tool markup)", qualityScore: 0 }
+        : await captureSuccessfulTrace({ userPrompt: userMessage, finalText, signals: traceSignals, brainConfig, settings, projectId });
       if (captureResult.captured) {
         console.log(
           `[MoA] Trace memory: captured trace ${captureResult.traceId} (score ${captureResult.qualityScore.toFixed(3)}).`
@@ -1046,14 +1044,11 @@ export async function runMoAEnsemble(options: MoAOptions): Promise<MoAResult> {
     const errMsg = err instanceof Error ? err.message : String(err);
     console.error(`[MoA] Fatal Aggregation Error: ${errMsg}`);
 
-    // Fallback: return the longest successful draft so the user doesn't get an
-    // empty screen.
-    //
-    // PM #134 — "longest" actively PREFERS printed markup: the blobs measured in
-    // the incident chats were 16–19 KB, far longer than any prose draft, and an
-    // aggregation failure is exactly what a degraded free tier produces
-    // alongside them. So pick the longest DELIVERABLE draft, and when every
-    // draft is markup say so honestly rather than shipping the biggest blob.
+    // Fallback: the longest successful draft, so the user doesn't get an empty
+    // screen. PM #134 — "longest" actively PREFERS printed markup (the incident
+    // blobs were 16–19 KB, and an aggregation failure is exactly what a degraded
+    // free tier produces alongside them). BACKSTOP — the assembly filter leaves
+    // `successfulDrafts` clean, so this degenerates to "longest".
     const bestDraft = pickDeliverableDraft(successfulDrafts);
     if (!bestDraft) {
       console.warn(

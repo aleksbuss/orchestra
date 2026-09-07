@@ -804,14 +804,15 @@ export async function runAgent(options: RunAgentOptions) {
       } else if (
         !moaResult.bypassed &&
         !moaResult.degradedToSingleAgent &&
+        !moaResult.degradedReason &&
         moaResult.drafts.length > 0 &&
         moaResult.text &&
         !moaResult.text.startsWith("All MoA proposer agents failed")
       ) {
-        // `!degradedToSingleAgent` is LOAD-BEARING (PM #134 follow-up): a
-        // degraded result's text is the degradation NOTICE, which the string
-        // literal above does not match, so this branch used to inject it as
-        // "expert consensus" AND swallow the collapse warning below.
+        // Both flags are LOAD-BEARING (PM #134): a degraded result's text is the
+        // NOTICE, which the literal above does not match, so this branch used to
+        // inject it as "expert consensus". `degradedReason` WITHOUT
+        // `degradedToSingleAgent` is the aggregator/revisor case.
         const truncatedConsensus = moaResult.text.length > 5000
           ? moaResult.text.substring(0, 5000) + "\n\n...[TRUNCATED FOR CONTEXT LIMITS]..."
           : moaResult.text;
@@ -831,7 +832,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // stream follows below. This line makes the "two generations per swarm
         // turn" visible in logs for before/after comparison.
         console.log(`[MoA] Consensus injected (${truncatedConsensus.length} chars, ${moaResult.totalLatencyMs}ms total). A final tool-capable stream follows → 2 brain generations this turn (aggregator + stream).`);
-      } else if (moaResult.degradedToSingleAgent) {
+      } else if (moaResult.degradedToSingleAgent || moaResult.degradedReason) {
         // The swarm produced no consensus and the stream below answers as a
         // plain single agent WITHOUT the Skeptic audit. UNINTENDED (distinct
         // from a Router bypass) and previously silent, so surface it.
@@ -845,25 +846,30 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
               .map((d) => `${d.resolvedProvider}/${d.resolvedModel}`)
           ),
         ];
-        // PM #134 follow-up — markup is now the common way here, and for it
-        // "rate limits" is false: every proposer ANSWERED. Read the reason.
+        // PM #134 — markup is the common way here, and "rate limits" is false
+        // for it: the model ANSWERED. Read the reason, do not guess.
         const causeLine =
           moaResult.degradedReason === "markup"
-            ? "The proposers ANSWERED but printed their tool calls as text instead of executing them — a model-capability limit, not a rate limit. Use a stronger proposer model, or ask for a smaller, targeted change."
+            ? "It ANSWERED but printed the tool call as text instead of executing it — a model-capability limit, not a rate limit. Use a stronger model for that slot, or ask for a smaller, targeted change."
             : refusedEndpoints.length > 0
             ? `The provider REFUSED to serve ${refusedEndpoints.join(", ")} to this account/app — no retry or wait will fix it. Pick a different proposer model` +
               (settings.freeMode?.enabled
                 ? ", or allow the paid fallback (Settings → Free Mode)."
                 : ".")
             : "Likely cause: unreliable proposer models (e.g. free-tier rate limits).";
+        // WHICH stage collapsed — proposers, or a synthesis step that ran on
+        // good drafts. Same wrong-cause defect PM #127 fixed one layer over.
+        const stage = moaResult.degradedToSingleAgent
+          ? `no usable draft from ${moaResult.drafts.length} expert proposers`
+          : "the aggregator/revisor printed a tool call as text instead of synthesising";
         console.warn(
-          `[MoA] Swarm degraded: 0/${moaResult.drafts.length} proposers produced a usable draft — answering with a single agent, NO Skeptic audit this turn. ${causeLine}`
+          `[MoA] Swarm degraded: ${stage} — answering with a single agent, NO Skeptic audit this turn. ${causeLine}`
         );
         publishUiSyncEvent({
           topic: "chat",
           chatId: options.chatId,
           projectId: options.projectId ?? null,
-          reason: `[MoA] Swarm stopped: no usable draft from ${moaResult.drafts.length} expert proposers. This answer is from a single agent with no Skeptic audit. ${causeLine}`,
+          reason: `[MoA] Swarm stopped: ${stage}. This answer is from a single agent with no Skeptic audit. ${causeLine}`,
         });
       } else if (moaResult.bypassed) {
         console.log(`[MoA] Bypassed — single-agent stream answers directly (no consensus, no redundant pre-generation).`);

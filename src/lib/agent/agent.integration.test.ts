@@ -58,6 +58,8 @@ type ScriptedStep = {
 const modelOut = vi.hoisted(() => ({
   text: "",
   genText: undefined as string | undefined,
+  genTexts: undefined as string[] | undefined,
+  genCursor: 0,
   steps: undefined as unknown[] | undefined,
   stepCursor: 0,
   /**
@@ -126,8 +128,16 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
       new MockLanguageModelV3({
         doGenerate: async (options) => {
           promptLog.generates.push(JSON.stringify(options?.prompt ?? []));
+          // `genTexts` scripts SUCCESSIVE generateText calls (proposer 1..N, then
+          // the aggregator), which is the only way to make one stage of the swarm
+          // degrade while the others stay clean. Past the end it repeats the last
+          // entry. Unset → the single `genText ?? text` behaviour, unchanged.
+          const scripted = modelOut.genTexts as string[] | undefined;
+          const body = scripted
+            ? scripted[Math.min(modelOut.genCursor++, scripted.length - 1)]
+            : modelOut.genText ?? modelOut.text;
           return {
-            content: [{ type: "text", text: modelOut.genText ?? modelOut.text }],
+            content: [{ type: "text", text: body }],
             finishReason: "stop",
             usage: { inputTokens: { total: 5 }, outputTokens: { total: 5 } },
             warnings: [],
@@ -297,6 +307,8 @@ function resetHarness() {
   modelOut.steps = undefined;
   modelOut.stepCursor = 0;
   modelOut.genText = undefined;
+  modelOut.genTexts = undefined;
+  modelOut.genCursor = 0;
   modelOut.streamThrows = undefined;
   foldCalls.sources.length = 0;
   watchdogCalls.stepBoundaries = 0;
@@ -1000,8 +1012,10 @@ describe("agent integration — MoA injection branches (swarm)", { timeout: 60_0
     // …naming the REAL cause. Every proposer answered, so the stock
     // "unreliable models / rate limits" line would send the operator to wait
     // out a throttle that does not exist (the PM #127 lesson, one branch over).
-    expect(reasons).toContain("printed their tool calls as text");
+    expect(reasons).toContain("printed the tool call as text");
     expect(reasons).not.toContain("rate limits");
+    // …and blames the PROPOSERS here, unlike the aggregator case below.
+    expect(reasons).toContain("no usable draft");
   });
 
   it("control arm — a healthy swarm turn DOES put its drafts in the final stream's prompt", async () => {
@@ -1023,5 +1037,72 @@ describe("agent integration — MoA injection branches (swarm)", { timeout: 60_0
     expect(prompt).toContain("Expert Drafts to Synthesize");
     const reasons = uiEvents.published.map((e) => e.reason ?? "").join("\n");
     expect(reasons).not.toContain("Swarm stopped");
+  });
+});
+
+/**
+ * PM #134 follow-up 2 (protake review) — the AGGREGATOR/REVISOR degradation case.
+ *
+ * Those gates replace `finalText` with the degradation NOTICE, but that return
+ * carried no structural flag, so `runAgent`'s consensus branch — which only
+ * excluded `degradedToSingleAgent` and one string literal — injected the notice
+ * into the final tool-capable stream as "a pre-computed consensus from N expert
+ * agents". Replacing the markup with a notice and letting the NOTICE do the same
+ * thing is not a fix. `degradedReason` is now set on that path and the branch
+ * tests it.
+ *
+ * Reaching the standalone aggregator needs `aggregator.inlineSynthesis: false`
+ * (the default collapses synthesis into the final stream), so this block writes
+ * its own settings and restores them.
+ */
+describe("agent integration — aggregator degradation is not a consensus", { timeout: 60_000 }, () => {
+  const MARKUP =
+    "Here you go.\n<function=write_text_file>\n<parameter=file_path>x.ts</parameter>";
+  let savedSettings: string;
+  const settingsPath = () => path.join(tmpDir, "settings", "settings.json");
+
+  beforeAll(async () => {
+    savedSettings = await fs.readFile(settingsPath(), "utf-8");
+    const s = JSON.parse(savedSettings);
+    s.aggregator = { mode: "synthesis", inlineSynthesis: false };
+    await fs.writeFile(settingsPath(), JSON.stringify(s));
+  });
+
+  afterAll(async () => {
+    await fs.writeFile(settingsPath(), savedSettings);
+  });
+
+  it("a markup-printing AGGREGATOR injects no consensus and names the right stage", async () => {
+    resetHarness();
+    // Five clean proposer drafts (the Router falls back to the static personas
+    // against a text-only mock), then the SIXTH generateText — the aggregator —
+    // prints markup.
+    modelOut.genTexts = [
+      "draft A: use fetch",
+      "draft B: use undici",
+      "draft C: use got",
+      "draft D: use axios",
+      "draft E: use ky",
+      MARKUP,
+    ];
+    modelOut.text = "FINAL_STREAM_ANSWER";
+
+    const { runAgent } = await import("./agent");
+    const { createChat } = await import("@/lib/storage/chat-store");
+    const chatId = `integ-moa-agg-${Date.now()}`;
+    await createChat(chatId, "moa-aggregator");
+    const result = await runAgent({ chatId, userMessage: "how do I fetch", swarmEnabled: true });
+    await drain(result);
+
+    const prompt = promptLog.streams.at(-1) ?? "";
+    expect(prompt).not.toContain("Expert Consensus");
+    expect(prompt).not.toContain("printed the call as text");
+    expect(prompt).not.toContain("<function=write_text_file>");
+    // The drafts were FINE — the operator notice must blame the synthesis step,
+    // not the proposers.
+    const reasons = uiEvents.published.map((e) => e.reason ?? "").join("\n");
+    expect(reasons).toContain("Swarm stopped");
+    expect(reasons).toContain("aggregator/revisor");
+    expect(reasons).not.toContain("no usable draft");
   });
 });

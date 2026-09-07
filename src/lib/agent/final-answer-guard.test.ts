@@ -344,6 +344,25 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(notice).not.toContain("some/other:free");
   });
 
+  it("Free-Mode notice treats `openrouter/free` as free — it has no `:free` suffix", () => {
+    // protake review: the suffix test missed the free AUTO-ROUTER id, which is a
+    // real value in this operator's config. Missing it puts the notice back in
+    // the exact failure it exists to remove — "your configured model is
+    // stronger, turn Free Mode off" pointing at another free model.
+    const raw = {
+      chatModel: { provider: "openrouter", model: "openrouter/free", apiKey: "k" },
+      proposerTiers: {
+        frontier: { provider: "openrouter", model: "deepseek/deepseek-chat", apiKey: "k" },
+      },
+      freeMode: { enabled: true },
+    } as unknown as AppSettings;
+    const notice = buildToolMarkupDegradationNotice(applyFreeMode(raw).settings);
+
+    expect(notice).not.toContain("turn off Free Mode");
+    expect(notice).toContain("will not fix this");
+    expect(notice).toContain("deepseek/deepseek-chat");
+  });
+
   it("Free-Mode notice stays honest when settings never went through the overlay", () => {
     // Defensive branch: `freeMode.enabled` with no displaced record. It must not
     // invent a stronger model — naming one it cannot verify is how this bug began.

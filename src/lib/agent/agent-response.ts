@@ -14,6 +14,15 @@ import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover, finalAnswerInstruction } from "@/lib/agent/final-answer-failover";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
 import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
+// ONE definition of "free model", shared with Free Mode's own selection
+// (`free-mode.ts` filters the catalogue with this exact predicate) and the
+// Router's retry budget. A second, wider local copy briefly lived here and was
+// removed: two notions of "free" in one codebase is the drift this repo keeps
+// paying for, and the wider one only covered `openrouter/free` — the free
+// AUTO-ROUTER, which is deliberately out of scope (its pool is too weak to be
+// worth selecting, operator direction 2026-09-07), so nothing selects it and
+// nothing should reason about it.
+import { isFreeTierModel } from "@/lib/agent/proposer-pacing";
 import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
 
 import {
@@ -502,25 +511,18 @@ const STEP_LIMIT_PAUSE_NOTICE =
  * cannot verify is stronger is how this bug happened; the branches below only
  * ever claim what the settings actually support.
  *
+ * "Free" here means `isFreeTierModel` — the SAME predicate Free Mode uses to
+ * build its candidate pool. Do not widen it locally: the only id the wider form
+ * caught was the `openrouter/free` AUTO-ROUTER, which Free Mode deliberately
+ * never selects (its pool is too weak to be worth ranking), so a notice that
+ * reasons about it is reasoning about a state the system does not produce.
+ *
  * Pure string builder in the failure branch — no hot-path logic, no behavioural
  * change to a healthy turn.
  *
  * The phrase "printed the call as text" is asserted by `final-answer-guard.test.ts`
  * — keep it in the base sentence.
  */
-/**
- * A free OpenRouter id. The `:free` SUFFIX is the usual signal, but it is not
- * the only one: `openrouter/free` is the free auto-router and carries no suffix
- * at all — and it is a real value in this operator's config (`utilityModel`).
- * Missing it would put the notice back in the exact failure this fix exists to
- * remove: telling the operator to switch to a "stronger" model that is free too
- * (protake review). Anchored, so a model merely NAMED "…free-tier" is unaffected.
- */
-function isFreeModelId(model: string | undefined): boolean {
-  const id = (model ?? "").trim();
-  return /:free$/i.test(id) || /(^|\/)free$/i.test(id);
-}
-
 export function buildToolMarkupDegradationNotice(settings?: AppSettings): string {
   const base =
     "⚠️ **The model tried to run a tool but printed the call as text instead of executing it**, so " +
@@ -537,7 +539,7 @@ export function buildToolMarkupDegradationNotice(settings?: AppSettings): string
     const displaced = settings.freeModeDisplacedChatModel?.model?.replace(/^~/, "");
 
     // The strongest concrete steer the settings actually support, in order.
-    if (displaced && !isFreeModelId(displaced)) {
+    if (displaced && !isFreeTierModel(displaced)) {
       return (
         base +
         preamble +
@@ -555,7 +557,7 @@ export function buildToolMarkupDegradationNotice(settings?: AppSettings): string
         settings.freeModeDisplacedTiers?.frontier,
         settings.freeModeDisplacedTiers?.balanced,
         settings.freeModeDisplacedTiers?.fast,
-      ].find((c) => c?.model && !isFreeModelId(c.model));
+      ].find((c) => c?.model && !isFreeTierModel(c.model));
       const pointer = paidTier
         ? ` (you already have \`${paidTier.model.replace(/^~/, "")}\` configured in the proposer tiers)`
         : "";

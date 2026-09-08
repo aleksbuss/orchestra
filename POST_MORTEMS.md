@@ -38,6 +38,30 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 135. Free Mode's brain outbid the Router for the pool's scarcest capability, so BOTH slots ran demoted — and the Router landed on the one model that prints tool markup
+
+**Date:** 2026-09-08
+**Status:** RESOLVED
+**Severity:** P1 — every Free Mode turn ran on a brain 5 ranks below the best available model and a Router 4 ranks below, indefinitely. Not a failure: a permanently degraded steady state that looked exactly like a healthy selection.
+
+**Symptoms:** Operator question — why don't the strongest free models get seated? On the live catalogue (2026-09-08, 16 free ids) Free Mode seated `nvidia/nemotron-3-super-120b-a12b:free` (rank 6, intelligence 13.6 / agentic 4.1) as the brain while ranks 1-2 (`thinkingmachines/inkling-small`, intelligence 26.1 / agentic 25.0) sat unused, and seated `dots-studio/dots-3-note-preview:free` (rank 10, unscored) as the Router — the exact endpoint behind PM #132 and PM #134's printed tool markup.
+
+**Detection:** Reading `pickBrain` after the ranking work of PM #128 failed to change who actually got seated. The selection notice reports every *exclusion* (non-chat, unhealthy, sub-8B floor) but nothing about slot *contention*, so the demotion was invisible in the one line built to make Free Mode legible. Measured with a read-only probe over the operator's warm `data/cache/openrouter-pricing.json`, running the real `selectFreeModels()` before and after the change — no network, no live server touched.
+
+**Root Cause:** `pickBrain` (`src/lib/agent/free-mode.ts`) led with a "tool-capable AND structured-output capable" preference key. `structured_outputs` is the scarcest capability in the free catalogue — live-measured 3 of 16 ids, 2 after the Router's sub-8B floor (PM #128) — and the Router *requires* it (persona generation and judge ballots are `generateObject`) while the brain only benefits from it. The brain therefore took the best structured id and the Router got the leftover. The demotion compounds: the pool is score-ordered, so preferring a rarer capability walks the brain DOWN the ranking, and pushes the Router down further. The comment above the key argued the opposite case correctly ("the brain rarely needs `generateObject` — that is the Router's job") and the code did not follow it.
+
+The same comment was also factually wrong about who pays. `generateObject` runs on the brain slot in three places: `web-task.ts → decideNextAction` (`settings.chatModel`, **no** text fallback), `reflection.ts → reviseWithCritique` (tolerant text fallback), and the tournament judges when `aggregator.tournamentJudgeModel` is unpinned (`moa.ts` defaults `judgeConfig` to `brainConfig`; falls back to synthesis).
+
+**Resolution:** Deleted the first key. The remaining order is tools → structured → first. This is rank-aware without a threshold: the pool is score-ordered, so when the strongest tool-capable id *also* has structured outputs the tools key still returns it and the brain keeps the capability for free. The key could only ever demote the brain, never promote it. Live differential on the same catalogue — brain rank 6 → 1, Router rank 10 → 6, all three proposer tiers up (7/8/9 → 2/3/4), `dots-3` out of every slot. The cost is real and is now reported: `FreeModeSelection.brainSupportsStructuredOutputs` plus a clause in `describeFreeModeSelection` naming `web_task` as the tool that breaks, same posture as `brainSupportsTools`.
+
+**Regression Coverage:** `src/lib/agent/free-mode.test.ts` → "the scarce structured-output capability goes to the Router (PM #135)" — 4 tests; the two behavioural ones were mutation-verified by restoring the old key (both fail, 2/48).
+
+**Doc Updates:** `free-mode.ts` header constraint 1 (scarcity → the slot that cannot run without it), the `pickBrain` doc block (why there is no combined key, and who pays for it).
+
+**Rule:** When two slots want one scarce capability, it goes to the slot that CANNOT run without it — not to the one that merely benefits. And a preference key on a score-ordered pool is never free: it trades rank for capability, so state what the trade costs and report it when it fires.
+
+---
+
 ## 134. The recovery ladder treated printed tool markup as a delivered answer, so the substitute cascade never ran and the failing endpoint got its breaker healed
 
 **Date:** 2026-09-07

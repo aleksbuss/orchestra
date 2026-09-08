@@ -371,6 +371,89 @@ describe("Free Mode — score ranking picks the actually-strongest capable brain
   });
 });
 
+describe("Free Mode — the scarce structured-output capability goes to the Router (PM #135)", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+    delete process.env.ORCHESTRA_FREE_MODE_RANK;
+  });
+
+  it("does not demote the brain to a weaker model just to keep structured outputs", () => {
+    // The live 2026-09-08 shape, minimised: the two structured-capable ids are
+    // BOTH weaker than the strongest tool-capable one. The old first key
+    // ("tools AND structured") seated `v/mid-structured` as the brain and left
+    // the Router `v/weak-structured` — both slots demoted to buy the brain a
+    // capability it barely uses.
+    seedCatalogue([
+      ["v/top:free", ["tools"]],
+      ["v/mid-structured:free", ["tools", "structured_outputs"]],
+      ["v/weak-structured:free", ["tools", "structured_outputs"]],
+    ]);
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["v/top:free", { intelligence: 90, coding: 90, agentic: 90 }],
+        ["v/mid-structured:free", { intelligence: 50, coding: 50, agentic: 50 }],
+        ["v/weak-structured:free", { intelligence: 10, coding: 10, agentic: 10 }],
+      ])
+    );
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("v/top:free");
+    expect(s.utilityModel.model).toBe("v/mid-structured:free");
+    expect(s.brainSupportsTools).toBe(true);
+    expect(s.brainSupportsStructuredOutputs).toBe(false);
+    expect(s.routerSupportsStructuredOutputs).toBe(true);
+    expect(s.routerSharesBrainEndpoint).toBe(false);
+  });
+
+  it("still keeps structured outputs on the brain when they cost nothing", () => {
+    // Not a blanket "the brain never gets structured outputs" rule: the pool is
+    // score-ordered, so when the STRONGEST tool-capable id also advertises
+    // them, the tools key returns it and the brain keeps the capability. This
+    // is why the fix needs no score threshold.
+    seedCatalogue([
+      ["v/top:free", ["tools", "structured_outputs"]],
+      ["v/other:free", ["tools", "structured_outputs"]],
+    ]);
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["v/top:free", { intelligence: 90, coding: 90, agentic: 90 }],
+        ["v/other:free", { intelligence: 50, coding: 50, agentic: 50 }],
+      ])
+    );
+    const s = selectFreeModels();
+    expect(s.chatModel.model).toBe("v/top:free");
+    expect(s.brainSupportsStructuredOutputs).toBe(true);
+    expect(s.utilityModel.model).toBe("v/other:free");
+  });
+
+  it("names the cost in the notice — a brain without structured outputs cannot run web_task", () => {
+    seedCatalogue([
+      ["v/top:free", ["tools"]],
+      ["v/structured:free", ["tools", "structured_outputs"]],
+    ]);
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([
+        ["v/top:free", { intelligence: 90, coding: 90, agentic: 90 }],
+        ["v/structured:free", { intelligence: 50, coding: 50, agentic: 50 }],
+      ])
+    );
+    const described = describeFreeModeSelection(selectFreeModels());
+    expect(described).toContain("no structured_outputs");
+    expect(described).toContain("web_task");
+    // The brain HAS tools here — the two degradations must not be conflated.
+    expect(described).not.toContain("NO tool support");
+  });
+
+  it("says nothing about structured outputs when the brain has them", () => {
+    seedCatalogue([
+      ["v/top:free", ["tools", "structured_outputs"]],
+      ["v/other:free", ["tools", "structured_outputs"]],
+    ]);
+    const described = describeFreeModeSelection(selectFreeModels());
+    expect(described).not.toContain("no structured_outputs");
+    expect(described).not.toContain("web_task");
+  });
+});
+
 describe("Free Mode — applying the overlay", () => {
   beforeEach(() => {
     __resetOpenRouterPricingForTests();

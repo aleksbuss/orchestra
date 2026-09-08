@@ -39,6 +39,12 @@
  *    that distinguish it from N-sampling. Only a minority of free models
  *    qualify, so the Router slot is filled from that subset or not at all.
  *
+ *    It is therefore the SCARCEST capability in the pool, and PM #135 is what
+ *    happens when a slot that merely benefits from it outbids the slot that
+ *    requires it: the brain used to prefer structured-capable ids, took the
+ *    best one, and left the Router the dregs. Scarce capability goes to the
+ *    slot that cannot run without it — see `pickBrain`.
+ *
  * 2. **The brain needs TOOLS.** PM #98 — the original version of this file said
  *    "the brain and the proposers do NOT need the capability", which was
  *    reasoned about the SWARM path: there the Router picks personas and the
@@ -160,6 +166,20 @@ export interface FreeModeSelection {
    * answers from weights only. PM #98 — the caller MUST say this out loud.
    */
   brainSupportsTools: boolean;
+  /**
+   * False when the brain slot went to a model that does NOT advertise
+   * `structured_outputs`. PM #135 — the brain no longer outbids the Router for
+   * that scarce capability, which is the right trade (see `pickBrain`), but it
+   * is a trade and not a free win: the `web_task` tool drives its action loop
+   * with `generateObject` on the brain and has NO text fallback, so it answers
+   * HTTP 400 and returns `{success:false}` for the whole turn.
+   *
+   * `reviseWithCritique` (text fallback) and the tournament judges (synthesis
+   * fallback) survive it; `web_task` does not. Reported for the same reason as
+   * `brainSupportsTools`: a capability the run silently lost is the failure
+   * mode this file exists to prevent.
+   */
+  brainSupportsStructuredOutputs: boolean;
   /** Every free id considered, for diagnostics. */
   candidateCount: number;
   /**
@@ -288,23 +308,46 @@ const supportsTools = (id: string) => modelSupportsTools("openrouter", id);
  * Pick the brain (the Single Agent chat model) from the general pool.
  *
  * Preference order, strongest key first:
- *   1. tool-capable AND structured-output capable — the whole feature set;
- *   2. tool-capable — tools beat well-formed JSON, because losing tools loses
- *      web search and every file operation, while the brain rarely needs
- *      `generateObject` (that is the Router's job);
- *   3. structured-output capable — no tools exist in the pool, so fall back to
+ *   1. tool-capable — tools beat well-formed JSON, because losing tools loses
+ *      web search and every file operation;
+ *   2. structured-output capable — no tools exist in the pool, so fall back to
  *      the previous heuristic rather than to raw alphabetical order;
- *   4. whatever is first.
+ *   3. whatever is first.
+ *
+ * WHY THERE IS NO "tool-capable AND structured-output capable" KEY FIRST.
+ * There used to be, and it was the reason a strong free brain never got seated
+ * (PM #135). `structured_outputs` is the scarcest capability in the free
+ * catalogue — live-measured 2026-09-08: 3 of 16 free ids advertise it, 2 after
+ * the Router's sub-8B floor — and the Router REQUIRES it while the brain only
+ * benefits from it. Preferring it on the brain therefore spent the scarce id on
+ * the slot that needs it least, and pushed the Router down the ranking onto
+ * whatever structured id was left. Measured cost on the live catalogue: the
+ * brain took rank 6 (`nemotron-3-super-120b`, intelligence 13.6 / agentic 4.1)
+ * while ranks 1-2 sat unused, and the Router got rank 10
+ * (`dots-studio/dots-3-note-preview`, unscored) — the exact endpoint whose
+ * printed tool markup is PM #132 and PM #134.
+ *
+ * Deleting the key is rank-aware without needing a threshold: the pool is
+ * score-ordered, so when the strongest tool-capable id ALSO has structured
+ * outputs, key 1 still returns it and the brain keeps the capability for free.
+ * The key could only ever demote the brain, never promote it.
+ *
+ * IT IS NOT FREE, and the caller says so. `generateObject` does run on the
+ * brain slot in three places: the `web_task` tool's action loop (no text
+ * fallback — the tool returns `{success:false}` and the agent must reach for
+ * `fetch_webpage` instead), `reviseWithCritique` (has a tolerant text
+ * fallback), and the tournament judges when no `tournamentJudgeModel` is
+ * pinned (falls back to synthesis). Two of the three degrade gracefully; the
+ * first degrades loudly via `brainSupportsStructuredOutputs`.
  *
  * Never returns undefined for a non-empty pool, and never narrows the pool:
- * step 4 always fires. That is the "honesty over exclusion" rule — the caller
+ * step 3 always fires. That is the "honesty over exclusion" rule — the caller
  * reports the degradation via `brainSupportsTools` instead of Free Mode
  * refusing to run because free tool-capable ids happen to be scarce this week.
  */
 function pickBrain(generalPool: readonly string[], structured: readonly string[]): string {
   const structuredSet = new Set(structured);
   return (
-    generalPool.find((id) => supportsTools(id) && structuredSet.has(id)) ??
     generalPool.find(supportsTools) ??
     generalPool.find((id) => structuredSet.has(id)) ??
     generalPool[0]
@@ -455,6 +498,11 @@ export function selectFreeModels(): FreeModeSelection {
     routerSupportsStructuredOutputs: structured.length > 0,
     routerFloorDroppedSmall,
     brainSupportsTools: supportsTools(brain),
+    // Read from the same `structured` set the Router pool is built from, not a
+    // fresh `modelSupportsStructuredOutputs(brain)` call — otherwise the flag
+    // and the selection could disagree on a run where the chat-capable filter
+    // was abandoned, and the notice would describe a pool that was not used.
+    brainSupportsStructuredOutputs: structured.includes(brain),
     candidateCount: catalogue.length,
     // Computed against `workingCatalogue` (post health-filter), not the raw
     // catalogue — otherwise a circuit-open id would double-count as "excluded
@@ -544,8 +592,17 @@ export function describeFreeModeSelection(s: FreeModeSelection): string {
   const router = s.routerSupportsStructuredOutputs
     ? `router=${s.utilityModel.model}${shared}`
     : `router=${s.utilityModel.model} (NO structured_outputs — static personas, tournament falls back to synthesis)${shared}`;
+  // PM #135 — the brain deliberately stops outbidding the Router for
+  // `structured_outputs`, so this is now an EXPECTED state rather than a
+  // catalogue accident. It still costs the `web_task` tool its action loop
+  // (no text fallback), which the operator must be able to read off the notice
+  // instead of discovering it as an HTTP 400 mid-turn.
+  const brainStructured = s.brainSupportsStructuredOutputs
+    ? ""
+    : ` (no structured_outputs — the Router got the pool's scarce structured model instead;` +
+      ` \`web_task\` will fail on this brain, use fetch_webpage/search_web)`;
   const brain = s.brainSupportsTools
-    ? `brain=${s.chatModel.model}`
+    ? `brain=${s.chatModel.model}${brainStructured}`
     : `brain=${s.chatModel.model} (NO tool support — Single Agent mode answers from ` +
       `knowledge only: no web search, no file access. No free tool-capable model ` +
       `was available; add a key or turn Free Mode off to get tools back)`;

@@ -98,7 +98,7 @@ import {
  * for the case that actually fails, pruning + the output cap is the fix.
  */
 const FORCED_ANSWER_CONTEXT_BUDGET = 24000;
-const FORCED_ANSWER_MAX_OUTPUT_TOKENS = 1500;
+const FORCED_ANSWER_MAX_OUTPUT_TOKENS = 8192;
 
 /**
  * Prune the forced-answer transcript to the weak-model-safe budget. Exported for

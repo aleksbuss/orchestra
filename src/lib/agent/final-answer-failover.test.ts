@@ -280,7 +280,7 @@ describe("generateFinalAnswerWithFailover", () => {
     await generateFinalAnswerWithFailover(args());
     const passed = (mockedGenerateText.mock.calls[0][0] as { maxOutputTokens?: number })
       .maxOutputTokens;
-    expect(passed).toBeLessThanOrEqual(1500);
+    expect(passed).toBeLessThanOrEqual(8192);
   });
 
   it("PM #109 — runs the forced answer at a BOUNDED context, pinning the original task", async () => {

@@ -10,6 +10,7 @@
 import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
 import { generateText, type ModelMessage } from "ai";
 import type { AppSettings, ModelConfig } from "@/lib/types";
+import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover, finalAnswerInstruction } from "@/lib/agent/final-answer-failover";
 import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
@@ -657,11 +658,19 @@ const LOOP_ABORT_PAUSE_NOTICE =
   "[Agent] Stopped early — caught in an identical-call tool loop. Review the work or redirect.";
 
 /**
+ * Cap on auto-continuation output tokens. Sized to 4096: large enough to complete
+ * complex truncated code/schemas, but bounded so a misbehaving model that
+ * repeats the prior answer from the start cannot produce an unbounded duplicate
+ * wall of text.
+ */
+const AUTO_CONTINUE_MAX_OUTPUT_TOKENS = 4096;
+
+/**
  * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a
  * finished turn, decide whether an EXTRA generation is needed and produce its
  * text + usage:
  *   - the reply was truncated (`shouldAutoContinueAssistant`) → continue from
- *     where it stopped (capped at 1200 tokens);
+ *     where it stopped (capped at 4096 tokens);
  *   - NO answer was delivered at all (`turnHasDeliverableAnswer` === false, the
  *     PM #69 failure) → force ONE tool-less final answer so the user always gets
  *     a reply. Tool-less ⇒ it can only emit text, never another tool call ⇒ no
@@ -784,7 +793,10 @@ export async function resolveTurnContinuation(args: {
         ]),
         providerOptions,
         temperature: settings.chatModel.temperature ?? 0.7,
-        maxOutputTokens: Math.min(settings.chatModel.maxTokens ?? 4096, 1200),
+        maxOutputTokens: Math.min(
+          resolveMaxOutputTokens(settings.chatModel),
+          AUTO_CONTINUE_MAX_OUTPUT_TOKENS
+        ),
         abortSignal: callDeadlineSignal(abortSignal),
       });
       return { text: (continuation.text || "").trim(), usage: readUsage(continuation) };

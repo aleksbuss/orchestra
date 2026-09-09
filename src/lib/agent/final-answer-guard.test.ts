@@ -651,6 +651,24 @@ describe("PM #69 — resolveTurnContinuation (real generateText + mock model)", 
     expect(res.uiNotice).toMatch(/empty response/i);
     expect(res.uiNotice).toMatch(/Continue|Settings/);
   });
+
+  it("continues length-truncated output with maxOutputTokens capped at 4096", async () => {
+    let capturedMaxTokens: number | undefined;
+    const capturing = new MockLanguageModelV3({
+      doGenerate: async (options) => {
+        capturedMaxTokens = (options as { maxOutputTokens?: number }).maxOutputTokens;
+        return genResult("rest of the answer");
+      },
+    });
+    const res = await resolveTurnContinuation({
+      ...base,
+      responseMessages: [assistantText("first part of answer")],
+      finishReason: "length",
+      model: capturing as never,
+    });
+    expect(res.text).toBe("rest of the answer");
+    expect(capturedMaxTokens).toBe(4096);
+  });
 });
 
 // ── PM #84 — detectPrematureCompletion: deterministic visibility note when the

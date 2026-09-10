@@ -1,0 +1,951 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orchestra AI — Subagent Swarm (MoA) Architecture & Routing Pipeline</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #07090e;
+      --surface: #0d111a;
+      --surface-elevated: #131926;
+      --surface-card: #161e2e;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-accent: rgba(56, 189, 248, 0.3);
+      --cyan: #38bdf8;
+      --cyan-glow: rgba(56, 189, 248, 0.4);
+      --orange: #fb923c;
+      --orange-glow: rgba(251, 146, 60, 0.4);
+      --emerald: #34d399;
+      --emerald-glow: rgba(52, 211, 153, 0.4);
+      --rose: #f43f5e;
+      --rose-glow: rgba(244, 63, 94, 0.4);
+      --purple: #c084fc;
+      --purple-glow: rgba(192, 132, 252, 0.4);
+      --amber: #fbbf24;
+      --text: #f1f5f9;
+      --text-muted: #94a3b8;
+      --font-main: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font-main);
+      min-height: 100vh;
+      overflow-x: hidden;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+    }
+
+    /* Background tech grid */
+    .grid-bg {
+      position: absolute;
+      inset: 0;
+      background-image: 
+        radial-gradient(circle at 50% 20%, rgba(56, 189, 248, 0.06) 0%, transparent 60%),
+        radial-gradient(circle at 80% 80%, rgba(251, 146, 60, 0.04) 0%, transparent 50%),
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* Scanline effect */
+    .scanline {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 120px;
+      background: linear-gradient(180deg, transparent 0%, rgba(56, 189, 248, 0.03) 50%, transparent 100%);
+      pointer-events: none;
+      z-index: 10;
+      animation: scan 8s linear infinite;
+    }
+
+    @keyframes scan {
+      0% { transform: translateY(-120px); }
+      100% { transform: translateY(100vh); }
+    }
+
+    /* Top Command Header */
+    header {
+      position: relative;
+      z-index: 20;
+      padding: 16px 28px;
+      background: rgba(13, 17, 26, 0.75);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0284c7, #f97316);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.4);
+    }
+
+    .brand-title {
+      font-size: 17px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .brand-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-weight: 600;
+      background: rgba(56, 189, 248, 0.12);
+      color: var(--cyan);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      padding: 2px 8px;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .telemetry-bar {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-muted);
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--border);
+      padding: 6px 16px;
+      border-radius: 8px;
+    }
+
+    .telemetry-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .telemetry-item strong {
+      color: var(--text);
+    }
+
+    .pulse-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 8px var(--emerald);
+      animation: blink 2s infinite ease-in-out;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.85); }
+    }
+
+    .controls-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s ease;
+    }
+
+    .btn:hover {
+      background: var(--surface-elevated);
+      border-color: var(--cyan);
+      color: var(--cyan);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.2);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      border-color: #38bdf8;
+      color: #ffffff;
+      box-shadow: 0 0 16px rgba(56, 189, 248, 0.3);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #0369a1, #1d4ed8);
+      color: #ffffff;
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.5);
+    }
+
+    /* Main Canvas Area */
+    main {
+      position: relative;
+      z-index: 10;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px 20px;
+      width: 100%;
+      max-width: 1540px;
+      margin: 0 auto;
+    }
+
+    /* Pipeline Flow Stage */
+    .pipeline-stage {
+      position: relative;
+      width: 100%;
+      height: 720px;
+      background: rgba(13, 17, 26, 0.6);
+      backdrop-filter: blur(20px);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      overflow: hidden;
+    }
+
+    /* SVG Layer for animated data pipes */
+    svg.circuit-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Animated Pipe Paths */
+    .pipe-bg {
+      fill: none;
+      stroke: rgba(255, 255, 255, 0.05);
+      stroke-width: 3;
+      stroke-linecap: round;
+    }
+
+    .pipe-active {
+      fill: none;
+      stroke: var(--cyan);
+      stroke-width: 2.5;
+      stroke-dasharray: 8 6;
+      stroke-linecap: round;
+      opacity: 0.85;
+      filter: drop-shadow(0 0 6px var(--cyan-glow));
+      animation: dashFlow 20s linear infinite;
+    }
+
+    .pipe-fast {
+      stroke: var(--emerald);
+      filter: drop-shadow(0 0 6px var(--emerald-glow));
+    }
+
+    .pipe-orange {
+      stroke: var(--orange);
+      filter: drop-shadow(0 0 6px var(--orange-glow));
+    }
+
+    .pipe-skeptic {
+      stroke: var(--rose);
+      filter: drop-shadow(0 0 6px var(--rose-glow));
+    }
+
+    @keyframes dashFlow {
+      to { stroke-dashoffset: -1000; }
+    }
+
+    /* Glowing Pulses (packets traveling through pipes) */
+    .pulse-packet {
+      fill: #ffffff;
+      filter: drop-shadow(0 0 8px #ffffff) drop-shadow(0 0 14px var(--cyan));
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    /* Flow Nodes Overlay */
+    .nodes-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 4;
+      pointer-events: auto;
+    }
+
+    /* Node Card Styling */
+    .node-card {
+      position: absolute;
+      background: var(--surface-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+      transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+      cursor: default;
+      user-select: none;
+    }
+
+    .node-card:hover {
+      border-color: rgba(255, 255, 255, 0.25);
+      transform: translateY(-2px);
+    }
+
+    .node-card.active {
+      border-color: var(--cyan);
+      box-shadow: 0 0 24px var(--cyan-glow), inset 0 0 12px rgba(56, 189, 248, 0.1);
+      transform: scale(1.02);
+    }
+
+    .node-card.active-orange {
+      border-color: var(--orange);
+      box-shadow: 0 0 24px var(--orange-glow), inset 0 0 12px rgba(251, 146, 60, 0.1);
+      transform: scale(1.02);
+    }
+
+    .node-card.active-skeptic {
+      border-color: var(--rose);
+      box-shadow: 0 0 24px var(--rose-glow), inset 0 0 12px rgba(244, 63, 94, 0.15);
+      transform: scale(1.02);
+    }
+
+    .node-card.active-emerald {
+      border-color: var(--emerald);
+      box-shadow: 0 0 24px var(--emerald-glow), inset 0 0 12px rgba(52, 211, 153, 0.1);
+      transform: scale(1.02);
+    }
+
+    .node-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .node-icon {
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .node-title {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+    }
+
+    .node-subtitle {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .node-badge {
+      margin-top: 8px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+      display: inline-block;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .badge-cyan { background: rgba(56, 189, 248, 0.12); color: var(--cyan); border: 1px solid rgba(56, 189, 248, 0.25); }
+    .badge-orange { background: rgba(251, 146, 60, 0.12); color: var(--orange); border: 1px solid rgba(251, 146, 60, 0.25); }
+    .badge-rose { background: rgba(244, 63, 94, 0.15); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.3); }
+    .badge-emerald { background: rgba(52, 211, 153, 0.12); color: var(--emerald); border: 1px solid rgba(52, 211, 153, 0.25); }
+    .badge-purple { background: rgba(192, 132, 252, 0.12); color: var(--purple); border: 1px solid rgba(192, 132, 252, 0.25); }
+
+    /* Branch Labels on canvas */
+    .flow-label {
+      position: absolute;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(7, 9, 14, 0.85);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      pointer-events: none;
+      z-index: 3;
+      white-space: nowrap;
+      transition: all 0.3s ease;
+    }
+
+    .flow-label.highlight-cyan {
+      border-color: var(--cyan);
+      color: var(--cyan);
+      box-shadow: 0 0 10px var(--cyan-glow);
+    }
+
+    .flow-label.highlight-emerald {
+      border-color: var(--emerald);
+      color: var(--emerald);
+      box-shadow: 0 0 10px var(--emerald-glow);
+    }
+
+    .flow-label.highlight-orange {
+      border-color: var(--orange);
+      color: var(--orange);
+      box-shadow: 0 0 10px var(--orange-glow);
+    }
+
+    /* Live status readout banner */
+    .status-ticker {
+      position: absolute;
+      bottom: 16px;
+      left: 20px;
+      right: 20px;
+      background: rgba(10, 14, 22, 0.9);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      z-index: 5;
+    }
+
+    .ticker-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .ticker-step {
+      color: var(--orange);
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ticker-desc {
+      color: var(--text);
+    }
+
+    .ticker-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      color: var(--text-muted);
+    }
+
+    .cost-badge {
+      background: rgba(52, 211, 153, 0.15);
+      color: var(--emerald);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      padding: 2px 10px;
+      border-radius: 9999px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 0 12px var(--emerald-glow);
+    }
+
+    /* Responsive scaling for 16:9 look */
+    @media (max-width: 1400px) {
+      .pipeline-stage {
+        transform-origin: top center;
+        transform: scale(0.9);
+        margin-bottom: -70px;
+      }
+    }
+
+    @media (max-width: 1100px) {
+      .pipeline-stage {
+        transform: scale(0.75);
+        margin-bottom: -160px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid-bg"></div>
+  <div class="scanline"></div>
+
+  <!-- Header -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </div>
+      <div class="brand-title">
+        ORCHESTRA AI
+        <span class="brand-badge">MoA Swarm Engine</span>
+      </div>
+    </div>
+
+    <!-- Live Telemetry Readout -->
+    <div class="telemetry-bar">
+      <div class="telemetry-item">
+        <span class="pulse-dot"></span>
+        <span>FLEET: <strong>FREE MODELS</strong></span>
+      </div>
+      <div class="telemetry-item">
+        <span>DAILY QUOTA: <strong>1,000 / day</strong> ($10 balance)</span>
+      </div>
+      <div class="telemetry-item">
+        <span>BURST SAFE: <strong>20 RPM Guard</strong></span>
+      </div>
+      <div class="telemetry-item">
+        <span>RUN COST: <strong style="color: var(--emerald);">$0.0000</strong></span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls-bar">
+      <button class="btn btn-primary" id="btnTrigger">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+          <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        </svg>
+        Simulate Run
+      </button>
+      <button class="btn" id="btnTogglePlay">Pause</button>
+    </div>
+  </header>
+
+  <!-- Main Pipeline Canvas -->
+  <main>
+    <div class="pipeline-stage" id="stage">
+      <!-- SVG Connecting Lines Layer (Coordinates 1500 x 720) -->
+      <svg class="circuit-layer" viewBox="0 0 1500 720">
+        <!-- STATIC BACKGROUND RAILS -->
+        <!-- User to Router -->
+        <path class="pipe-bg" d="M 180 340 L 250 340" />
+
+        <!-- Router to Fast Path (Bypass: requiresSwarm=false) -->
+        <path class="pipe-bg" d="M 370 300 C 420 100, 1080 100, 1140 300" />
+
+        <!-- Router to Swarm Proposers (Fan-Out) -->
+        <path class="pipe-bg" d="M 370 340 C 420 340, 430 180, 480 180" />
+        <path class="pipe-bg" d="M 370 340 C 420 340, 430 280, 480 280" />
+        <path class="pipe-bg" d="M 370 340 C 420 340, 430 380, 480 380" />
+        <path class="pipe-bg" d="M 370 340 C 420 340, 430 480, 480 480" />
+
+        <!-- Proposers to Disagreement Detector (Fan-In) -->
+        <path class="pipe-bg" d="M 640 180 C 690 180, 710 330, 760 330" />
+        <path class="pipe-bg" d="M 640 280 C 690 280, 710 330, 760 330" />
+        <path class="pipe-bg" d="M 640 380 C 690 380, 710 330, 760 330" />
+        <path class="pipe-bg" d="M 640 480 C 690 480, 710 330, 760 330" />
+
+        <!-- Disagreement Detector to Final Stream (Default Path) -->
+        <path class="pipe-bg" d="M 910 330 L 1140 330" />
+
+        <!-- Disagreement Detector to Reflection Loop (Aggregator -> Revisor) -->
+        <path class="pipe-bg" d="M 910 330 C 940 330, 930 490, 960 490" />
+        <path class="pipe-bg" d="M 1080 490 L 1120 490" />
+        <path class="pipe-bg" d="M 1240 490 C 1270 490, 1260 370, 1220 370" />
+
+        <!-- Disagreement Detector to Tournament (Borda Rank) -->
+        <path class="pipe-bg" d="M 910 330 C 940 330, 930 600, 960 600" />
+        <path class="pipe-bg" d="M 1120 600 C 1170 600, 1180 370, 1200 370" />
+
+        <!-- Final Stream to Output -->
+        <path class="pipe-bg" d="M 1270 330 L 1330 330" />
+        <!-- Output to Cost Banner -->
+        <path class="pipe-bg" d="M 1390 380 L 1390 440" />
+
+        <!-- ACTIVE ANIMATED WIRES (Glowing & pulsing) -->
+        <path id="pathUserToRouter" class="pipe-active" d="M 180 340 L 250 340" />
+        <path id="pathBypass" class="pipe-active pipe-fast" style="display:none;" d="M 370 300 C 420 100, 1080 100, 1140 300" />
+        
+        <!-- Swarm Fan-Outs -->
+        <path id="pathRouterToP1" class="pipe-active" d="M 370 340 C 420 340, 430 180, 480 180" />
+        <path id="pathRouterToP2" class="pipe-active" d="M 370 340 C 420 340, 430 280, 480 280" />
+        <path id="pathRouterToPN" class="pipe-active" d="M 370 340 C 420 340, 430 380, 480 380" />
+        <path id="pathRouterToSkeptic" class="pipe-active pipe-skeptic" d="M 370 340 C 420 340, 430 480, 480 480" />
+
+        <!-- Swarm Fan-Ins to DD -->
+        <path id="pathP1ToDD" class="pipe-active" d="M 640 180 C 690 180, 710 330, 760 330" />
+        <path id="pathP2ToDD" class="pipe-active" d="M 640 280 C 690 280, 710 330, 760 330" />
+        <path id="pathPNToDD" class="pipe-active" d="M 640 380 C 690 380, 710 330, 760 330" />
+        <path id="pathSkepticToDD" class="pipe-active pipe-skeptic" d="M 640 480 C 690 480, 710 330, 760 330" />
+
+        <!-- DD to Final Stream (Default Path) -->
+        <path id="pathDDToFinal" class="pipe-active pipe-orange" d="M 910 330 L 1140 330" />
+
+        <!-- Final to Output -->
+        <path id="pathFinalToOut" class="pipe-active pipe-emerald" d="M 1270 330 L 1330 330" />
+        <!-- Output to Cost -->
+        <path id="pathOutToCost" class="pipe-active pipe-emerald" d="M 1390 380 L 1390 440" />
+
+        <!-- MOVING LIGHT PACKETS -->
+        <circle id="pkt1" class="pulse-packet" r="5" />
+        <circle id="pkt2" class="pulse-packet" r="5" />
+        <circle id="pkt3" class="pulse-packet" r="5" />
+        <circle id="pkt4" class="pulse-packet" r="5" />
+      </svg>
+
+      <!-- BRANCH LABELS -->
+      <div class="flow-label" style="top: 80px; left: 660px;" id="lblBypass">
+        requiresSwarm=false · trivial prompt bypass
+      </div>
+      <div class="flow-label highlight-orange" style="top: 230px; left: 375px;">
+        requiresSwarm=true · parallel fan-out
+      </div>
+      <div class="flow-label highlight-cyan" style="top: 310px; left: 935px;">
+        DEFAULT: drafts + conflict marker in system prompt
+      </div>
+      <div class="flow-label" style="top: 450px; left: 935px;">
+        reflection ON: inlineSynthesis=false
+      </div>
+      <div class="flow-label" style="top: 565px; left: 935px;">
+        tournament mode: Borda winner
+      </div>
+
+      <!-- NODES LAYER -->
+      <div class="nodes-layer">
+        <!-- 1. User Message -->
+        <div class="node-card" id="nodeUser" style="top: 300px; left: 30px; width: 150px;">
+          <div class="node-header">
+            <span class="node-icon">👤</span>
+            <span class="node-title">User Message</span>
+          </div>
+          <div class="node-subtitle">Constrained code / logic puzzle</div>
+          <span class="node-badge badge-cyan">Input Prompt</span>
+        </div>
+
+        <!-- 2. Router DPG (utility-model) -->
+        <div class="node-card" id="nodeRouter" style="top: 290px; left: 250px; width: 120px;">
+          <div class="node-header">
+            <span class="node-icon">🔀</span>
+            <span class="node-title">Router DPG</span>
+          </div>
+          <div class="node-subtitle">utility-model (free)</div>
+          <span class="node-badge badge-orange" id="badgeRouter">SWARM=TRUE</span>
+        </div>
+
+        <!-- 3. Parallel Swarm Proposers + Skeptic -->
+        <!-- Proposer 1 -->
+        <div class="node-card" id="nodeP1" style="top: 150px; left: 480px; width: 160px;">
+          <div class="node-header">
+            <span class="node-icon">⚡</span>
+            <span class="node-title">Proposer 1</span>
+          </div>
+          <div class="node-subtitle">Llama-3.3-70B:free</div>
+          <span class="node-badge badge-cyan">Candidate Draft #1</span>
+        </div>
+
+        <!-- Proposer 2 -->
+        <div class="node-card" id="nodeP2" style="top: 250px; left: 480px; width: 160px;">
+          <div class="node-header">
+            <span class="node-icon">⚡</span>
+            <span class="node-title">Proposer 2</span>
+          </div>
+          <div class="node-subtitle">Qwen-2.5-Coder:free</div>
+          <span class="node-badge badge-cyan">Candidate Draft #2</span>
+        </div>
+
+        <!-- Proposer N -->
+        <div class="node-card" id="nodePN" style="top: 350px; left: 480px; width: 160px;">
+          <div class="node-header">
+            <span class="node-icon">⚡</span>
+            <span class="node-title">Proposer N</span>
+          </div>
+          <div class="node-subtitle">Mistral-Nemo:free</div>
+          <span class="node-badge badge-cyan">Candidate Draft #3</span>
+        </div>
+
+        <!-- Skeptic (Guaranteed Operator-Pinnable) -->
+        <div class="node-card" id="nodeSkeptic" style="top: 450px; left: 480px; width: 160px; border-color: rgba(244, 63, 94, 0.4);">
+          <div class="node-header">
+            <span class="node-icon" style="background: rgba(244, 63, 94, 0.2); color: #f43f5e;">🛡️</span>
+            <span class="node-title" style="color: #fda4af;">Skeptic</span>
+          </div>
+          <div class="node-subtitle">Guaranteed · pinned model</div>
+          <span class="node-badge badge-rose">Adversarial Critic</span>
+        </div>
+
+        <!-- 4. Disagreement Detector (DD) -->
+        <div class="node-card" id="nodeDD" style="top: 290px; left: 760px; width: 150px;">
+          <div class="node-header">
+            <span class="node-icon">📐</span>
+            <span class="node-title">Disagreement</span>
+          </div>
+          <div class="node-subtitle">Detector (cosine > 0.35)</div>
+          <span class="node-badge badge-orange" id="badgeDD">DIVERGENT (0.41)</span>
+        </div>
+
+        <!-- Reflection loop sub-nodes -->
+        <div class="node-card" id="nodeAgg" style="top: 460px; left: 960px; width: 120px; opacity: 0.65;">
+          <div class="node-header">
+            <span class="node-icon">📊</span>
+            <span class="node-title">Aggregator</span>
+          </div>
+          <div class="node-subtitle">brain-model</div>
+        </div>
+
+        <div class="node-card" id="nodeRev" style="top: 460px; left: 1120px; width: 120px; opacity: 0.65;">
+          <div class="node-header">
+            <span class="node-icon">✏️</span>
+            <span class="node-title">Revisor</span>
+          </div>
+          <div class="node-subtitle">flags & refines</div>
+        </div>
+
+        <!-- Tournament node -->
+        <div class="node-card" id="nodeTournament" style="top: 570px; left: 960px; width: 160px; opacity: 0.65;">
+          <div class="node-header">
+            <span class="node-icon">🏆</span>
+            <span class="node-title">Tournament</span>
+          </div>
+          <div class="node-subtitle">K judges · Borda rank</div>
+        </div>
+
+        <!-- 5. Final Tool-Capable Stream -->
+        <div class="node-card" id="nodeFinal" style="top: 290px; left: 1140px; width: 130px;">
+          <div class="node-header">
+            <span class="node-icon">🧠</span>
+            <span class="node-title">Final Stream</span>
+          </div>
+          <div class="node-subtitle">brain-model (tools)</div>
+          <span class="node-badge badge-emerald">EXEC & TOOL CALL</span>
+        </div>
+
+        <!-- 6. Output Node -->
+        <div class="node-card" id="nodeOut" style="top: 300px; left: 1330px; width: 120px;">
+          <div class="node-header">
+            <span class="node-icon">✨</span>
+            <span class="node-title">Response</span>
+          </div>
+          <div class="node-subtitle">Verified verbatim</div>
+          <span class="node-badge badge-emerald">36 / 36 PASS</span>
+        </div>
+
+        <!-- 7. Cost Banner Node -->
+        <div class="node-card active-emerald" id="nodeCost" style="top: 440px; left: 1320px; width: 140px;">
+          <div class="node-header">
+            <span class="node-icon">💳</span>
+            <span class="node-title">Cost Banner</span>
+          </div>
+          <div class="node-subtitle" style="color: var(--emerald); font-weight: 700;">$0.00 / 0 Tokens</div>
+          <span class="node-badge badge-emerald">FREE OPENROUTER</span>
+        </div>
+      </div>
+
+      <!-- Live Status Readout Banner -->
+      <div class="status-ticker">
+        <div class="ticker-left">
+          <span class="ticker-step" id="tickerStep">PHASE 1/5</span>
+          <span class="ticker-desc" id="tickerDesc">User prompt received: Dispatching to Router DPG utility model...</span>
+        </div>
+        <div class="ticker-right">
+          <span>BURST: <strong>4 agents concurrent</strong></span>
+          <span>LATENCY: <strong>5.2s total</strong></span>
+          <div class="cost-badge">
+            <span>●</span>
+            <span>TOTAL: $0.00</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // State machine for the pipeline animation
+    const nodes = {
+      user: document.getElementById('nodeUser'),
+      router: document.getElementById('nodeRouter'),
+      p1: document.getElementById('nodeP1'),
+      p2: document.getElementById('nodeP2'),
+      pN: document.getElementById('nodePN'),
+      skeptic: document.getElementById('nodeSkeptic'),
+      dd: document.getElementById('nodeDD'),
+      final: document.getElementById('nodeFinal'),
+      out: document.getElementById('nodeOut'),
+      cost: document.getElementById('nodeCost')
+    };
+
+    const tickerStep = document.getElementById('tickerStep');
+    const tickerDesc = document.getElementById('tickerDesc');
+
+    let currentPhase = 0;
+    let isPlaying = true;
+    let timer = null;
+
+    function resetNodes() {
+      Object.values(nodes).forEach(n => {
+        n.classList.remove('active', 'active-orange', 'active-skeptic', 'active-emerald');
+      });
+      document.querySelectorAll('.pulse-packet').forEach(p => p.style.opacity = '0');
+    }
+
+    const phases = [
+      {
+        step: "PHASE 1: PROMPT ARRIVAL",
+        desc: "User prompt arrives: 'Solve seeded RNG logic puzzle with verification'. Signal hits Router DPG.",
+        action: () => {
+          resetNodes();
+          nodes.user.classList.add('active');
+          nodes.router.classList.add('active-orange');
+          animatePacket('pathUserToRouter', 'pkt1', 600);
+        }
+      },
+      {
+        step: "PHASE 2: SWARM FAN-OUT",
+        desc: "Router determines requiresSwarm=true. Bursting 3 Proposers + 1 Force-Injected Skeptic simultaneously!",
+        action: () => {
+          nodes.user.classList.remove('active');
+          nodes.router.classList.add('active-orange');
+          nodes.p1.classList.add('active');
+          nodes.p2.classList.add('active');
+          nodes.pN.classList.add('active');
+          nodes.skeptic.classList.add('active-skeptic');
+
+          animatePacket('pathRouterToP1', 'pkt1', 700);
+          animatePacket('pathRouterToP2', 'pkt2', 700);
+          animatePacket('pathRouterToPN', 'pkt3', 700);
+          animatePacket('pathRouterToSkeptic', 'pkt4', 700);
+        }
+      },
+      {
+        step: "PHASE 3: DISAGREEMENT DETECTOR",
+        desc: "All 4 drafts converge. Pairwise embedding cosine distance = 0.41 (> 0.35 threshold). Conflict flagged!",
+        action: () => {
+          nodes.p1.classList.remove('active');
+          nodes.p2.classList.remove('active');
+          nodes.pN.classList.remove('active');
+          nodes.skeptic.classList.remove('active-skeptic');
+          nodes.dd.classList.add('active-orange');
+
+          animatePacket('pathP1ToDD', 'pkt1', 600);
+          animatePacket('pathP2ToDD', 'pkt2', 600);
+          animatePacket('pathPNToDD', 'pkt3', 600);
+          animatePacket('pathSkepticToDD', 'pkt4', 600);
+        }
+      },
+      {
+        step: "PHASE 4: INLINE SYNTHESIS COLLAPSE",
+        desc: "Consensus Gate: Drafts + conflict markers injected into Final Stream system prompt. Tools ready.",
+        action: () => {
+          nodes.dd.classList.remove('active-orange');
+          nodes.final.classList.add('active-emerald');
+          animatePacket('pathDDToFinal', 'pkt1', 800);
+        }
+      },
+      {
+        step: "PHASE 5: VERIFICATION & ZERO COST",
+        desc: "Final response verified 36/36 exact brute-force match in 5.2s. Total cost: $0.00 (OpenRouter Free Tier).",
+        action: () => {
+          nodes.final.classList.remove('active-emerald');
+          nodes.out.classList.add('active-emerald');
+          nodes.cost.classList.add('active-emerald');
+
+          animatePacket('pathFinalToOut', 'pkt1', 500);
+          setTimeout(() => {
+            animatePacket('pathOutToCost', 'pkt2', 400);
+          }, 300);
+        }
+      }
+    ];
+
+    function animatePacket(pathId, packetId, durationMs) {
+      const path = document.getElementById(pathId);
+      const pkt = document.getElementById(packetId);
+      if (!path || !pkt) return;
+
+      const pathLength = path.getTotalLength();
+      pkt.style.opacity = '1';
+      const start = performance.now();
+
+      function step(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / durationMs, 1);
+        const point = path.getPointAtLength(progress * pathLength);
+        pkt.setAttribute('cx', point.x);
+        pkt.setAttribute('cy', point.y);
+
+        if (progress < 1) {
+          requestAnimationFrame(step);
+        } else {
+          pkt.style.opacity = '0';
+        }
+      }
+      requestAnimationFrame(step);
+    }
+
+    function runNextPhase() {
+      const phase = phases[currentPhase];
+      tickerStep.textContent = phase.step;
+      tickerDesc.textContent = phase.desc;
+      phase.action();
+
+      currentPhase = (currentPhase + 1) % phases.length;
+    }
+
+    function startLoop() {
+      runNextPhase();
+      timer = setInterval(() => {
+        if (isPlaying) runNextPhase();
+      }, 2200);
+    }
+
+    startLoop();
+
+    // Trigger button
+    document.getElementById('btnTrigger').addEventListener('click', () => {
+      currentPhase = 0;
+      runNextPhase();
+    });
+
+    // Pause/Play button
+    const btnPlay = document.getElementById('btnTogglePlay');
+    btnPlay.addEventListener('click', () => {
+      isPlaying = !isPlaying;
+      btnPlay.textContent = isPlaying ? 'Pause' : 'Play';
+    });
+  </script>
+</body>
+</html>

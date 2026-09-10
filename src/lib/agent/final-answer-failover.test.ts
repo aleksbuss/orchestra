@@ -627,19 +627,19 @@ describe("cascade through the substitute pool (PM #113)", () => {
     );
   });
 
-  it("PM #123 — the default budget survives one full-length (~120s) slow candidate and still tries a second", async () => {
+  it("PM #123 — the default budget survives one full-length (~240s) slow candidate and still tries a second", async () => {
     // Live incident, 2026-09-02: brain failed fast, the FIRST substitute hung
-    // for its own full ~120s call-deadline, and the (old, 90s) cascade budget
+    // for its own full call-deadline, and the aggregate cascade budget
     // was ALREADY exceeded before a second, perfectly healthy candidate could
     // even be attempted. This pins the fix: with no env override (the real
-    // default), a single 120s-long attempt must not exhaust the budget.
+    // default), a single 240s-long attempt must not exhaust the budget.
     delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
     vi.useFakeTimers();
     let call = 0;
     mockedGenerateText.mockImplementation((async () => {
       call += 1;
       if (call === 1) {
-        vi.advanceTimersByTime(120_000); // the slow candidate's own call-deadline
+        vi.advanceTimersByTime(240_000); // the slow candidate's own call-deadline
         return { text: "" };
       }
       return { text: "from the second candidate" };

@@ -155,8 +155,8 @@ export function createStreamWatchdog(
   };
 }
 
-/** Default bound for a NON-streaming UTILITY call (Router, aggregator, compressor, …). */
-const DEFAULT_CALL_DEADLINE_MS = 120_000;
+/** Default bound for a NON-streaming UTILITY call (Router, aggregator, compressor, failover, …). */
+const DEFAULT_CALL_DEADLINE_MS = 240_000;
 
 /**
  * Default bound for a non-streaming FULL AGENT TURN — `runAgentText`,

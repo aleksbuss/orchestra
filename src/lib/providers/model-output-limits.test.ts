@@ -23,7 +23,7 @@ describe("getModelMaxOutput — static family registry", () => {
     expect(getModelMaxOutput("openai", "gpt-4o-mini")).toBe(16_384);
     expect(getModelMaxOutput("openai", "gpt-4-turbo")).toBe(4_096);
     expect(getModelMaxOutput("openai", "o3-mini")).toBe(100_000);
-    expect(getModelMaxOutput("openrouter", "deepseek/deepseek-chat")).toBe(8_192);
+    expect(getModelMaxOutput("openrouter", "deepseek/deepseek-chat")).toBe(16_384);
     expect(getModelMaxOutput("anthropic", "claude-3-5-sonnet")).toBe(8_192);
     expect(getModelMaxOutput("google", "gemini-2.5-pro")).toBe(65_536);
   });
@@ -56,7 +56,7 @@ describe("resolveMaxOutputTokens", () => {
       resolveMaxOutputTokens(
         cfg({ provider: "openrouter", model: "deepseek/deepseek-chat", maxTokens: 50_000 })
       )
-    ).toBe(8_192);
+    ).toBe(16_384);
   });
 
   it("falls back to DEFAULT_MAX_OUTPUT for an unknown model with no explicit value", () => {

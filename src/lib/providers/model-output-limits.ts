@@ -90,8 +90,9 @@ const FAMILY_LIMITS: Array<[pattern: string, maxOutput: number]> = [
   ["gemini-2.0", 8_192],
   ["gemini-1.5", 8_192],
   ["gemini", 8_192],
-  // DeepSeek.
-  ["deepseek", 8_192],
+  // DeepSeek — v4-flash supports 384K, v3.2 65K, deepseek-chat 16K (OpenRouter
+  // /models verified 2026-09-10). 16384 is the safe common denominator.
+  ["deepseek", 16_384],
   // Common open families (Ollama / OpenRouter) — safe generous default.
   ["qwen", 8_192],
   ["llama", 8_192],

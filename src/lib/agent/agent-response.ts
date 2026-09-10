@@ -658,12 +658,12 @@ const LOOP_ABORT_PAUSE_NOTICE =
   "[Agent] Stopped early — caught in an identical-call tool loop. Review the work or redirect.";
 
 /**
- * Cap on auto-continuation output tokens. Sized to 4096: large enough to complete
- * complex truncated code/schemas, but bounded so a misbehaving model that
- * repeats the prior answer from the start cannot produce an unbounded duplicate
- * wall of text.
+ * Cap on auto-continuation output tokens. Sized to 8192: large enough to complete
+ * complex truncated code/schemas (e.g. multi-procedure Delphi blocks), but bounded
+ * so a misbehaving model that repeats the prior answer from the start cannot
+ * produce an unbounded duplicate wall of text.
  */
-const AUTO_CONTINUE_MAX_OUTPUT_TOKENS = 4096;
+const AUTO_CONTINUE_MAX_OUTPUT_TOKENS = 8192;
 
 /**
  * PM #36 (truncation continuation) + PM #69 (forced final answer) — given a

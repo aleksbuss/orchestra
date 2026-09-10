@@ -18,7 +18,7 @@
  *      operator's `utilityModel` + the 3 proposer tiers, ≤4 candidates, deduped
  *      against each other and the brain), trying each in order until one
  *      succeeds, skipping circuit-open endpoints, bounded by
- *      `ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS` (default 90s) so a string of dead
+ *      `ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS` (default 600s) so a string of dead
  *      free endpoints cannot stack unboundedly. Every substitution is announced
  *      LOUDLY (a substituted answer must never look like a normal one).
  * PM #113 — step 3 used to try exactly ONE substitute and stop; in Free Mode,
@@ -126,19 +126,11 @@ function retryBackoffMs(): number {
  * without a restart.
  */
 function cascadeBudgetMs(): number {
-  // PM #123 — was 90_000. `attemptOnce` bounds EACH candidate with its own
-  // ~120s call deadline (`callDeadlineSignal`, `stream-watchdog.ts`), so a
-  // 90s AGGREGATE budget was smaller than a single candidate's own allowed
-  // runtime — one genuinely slow (not erroring, just hanging) candidate could
-  // burn the whole cascade budget alone, silently truncating a pool that
-  // still had healthy, untried candidates in it. Live incident: brain failed
-  // fast (bad JSON, ~seconds), the FIRST substitute then hit its own 120s
-  // timeout, and the cascade reported total failure with 2 more real
-  // candidates never attempted. 300s is sized off tonight's own successful
-  // cascades (measured live: 270s–427s total, several candidates each
-  // potentially slow) — enough room for multiple full-length attempts, not
-  // just one.
-  return Number(process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? 300_000);
+  // PM #123 — was 90_000, then 300_000. `attemptOnce` bounds EACH candidate
+  // with its own call deadline (`callDeadlineSignal`, `stream-watchdog.ts`, default 240s),
+  // so the aggregate cascade budget must be sized to survive multiple full-length attempts.
+  // 600s allows at least two full 240s slow attempts plus starting a third candidate.
+  return Number(process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? 600_000);
 }
 
 /**

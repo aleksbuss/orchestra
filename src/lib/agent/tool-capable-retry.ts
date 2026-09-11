@@ -52,7 +52,14 @@ import { createModel } from "@/lib/providers/llm-provider";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { resolveContextWindow } from "@/lib/providers/context-window";
 import { createTokenGovernor, withStepBudgetNotice } from "@/lib/agent/token-governor";
-import { turnDeadlineSignal } from "@/lib/agent/stream-watchdog";
+import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
+
+const DEFAULT_TOOL_RETRY_DEADLINE_MS = 60_000;
+
+export function toolRetryDeadlineMs(): number {
+  const raw = Number(process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS ?? DEFAULT_TOOL_RETRY_DEADLINE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOOL_RETRY_DEADLINE_MS;
+}
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import {
   turnHasDeliverableAnswer,
@@ -216,16 +223,16 @@ export async function attemptToolCapableRetry(
       messages,
       providerOptions: args.providerOptions,
       tools: args.tools,
-      maxRetries: 3,
+      // Sprint 3: cap retries to 1 (was 3) so free-tier 429/errors fail fast
+      // to tool-less fallback rather than lingering.
+      maxRetries: 1,
       prepareStep: withStepBudgetNotice(tokenGovernor, { maxSteps: args.maxToolSteps }),
       stopWhen: [stepCountIs(args.maxToolSteps), hasToolCall("response"), toolRetryLoopAbortStop],
       temperature: args.settings.chatModel.temperature ?? 0.7,
       maxOutputTokens: resolveMaxOutputTokens(candidate),
-      // Sized for a full multi-step turn, not a utility call — same choice
-      // `runAgentText` (agent.ts) already makes for its own tool-capable
-      // generateText call. Nothing is listening for live chunks during
-      // recovery, so `generateText` over `streamText` costs nothing here.
-      abortSignal: turnDeadlineSignal(args.abortSignal),
+      // Sprint 3: bound the single tool retry attempt to 60s (was 10 minutes)
+      // so a hung substitute model does not block the failover cascade.
+      abortSignal: callDeadlineSignal(args.abortSignal, toolRetryDeadlineMs()),
       onStepFinish: async (event) => {
         const stepToolCalls = (
           event as unknown as { toolCalls?: Array<{ toolName?: string }> }

@@ -18,7 +18,7 @@
  *      operator's `utilityModel` + the 3 proposer tiers, ≤4 candidates, deduped
  *      against each other and the brain), trying each in order until one
  *      succeeds, skipping circuit-open endpoints, bounded by
- *      `ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS` (default 600s) so a string of dead
+ *      `ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS` (default 50s) so a string of dead
  *      free endpoints cannot stack unboundedly. Every substitution is announced
  *      LOUDLY (a substituted answer must never look like a normal one).
  * PM #113 — step 3 used to try exactly ONE substitute and stop; in Free Mode,
@@ -112,25 +112,34 @@ export function boundForcedAnswerContext(messages: ModelMessage[]): ModelMessage
 
 /** Backoff before the single brain retry (jittered — see `emptyBackoffMs` in moa.ts). */
 function retryBackoffMs(): number {
-  const base = Number(process.env.ORCHESTRA_FINAL_ANSWER_BACKOFF_MS ?? 2000);
-  return Math.round(base * (1 + Math.random() * 0.4));
+  const base = Number(process.env.ORCHESTRA_FINAL_ANSWER_BACKOFF_MS ?? 1500);
+  return Math.min(2000, Math.round(base * (1 + Math.random() * 0.3)));
+}
+
+const DEFAULT_FALLBACK_CASCADE_BUDGET_MS = 50_000;
+const DEFAULT_FALLBACK_ATTEMPT_DEADLINE_MS = 25_000;
+
+/**
+ * PM #113 / Sprint 3 — aggregate wall-clock budget for the substitute CASCADE (attempt 3+).
+ * Bounded to 50s so dead/throttled free endpoints cannot hang the user indefinitely.
+ */
+export function cascadeBudgetMs(): number {
+  const raw = Number(
+    process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? DEFAULT_FALLBACK_CASCADE_BUDGET_MS
+  );
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_FALLBACK_CASCADE_BUDGET_MS;
 }
 
 /**
- * PM #113 — aggregate wall-clock budget for the substitute CASCADE (attempt 3+).
- *
- * Nothing bounded the ladder's total elapsed time before this — each
- * `attemptOnce` gets its own ~120s call deadline (`callDeadlineSignal`), but
- * nothing capped how many of those could stack. Read fresh per call, same
- * posture as `retryBackoffMs` above, so a test (or an operator) can change it
- * without a restart.
+ * Sprint 3 — per-attempt deadline inside a standard failover cascade.
+ * Clamped to at most budget / 2 so at least two attempts fit in the aggregate budget.
  */
-function cascadeBudgetMs(): number {
-  // PM #123 — was 90_000, then 300_000. `attemptOnce` bounds EACH candidate
-  // with its own call deadline (`callDeadlineSignal`, `stream-watchdog.ts`, default 240s),
-  // so the aggregate cascade budget must be sized to survive multiple full-length attempts.
-  // 600s allows at least two full 240s slow attempts plus starting a third candidate.
-  return Number(process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS ?? 600_000);
+export function fallbackAttemptDeadlineMs(): number {
+  const raw = Number(
+    process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS ?? DEFAULT_FALLBACK_ATTEMPT_DEADLINE_MS
+  );
+  const wanted = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_FALLBACK_ATTEMPT_DEADLINE_MS;
+  return Math.min(wanted, Math.floor(cascadeBudgetMs() / 2));
 }
 
 /**
@@ -395,10 +404,10 @@ async function attemptOnce(
         resolveMaxOutputTokens(args.settings.chatModel),
         FORCED_ANSWER_MAX_OUTPUT_TOKENS
       ),
-      // PM #98 — the RECOVERY ladder. It runs precisely when the brain has
-      // already failed, so an unbounded call here turns a recoverable turn
-      // into a total silent failure.
-      abortSignal: callDeadlineSignal(args.abortSignal, deadlineMs),
+      // PM #98 / Sprint 3 — the RECOVERY ladder. Bound each attempt with
+      // fallbackAttemptDeadlineMs() (default 25s) so a stalled free endpoint
+      // cannot hang the turn.
+      abortSignal: callDeadlineSignal(args.abortSignal, deadlineMs ?? fallbackAttemptDeadlineMs()),
     });
     const text = (result.text || "").trim();
     // PM #134 — a non-empty string is NOT proof of an answer. This ladder is
@@ -683,12 +692,17 @@ export async function generateFinalAnswerWithFailover(
   // a constant, or "why did it stop early?" stops being answerable from a log.
   const markupTriggered = markupDegradation !== undefined;
   const budgetMs = markupTriggered ? markupCascadeBudgetMs() : cascadeBudgetMs();
-  const attemptDeadlineMs = markupTriggered ? markupAttemptDeadlineMs() : undefined;
+  const attemptDeadlineMs = markupTriggered ? markupAttemptDeadlineMs() : fallbackAttemptDeadlineMs();
   if (markupTriggered) {
     console.warn(
       `[Agent] Final answer — cascade triggered by PRINTED MARKUP on ${endpointLabel}; ` +
         `running on the short budget (${budgetMs}ms aggregate, ${attemptDeadlineMs}ms per attempt) ` +
         `so the substitute pool is not walked at full length on a degraded free tier.`
+    );
+  } else {
+    console.warn(
+      `[Agent] Final answer — cascade running with ${budgetMs}ms aggregate budget, ` +
+        `${attemptDeadlineMs}ms per attempt.`
     );
   }
   const cascadeStartedAt = Date.now();

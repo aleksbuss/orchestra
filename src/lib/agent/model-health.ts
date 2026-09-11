@@ -46,6 +46,10 @@
  * same posture as `ORCHESTRA_DISABLE_AUTH`) makes every call a no-op.
  */
 
+import fsSync from "fs";
+import { dataPath } from "@/lib/storage/data-dir";
+import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
+
 /**
  * Why a model attempt was counted as a failure.
  *
@@ -132,10 +136,29 @@ const DEFAULT_COOLDOWN_MS = 5 * 60_000;
 const DEFAULT_UNUSABLE_COOLDOWN_MS = 24 * 60 * 60_000;
 
 const HEALTH_STORE_KEY = Symbol.for("orchestra.model-health.store");
+const HYDRATED_FLAG_KEY = Symbol.for("orchestra.model-health.hydrated");
+
+export function isModelHealthHydrated(): boolean {
+  const g = globalThis as unknown as Record<symbol, boolean | undefined>;
+  return g[HYDRATED_FLAG_KEY] === true;
+}
+
+export function setModelHealthHydrated(val: boolean): void {
+  const g = globalThis as unknown as Record<symbol, boolean | undefined>;
+  g[HYDRATED_FLAG_KEY] = val;
+}
 
 function store(): Map<string, ModelHealthEntry> {
   const g = globalThis as unknown as Record<symbol, Map<string, ModelHealthEntry> | undefined>;
-  return (g[HEALTH_STORE_KEY] ??= new Map());
+  let map = g[HEALTH_STORE_KEY];
+  if (!map) {
+    map = new Map();
+    g[HEALTH_STORE_KEY] = map;
+  }
+  if (!isModelHealthHydrated()) {
+    hydrateFromDiskSync(map);
+  }
+  return map;
 }
 
 /** Env is read per-call (not cached) so a test / operator change takes effect immediately. */
@@ -177,6 +200,145 @@ function policyFor(kind: ModelFailureKind): { threshold: number; cooldownMs: num
     };
   }
   return { threshold: failureThreshold(), cooldownMs: cooldownMs() };
+}
+
+interface PersistedHealthFile {
+  version: 1;
+  updatedAt: number;
+  entries: Record<string, ModelHealthEntry>;
+}
+
+export function getModelHealthCachePath(): string {
+  return dataPath("cache", "model-health.json");
+}
+
+function hydrateFromDiskSync(targetMap: Map<string, ModelHealthEntry>): void {
+  if (isModelHealthHydrated()) return;
+  setModelHealthHydrated(true);
+
+  if (isDisabled()) return;
+
+  try {
+    const filePath = getModelHealthCachePath();
+    if (!fsSync.existsSync(filePath)) return;
+
+    const content = fsSync.readFileSync(filePath, "utf-8");
+    if (!content.trim()) return;
+
+    const parsed = JSON.parse(content) as PersistedHealthFile;
+    if (!parsed || typeof parsed.entries !== "object") return;
+
+    const now = Date.now();
+    let imported = 0;
+    const MAX_HYDRATED_ENTRIES = 500;
+    for (const [key, rawEntry] of Object.entries(parsed.entries)) {
+      if (imported >= MAX_HYDRATED_ENTRIES) break;
+      if (!rawEntry || typeof rawEntry !== "object") continue;
+      if (!rawEntry.provider || !rawEntry.model) continue;
+
+      const policy = policyFor(rawEntry.openedByKind ?? rawEntry.lastFailureKind ?? "empty");
+      let openedAt = rawEntry.openedAt;
+      let openedByKind = rawEntry.openedByKind;
+
+      // If circuit was open, check if cooldown elapsed
+      if (openedAt !== null) {
+        if (now - openedAt >= policy.cooldownMs) {
+          openedAt = null;
+          openedByKind = null;
+        }
+      }
+
+      // Omit stale healed entries older than 7 days
+      if (rawEntry.lastFailureAt && now - rawEntry.lastFailureAt > 7 * 24 * 60 * 60_000 && openedAt === null) {
+        continue;
+      }
+
+      // Sub-threshold failure preservation:
+      // If circuit was open, preserve count. If closed but last failure is within cooldown,
+      // preserve consecutiveFailures so sub-threshold trips accumulate across restarts.
+      let consecutiveFailures = 0;
+      if (openedAt !== null) {
+        consecutiveFailures = Number.isFinite(rawEntry.consecutiveFailures)
+          ? Math.max(1, rawEntry.consecutiveFailures)
+          : 1;
+      } else if (rawEntry.lastFailureAt && now - rawEntry.lastFailureAt < policy.cooldownMs) {
+        consecutiveFailures = Number.isFinite(rawEntry.consecutiveFailures)
+          ? Math.max(0, rawEntry.consecutiveFailures)
+          : 0;
+      }
+
+      const entry: ModelHealthEntry = {
+        provider: rawEntry.provider,
+        model: rawEntry.model,
+        consecutiveFailures,
+        openedAt,
+        lastFailureKind: rawEntry.lastFailureKind ?? null,
+        openedByKind,
+        lastFailureAt: rawEntry.lastFailureAt ?? null,
+        totalFailures: rawEntry.totalFailures ?? 0,
+        totalSuccesses: rawEntry.totalSuccesses ?? 0,
+        markupFailures: rawEntry.markupFailures ?? 0,
+        probeInFlight: false,
+      };
+
+      targetMap.set(key, entry);
+      imported += 1;
+    }
+  } catch (err) {
+    console.warn("[ModelHealth] Failed to hydrate circuit breaker from disk (starting clean):", err);
+  }
+}
+
+let isPersisting = false;
+let hasPendingWrite = false;
+
+export async function persistModelHealth(): Promise<void> {
+  if (isDisabled()) return;
+
+  const filePath = getModelHealthCachePath();
+  const map = store();
+
+  const entries: Record<string, ModelHealthEntry> = {};
+  const now = Date.now();
+
+  for (const [key, entry] of map.entries()) {
+    if (entry.totalFailures === 0 && entry.openedAt === null) continue;
+    if (entry.lastFailureAt && now - entry.lastFailureAt > 7 * 24 * 60 * 60_000 && entry.openedAt === null) {
+      continue;
+    }
+    entries[key] = {
+      ...entry,
+      probeInFlight: false,
+    };
+  }
+
+  const payload: PersistedHealthFile = {
+    version: 1,
+    updatedAt: now,
+    entries,
+  };
+
+  await withFileLock(filePath, async () => {
+    await safeWriteFile(filePath, JSON.stringify(payload, null, 2));
+  });
+}
+
+function scheduleDiskPersist(): void {
+  hasPendingWrite = true;
+  if (isPersisting) return;
+  isPersisting = true;
+  Promise.resolve().then(async () => {
+    try {
+      while (hasPendingWrite) {
+        hasPendingWrite = false;
+        await persistModelHealth();
+      }
+    } catch (err) {
+      console.warn("[ModelHealth] Failed to persist circuit breaker to disk:", err);
+    } finally {
+      isPersisting = false;
+    }
+  });
 }
 
 /** True for failure kinds that no amount of retrying can fix. */
@@ -247,6 +409,7 @@ export function recordModelFailure(
     // fan-out reports mixed kinds against one endpoint).
     entry.openedAt = Date.now();
     if (isPermanentFailureKind(kind)) entry.openedByKind = kind;
+    scheduleDiskPersist();
     return;
   }
   if (count >= policy.threshold) {
@@ -267,6 +430,7 @@ export function recordModelFailure(
               `Skipping this endpoint for ${forSeconds}s.`
     );
   }
+  scheduleDiskPersist();
 }
 
 /**
@@ -299,6 +463,7 @@ export function recordModelSuccess(provider: string, model: string): void {
   if (wasOpen) {
     console.warn(`[ModelHealth] Circuit CLOSED for ${modelHealthKey(provider, model)} — probe succeeded.`);
   }
+  scheduleDiskPersist();
 }
 
 /**
@@ -562,7 +727,18 @@ export function getModelHealthSnapshot(): ModelHealthEntry[] {
 
 /** Test helper — clears all breaker state. */
 export function resetModelHealth(): void {
+  hasPendingWrite = false;
+  isPersisting = false;
   store().clear();
+  setModelHealthHydrated(true);
+  try {
+    const filePath = getModelHealthCachePath();
+    if (fsSync.existsSync(filePath)) {
+      fsSync.unlinkSync(filePath);
+    }
+  } catch {
+    // ignore
+  }
 }
 
 /** Minimal shape `selectHealthyConfig` needs. Any `ModelConfig` satisfies it. */

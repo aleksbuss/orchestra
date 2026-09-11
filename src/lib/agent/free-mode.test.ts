@@ -521,6 +521,8 @@ describe("non-chat model exclusion (found by a live 0/5 swarm collapse)", () => 
     // "0/5 proposers produced a usable draft".
     expect(isGeneralChatModel("nvidia/nemotron-3.5-content-safety:free")).toBe(false);
     expect(isGeneralChatModel("nvidia/nemotron-nano-12b-v2-vl:free")).toBe(false);
+    expect(isGeneralChatModel("thinkingmachines/inkling-small:free")).toBe(false);
+    expect(isGeneralChatModel("thinkingmachines/inkling:free")).toBe(false);
   });
 
   it("keeps every OTHER id from the same live catalogue", () => {

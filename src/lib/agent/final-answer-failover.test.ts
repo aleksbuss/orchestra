@@ -627,19 +627,17 @@ describe("cascade through the substitute pool (PM #113)", () => {
     );
   });
 
-  it("PM #123 — the default budget survives one full-length (~240s) slow candidate and still tries a second", async () => {
-    // Live incident, 2026-09-02: brain failed fast, the FIRST substitute hung
-    // for its own full call-deadline, and the aggregate cascade budget
-    // was ALREADY exceeded before a second, perfectly healthy candidate could
-    // even be attempted. This pins the fix: with no env override (the real
-    // default), a single 240s-long attempt must not exhaust the budget.
+  it("PM #123 / Sprint 3 — the default budget survives one full-length (25s) slow candidate and still tries a second", async () => {
+    // Sprint 3: candidate deadline is 25s (down from 240s), aggregate budget is 50s.
+    // A single 25s-long slow attempt must not exhaust the budget before the second candidate.
     delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+    delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
     vi.useFakeTimers();
     let call = 0;
     mockedGenerateText.mockImplementation((async () => {
       call += 1;
       if (call === 1) {
-        vi.advanceTimersByTime(240_000); // the slow candidate's own call-deadline
+        vi.advanceTimersByTime(25_000); // the slow candidate's own call-deadline (25s)
         return { text: "" };
       }
       return { text: "from the second candidate" };
@@ -1147,3 +1145,35 @@ describe("markup attribution when the brain is skipped (PM #134)", () => {
     expect(out.markupDegradation?.endpoint).not.toEqual(BRAIN);
   });
 });
+
+describe("fallback cascade budget guards (Sprint 3)", () => {
+  afterEach(() => {
+    delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+    delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
+  });
+
+  function warnings(): string {
+    return vi.mocked(console.warn).mock.calls.map((c) => c.join(" ")).join("\n");
+  }
+
+  it("clamps fallback attempt deadline to budget / 2", async () => {
+    process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS = "40000";
+    process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS = "35000";
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+
+    await generateFinalAnswerWithFailover(args({ skipBrainRetry: true }));
+
+    expect(warnings()).toContain("40000ms aggregate budget, 20000ms per attempt");
+  });
+
+  it("uses 50s aggregate budget and 25s attempt deadline by default", async () => {
+    delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
+    delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+
+    await generateFinalAnswerWithFailover(args({ skipBrainRetry: true }));
+
+    expect(warnings()).toContain("50000ms aggregate budget, 25000ms per attempt");
+  });
+});
+

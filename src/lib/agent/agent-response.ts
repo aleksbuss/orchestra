@@ -802,7 +802,42 @@ export async function resolveTurnContinuation(args: {
       return { text: (continuation.text || "").trim(), usage: readUsage(continuation) };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      console.warn("Auto-continuation failed:", error);
+      console.warn("Auto-continuation failed on primary model, attempting failover candidate:", errMsg);
+      try {
+        const attempt = await generateFinalAnswerWithFailover({
+          model,
+          systemPrompt,
+          messages: mergeConsecutiveSameRole([
+            ...baseMessages,
+            ...responseMessages,
+            {
+              role: "user",
+              content:
+                "Continue your previous answer from exactly where it stopped. " +
+                "Output only the continuation text, without repeating earlier content.",
+            },
+          ]),
+          providerOptions,
+          settings,
+          // PM #121: never pass the raw/potentially contaminated abortSignal to failover recovery
+          abortSignal: undefined,
+          brainConfig: brainConfig ?? settings.chatModel,
+          projectId,
+          currentPath,
+          degradationPolicy: degradationPolicy ?? resolveDegradationPolicy(settings),
+          skipBrainRetry: true,
+        });
+        if (attempt.text && attempt.text.trim().length > 0) {
+          return {
+            text: attempt.text.trim(),
+            usage: attempt.usage,
+            uiNotice: attempt.notice,
+          };
+        }
+      } catch (failoverErr) {
+        const failMsg = failoverErr instanceof Error ? failoverErr.message : String(failoverErr);
+        console.warn("Failover auto-continuation failed as well:", failMsg);
+      }
       return {
         text: "",
         uiNotice: `[Agent] Auto-continuation failed (truncated reply will ship as-is): ${errMsg}`,

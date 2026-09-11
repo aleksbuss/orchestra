@@ -163,7 +163,7 @@ describe("API Integration Tests", () => {
   describe("Dashboard accessibility", () => {
     it("should serve the dashboard page", async (ctx) => {
       await requireOrchestra(ctx);
-      const res = await safeFetch(`${BASE_URL}/dashboard`);
+      const res = await safeFetch(`${BASE_URL}/dashboard`, { redirect: "manual" });
       if (!res) {
         ctx.skip("server became unreachable mid-run");
         return;

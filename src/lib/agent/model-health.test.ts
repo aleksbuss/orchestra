@@ -10,7 +10,12 @@ import {
   tryAcquireProbe,
   classifyModelFailure,
   isPermanentFailureKind,
+  persistModelHealth,
+  getModelHealthCachePath,
+  setModelHealthHydrated,
 } from "./model-health";
+import fsSync from "fs";
+import path from "path";
 
 const P = "openrouter";
 const M = "vendor/dead-model:free";
@@ -625,3 +630,94 @@ describe("markup failures (PM #134)", () => {
     expect(getModelHealthSnapshot().find((e) => e.model === MM)?.markupFailures).toBe(0);
   });
 });
+
+describe("disk persistence and cold-boot hydration", () => {
+  beforeEach(() => {
+    resetModelHealth();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    resetModelHealth();
+    vi.restoreAllMocks();
+  });
+
+  it("persists open circuit to disk and reloads on cold boot", async () => {
+    recordModelFailure(P, "vendor/broken:free", "unusable");
+    expect(isModelCircuitOpen(P, "vendor/broken:free")).toBe(true);
+
+    await persistModelHealth();
+
+    const cachePath = getModelHealthCachePath();
+    expect(fsSync.existsSync(cachePath)).toBe(true);
+
+    const raw = fsSync.readFileSync(cachePath, "utf-8");
+    expect(raw).toContain("vendor/broken:free");
+    expect(raw).toContain("unusable");
+
+    // Simulate process restart by clearing memory and setting hydrated = false
+    const g = globalThis as unknown as Record<symbol, Map<string, unknown> | undefined>;
+    g[Symbol.for("orchestra.model-health.store")]?.clear();
+    setModelHealthHydrated(false);
+
+    // On access, it should re-hydrate from disk
+    expect(isModelCircuitOpen(P, "vendor/broken:free")).toBe(true);
+  });
+
+  it("re-hydrated circuit honors cooldown expiry", async () => {
+    recordModelFailure(P, "vendor/transient:free", "throttle");
+    recordModelFailure(P, "vendor/transient:free", "throttle");
+    recordModelFailure(P, "vendor/transient:free", "throttle");
+    expect(isModelCircuitOpen(P, "vendor/transient:free")).toBe(true);
+
+    await persistModelHealth();
+
+    const cachePath = getModelHealthCachePath();
+    const data = JSON.parse(fsSync.readFileSync(cachePath, "utf-8"));
+    const key = `${P}/vendor/transient:free`;
+    // Simulate cooldown elapsed 10 minutes ago
+    data.entries[key].openedAt = Date.now() - 10 * 60_000;
+    fsSync.writeFileSync(cachePath, JSON.stringify(data));
+
+    // Simulate cold boot
+    const g = globalThis as unknown as Record<symbol, Map<string, unknown> | undefined>;
+    g[Symbol.for("orchestra.model-health.store")]?.clear();
+    setModelHealthHydrated(false);
+
+    // Circuit should now be closed/half-open ready for probe
+    expect(isModelCircuitOpen(P, "vendor/transient:free")).toBe(false);
+  });
+
+  it("gracefully falls back on corrupt JSON without crashing", () => {
+    const cachePath = getModelHealthCachePath();
+    fsSync.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fsSync.writeFileSync(cachePath, "CORRUPT { INVALID JSON !@#$");
+
+    const g = globalThis as unknown as Record<symbol, Map<string, unknown> | undefined>;
+    g[Symbol.for("orchestra.model-health.store")]?.clear();
+    setModelHealthHydrated(false);
+
+    expect(() => isModelCircuitOpen(P, "vendor/any:free")).not.toThrow();
+    expect(isModelCircuitOpen(P, "vendor/any:free")).toBe(false);
+  });
+
+  it("preserves sub-threshold consecutiveFailures across cold boot when within cooldown", async () => {
+    // Record 2 failures (threshold is 3 for empty/transient)
+    recordModelFailure(P, "vendor/flaky:free", "empty");
+    recordModelFailure(P, "vendor/flaky:free", "empty");
+    expect(isModelCircuitOpen(P, "vendor/flaky:free")).toBe(false);
+
+    await persistModelHealth();
+
+    // Simulate cold boot
+    const g = globalThis as unknown as Record<symbol, Map<string, unknown> | undefined>;
+    g[Symbol.for("orchestra.model-health.store")]?.clear();
+    setModelHealthHydrated(false);
+
+    // One more failure should now trip the threshold of 3!
+    recordModelFailure(P, "vendor/flaky:free", "empty");
+    expect(isModelCircuitOpen(P, "vendor/flaky:free")).toBe(true);
+  });
+});
+
+

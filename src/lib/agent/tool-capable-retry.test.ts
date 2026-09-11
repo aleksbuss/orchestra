@@ -2,7 +2,7 @@
  * Tool-capable retry-on-model-swap — see the module's own docstring for the
  * cap=1/no-dedup-needed argument this file assumes rather than re-proves.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 vi.mock("ai", async () => {
   const actual = await vi.importActual<typeof import("ai")>("ai");
@@ -40,6 +40,7 @@ import type { AppSettings, Chat, ModelConfig } from "@/lib/types";
 import {
   selectToolCapableRetryCandidate,
   attemptToolCapableRetry,
+  toolRetryDeadlineMs,
   type ToolCapableRetryArgs,
 } from "./tool-capable-retry";
 
@@ -321,4 +322,29 @@ describe("attemptToolCapableRetry", () => {
       .mock.calls.filter((c) => c[0].topic === "chat" && c[0].reason?.includes("tool-capable retry"));
     expect(chatTopicCalls).toHaveLength(0);
   });
+
+  describe("toolRetryDeadlineMs", () => {
+    afterEach(() => {
+      delete process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS;
+    });
+
+    it("defaults to 60000ms", () => {
+      delete process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS;
+      expect(toolRetryDeadlineMs()).toBe(60_000);
+    });
+
+    it("respects valid positive numeric override", () => {
+      process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS = "45000";
+      expect(toolRetryDeadlineMs()).toBe(45_000);
+    });
+
+    it("safely falls back on NaN or negative values without throwing", () => {
+      process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS = "not-a-number";
+      expect(toolRetryDeadlineMs()).toBe(60_000);
+
+      process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS = "-1000";
+      expect(toolRetryDeadlineMs()).toBe(60_000);
+    });
+  });
 });
+

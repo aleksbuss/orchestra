@@ -112,6 +112,75 @@ export function streamRecoveryMarkupNotice(toolName: string): string {
   );
 }
 
+export const PARTIAL_TEXT_REPLACEMENT_THRESHOLD_CHARS = 150;
+
+/**
+ * Close unclosed markdown fences (```) so concatenated text renders valid markdown.
+ */
+export function normalizeMarkdownBoundaries(text: string): string {
+  const codeBlockMatches = text.match(/```/g);
+  if (codeBlockMatches && codeBlockMatches.length % 2 !== 0) {
+    return text + "\n```\n";
+  }
+  return text;
+}
+
+/**
+ * Instruction prompt for a substitute model to continue an interrupted stream.
+ */
+export function continuationInstruction(partialText: string): string {
+  return (
+    "The previous response was cut off mid-stream due to an interruption. " +
+    "Here is what was already output to the user:\n" +
+    "<interrupted_partial_output>\n" +
+    `${partialText}\n` +
+    "</interrupted_partial_output>\n\n" +
+    "Continue the answer from the exact point of interruption without repeating any text that was already delivered above. " +
+    "Output only the continuation text. Do not call any tools."
+  );
+}
+
+/**
+ * Stitches partial output with continuation text, ensuring clean markdown boundaries
+ * and preventing word boundary corruption or fence collisions.
+ */
+export function stitchContinuation(partialText: string, continuationText: string): string {
+  const p = partialText.trimEnd();
+  const c = continuationText.trimStart();
+  if (!c) return p;
+
+  const codeBlockMatches = p.match(/```/g);
+  const unclosedFence = codeBlockMatches && codeBlockMatches.length % 2 !== 0;
+
+  if (unclosedFence) {
+    // If continuation starts with its own code fence, joining directly avoids
+    // creating a double-fence collision (e.g. ```\n```ts).
+    if (c.startsWith("```")) {
+      return `${p}\n${c}`;
+    }
+    // If continuation closes the fence, join without extra boundary
+    const contFences = c.match(/```/g);
+    if (contFences && contFences.length % 2 !== 0) {
+      return `${p}\n${c}`;
+    }
+    // Otherwise close at the very end
+    return `${p}\n${c}\n\`\`\`\n`;
+  }
+
+  const isSentenceEnd = p.endsWith(".") || p.endsWith("!") || p.endsWith("?");
+  if (isSentenceEnd) {
+    return `${p}\n\n${c}`;
+  }
+
+  const rawEndedWithWhitespace = /\s$/.test(partialText);
+  if (rawEndedWithWhitespace || c.startsWith("\n")) {
+    return `${p} ${c}`;
+  }
+
+  // Mid-word cut (e.g. "hel" + "lo"): stitch without injecting extraneous whitespace
+  return `${p}${c}`;
+}
+
 /**
  * Duck-typed the same way `postmortem.ts`'s internal extractor reads an
  * `AI_APICallError` — including the PM #114 unwrap: `onError` usually receives
@@ -213,9 +282,6 @@ export async function recoverPrimaryStreamFailure(
   // recorded against the breaker (the endpoint did nothing wrong).
   if (args.abortSignal?.aborted) return { recovered: false };
 
-  // Gate 1 — the client already has visible partial output for this turn.
-  if (args.partialText.trim().length > 0) return { recovered: false };
-
   // Gate 3 — turn-scoped in-flight guard. Single-threaded per tick, so a
   // plain check-then-set is race-safe within this process.
   if (recoveryInFlight.has(args.chatId)) return { recovered: false };
@@ -254,13 +320,17 @@ export async function recoverPrimaryStreamFailure(
       },
     });
 
+    const trimmedPartial = args.partialText.trim();
+    // Substantial partial text (>= 150 chars) without prior tool executions qualifies for continuation.
+    // Short partials (< 150 chars) are replaced cleanly with a full substitute generation.
+    const isContinuation =
+      trimmedPartial.length >= PARTIAL_TEXT_REPLACEMENT_THRESHOLD_CHARS && !args.toolCallOccurred;
+
     // Tool-capable retry — exactly ONE candidate, gated on toolCallOccurred
-    // being false (nothing to duplicate; see tool-capable-retry.ts's own
-    // docstring for why cap=1 makes that provable, not just likely). Runs
-    // BEFORE the tool-less ladder: a genuinely completed task beats an
-    // honest refusal.
+    // being false and no partial text already emitted. Runs BEFORE the
+    // tool-less ladder: a genuinely completed task beats an honest refusal.
     let effectiveToolCallOccurred = args.toolCallOccurred;
-    if (!args.toolCallOccurred && args.tools && Object.keys(args.tools).length > 0) {
+    if (!args.toolCallOccurred && trimmedPartial.length === 0 && args.tools && Object.keys(args.tools).length > 0) {
       const toolRetry = await attemptToolCapableRetry({
         brainConfig: args.brainConfig,
         systemPrompt: args.systemPrompt,
@@ -276,22 +346,21 @@ export async function recoverPrimaryStreamFailure(
         maxToolSteps: args.maxToolSteps,
       });
       if (toolRetry.recovered) return { recovered: true };
-      // Falls through to the tool-less ladder below — but if the retry
-      // itself touched a tool before ultimately failing, that ladder's
-      // substitute must summarize honestly, not use the "no work was done"
-      // refusal wording (PM #119's premise, now true of the retry instead
-      // of the primary).
       effectiveToolCallOccurred = toolRetry.toolCallOccurred;
     }
 
     // Gate 2 — classify THIS error, don't blanket-skip the same-endpoint retry.
     const skipBrainRetry = isDeterministicClientError(args.error);
 
+    const instructionContent = isContinuation
+      ? continuationInstruction(trimmedPartial)
+      : finalAnswerInstruction(effectiveToolCallOccurred);
+
     const messages = mergeConsecutiveSameRole([
       ...args.messages,
       {
         role: "user" as const,
-        content: finalAnswerInstruction(effectiveToolCallOccurred),
+        content: instructionContent,
       },
     ]);
 
@@ -309,7 +378,7 @@ export async function recoverPrimaryStreamFailure(
       skipBrainRetry,
     });
 
-    if (!attempt.text) {
+    if (!attempt?.text) {
       // PM #134 — the ladder now rejects printed markup and keeps cascading, so
       // "no text" can mean "every candidate printed a tool call". Record that
       // before giving up: the whole point of the degradation telemetry is that
@@ -323,7 +392,7 @@ export async function recoverPrimaryStreamFailure(
       // cancel is not evidence about the model. The first cut had these two
       // the wrong way round.
       if (args.abortSignal?.aborted) return { recovered: false };
-      if (attempt.markupDegradation) {
+      if (attempt?.markupDegradation) {
         recordToolChannelDegradation({
           stage: "stream-recovery",
           chatId: args.chatId,
@@ -378,9 +447,14 @@ export async function recoverPrimaryStreamFailure(
     // (the reasoning `degradation-policy.ts` already encodes for undeliverable
     // turns), and the notice is prose, so unlike the markup it cannot become
     // few-shot fodder the next turn imitates.
-    const content = gate.degraded
+    const rawAnswer = gate.degraded
       ? streamRecoveryMarkupNotice(gate.toolName)
       : gate.text;
+
+    const content =
+      isContinuation && !gate.degraded
+        ? stitchContinuation(trimmedPartial, rawAnswer)
+        : rawAnswer;
 
     let persisted = false;
     try {

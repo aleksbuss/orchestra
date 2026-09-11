@@ -387,6 +387,20 @@ const NON_CHAT_PATTERNS = [
 ] as const;
 
 /**
+ * Models known to require specialized agentic harnesses (e.g. OpenRouter 403
+ * 'Gate Free Endpoints by Agentic Harness') or non-standard provider allowlists.
+ * Excluded statically so cold-boot selection never seats them as brain or router.
+ */
+export const HARNESS_GATED_PATTERNS = [
+  "thinkingmachines/",
+] as const;
+
+export function isHarnessGatedModel(id: string): boolean {
+  const lower = id.toLowerCase();
+  return HARNESS_GATED_PATTERNS.some((p) => lower.includes(p));
+}
+
+/**
  * Is this id usable as a text proposer / brain?
  *
  * Vision-language models are excluded by SUFFIX rather than substring: `-vl`
@@ -394,6 +408,7 @@ const NON_CHAT_PATTERNS = [
  * `:free` tag is stripped) counts.
  */
 export function isGeneralChatModel(id: string): boolean {
+  if (isHarnessGatedModel(id)) return false;
   const lower = id.toLowerCase();
   const withoutTag = lower.split(":")[0];
   if (withoutTag.endsWith("-vl")) return false;
@@ -402,7 +417,11 @@ export function isGeneralChatModel(id: string): boolean {
 
 export function selectFreeModels(): FreeModeSelection {
   // Sorted so selection is stable across processes — catalogue order is not.
-  const catalogue = sortFreeModelsByScore(listOpenRouterModelIds().filter(isFreeTierModel));
+  // Gated harness models are filtered out so they never enter the working catalogue.
+  const catalogue = sortFreeModelsByScore(
+    listOpenRouterModelIds()
+      .filter((id) => isFreeTierModel(id) && !isHarnessGatedModel(id))
+  );
 
   const live = catalogue.length > 0;
 

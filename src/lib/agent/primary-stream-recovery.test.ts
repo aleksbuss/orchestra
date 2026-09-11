@@ -53,6 +53,8 @@ import type { AppSettings, Chat, ModelConfig } from "@/lib/types";
 import {
   recoverPrimaryStreamFailure,
   isDeterministicClientError,
+  stitchContinuation,
+  PARTIAL_TEXT_REPLACEMENT_THRESHOLD_CHARS,
   type PrimaryStreamRecoveryArgs,
 } from "./primary-stream-recovery";
 
@@ -186,13 +188,28 @@ describe("recoverPrimaryStreamFailure — gates", () => {
     expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)).toBeNull();
   });
 
-  it("gate 1: non-empty partialText short-circuits — client already has visible content", async () => {
+  it("gate 1: short partialText (<150 chars) recovers with clean replacement answer", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "complete clean replacement answer", usage: undefined });
     const out = await recoverPrimaryStreamFailure(
-      baseArgs({ partialText: "The answer starts here and then the stream died" })
+      baseArgs({ partialText: "The answer starts here" })
     );
 
-    expect(out.recovered).toBe(false);
-    expect(mockedFailover).not.toHaveBeenCalled();
+    expect(out.recovered).toBe(true);
+    expect(mockedFailover).toHaveBeenCalled();
+  });
+
+  it("gate 1: long partialText (>=150 chars) recovers with continuation prompt and stitching", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "and here is the completed ending.", usage: undefined });
+    const longPartial = "A".repeat(160);
+    const out = await recoverPrimaryStreamFailure(
+      baseArgs({ partialText: longPartial, toolCallOccurred: false })
+    );
+
+    expect(out.recovered).toBe(true);
+    expect(mockedFailover).toHaveBeenCalled();
+    const lastMsg = chatState.messages[chatState.messages.length - 1];
+    expect(lastMsg?.content).toContain("and here is the completed ending.");
+    expect(lastMsg?.content).toContain(longPartial);
   });
 
   it("gate 1: whitespace-only partialText is treated as empty (still attempts recovery)", async () => {
@@ -757,5 +774,38 @@ describe("recoverPrimaryStreamFailure — a cancel is not a degradation (PM #134
         markupChars: 219,
       })
     );
+  });
+});
+
+describe("stitchContinuation and boundary thresholds", () => {
+  it("exports PARTIAL_TEXT_REPLACEMENT_THRESHOLD_CHARS as 150", () => {
+    expect(PARTIAL_TEXT_REPLACEMENT_THRESHOLD_CHARS).toBe(150);
+  });
+
+  it("stitches mid-word cuts without injecting extraneous whitespace", () => {
+    const stitched = stitchContinuation("the quick brown f", "ox jumps");
+    expect(stitched).toBe("the quick brown fox jumps");
+  });
+
+  it("stitches sentence boundaries with double newlines", () => {
+    const stitched = stitchContinuation("Here is step one.", "Now step two.");
+    expect(stitched).toBe("Here is step one.\n\nNow step two.");
+  });
+
+  it("handles code block fence when continuation starts with a code block", () => {
+    const partial = "Here is the code:\n```typescript\nconst a = 1;";
+    const continuation = "```typescript\nconst b = 2;\n```";
+    const stitched = stitchContinuation(partial, continuation);
+    // Avoids double-closing/double-fence collisions
+    expect(stitched).not.toContain("```\n\n```");
+    expect(stitched).toContain("const a = 1;");
+    expect(stitched).toContain("const b = 2;");
+  });
+
+  it("handles code block fence when continuation closes it", () => {
+    const partial = "```python\nprint('hello')";
+    const continuation = "\nprint('world')\n```";
+    const stitched = stitchContinuation(partial, continuation);
+    expect(stitched).toBe("```python\nprint('hello')\nprint('world')\n```");
   });
 });

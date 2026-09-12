@@ -53,12 +53,60 @@ import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { resolveContextWindow } from "@/lib/providers/context-window";
 import { createTokenGovernor, withStepBudgetNotice } from "@/lib/agent/token-governor";
 import { callDeadlineSignal } from "@/lib/agent/stream-watchdog";
+import { getFreeModelFamily } from "@/lib/agent/free-mode";
 
 const DEFAULT_TOOL_RETRY_DEADLINE_MS = 60_000;
+const DEFAULT_TOOL_RETRY_CANDIDATE_DEADLINE_MS = 20_000;
 
 export function toolRetryDeadlineMs(): number {
   const raw = Number(process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS ?? DEFAULT_TOOL_RETRY_DEADLINE_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOOL_RETRY_DEADLINE_MS;
+}
+
+/**
+ * Smallest wall-clock one tool step can plausibly consume end to end: the
+ * model's own generation, plus the tool's `execute`, plus the round trip that
+ * feeds the result back. Deliberately an UNDER-estimate — it exists to reject
+ * absurd step budgets, not to predict a real step.
+ */
+const MIN_PLAUSIBLE_STEP_MS = 2_000;
+
+/**
+ * Hard ceiling on the steps a RECOVERY retry may take, regardless of how much
+ * time it is given. This path re-runs a failed turn to get *an answer out*, and
+ * the tool-less ladder still runs behind it — so it is deliberately not a
+ * second full agentic turn.
+ */
+const RECOVERY_MAX_TOOL_STEPS = 8;
+
+/**
+ * The step budget for ONE recovery attempt, DERIVED from that attempt's actual
+ * wall-clock deadline.
+ *
+ * The turn's own `MAX_TOOL_STEPS_PER_TURN` is 100. Handing that to an attempt
+ * bounded at 20s is not a generous budget, it is a mis-declared one: the
+ * deadline aborts the call long before step 100, so the only thing the high cap
+ * changes is WHERE the attempt dies — mid-tool, with the abort recorded against
+ * the substitute endpoint — instead of at a stop condition it declared. It also
+ * makes `withStepBudgetNotice` tell the model a step allowance it cannot spend.
+ *
+ * Deriving the cap from the deadline is what keeps the two from drifting apart:
+ * shrink the deadline and the step budget shrinks with it, with no second
+ * constant to remember and no pairing gate to enforce (the PM #123 / PM #134
+ * lesson that a budget PAIR split in one direction is how these regress).
+ */
+export function recoveryToolStepBudget(requestedSteps: number, attemptDeadlineMs: number): number {
+  const affordable = Math.floor(attemptDeadlineMs / MIN_PLAUSIBLE_STEP_MS);
+  return Math.max(1, Math.min(requestedSteps, affordable, RECOVERY_MAX_TOOL_STEPS));
+}
+
+export function toolRetryCandidateDeadlineMs(): number {
+  const raw = Number(
+    process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS ?? DEFAULT_TOOL_RETRY_CANDIDATE_DEADLINE_MS
+  );
+  const wanted = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOOL_RETRY_CANDIDATE_DEADLINE_MS;
+  const maxAllowed = Math.max(5000, toolRetryDeadlineMs() - 1500);
+  return Math.min(wanted, maxAllowed);
 }
 import { estimateTokenCount } from "@/lib/agent/compressor";
 import {
@@ -103,17 +151,33 @@ const toolRetryLoopAbortStop = (opts: {
 }): boolean => countTrailingLoopBlockSteps(opts.steps) >= LOOP_ABORT_CONSECUTIVE;
 
 /**
- * The one candidate for a tool-capable retry: best-scoring, tool-supporting,
- * healthy, distinct from the brain. Exported for direct unit testing,
- * matching `buildFinalAnswerPool`'s own precedent in this codebase.
+ * The unit of CORRELATED failure for one candidate — what the diversity pass
+ * must spread across.
+ *
+ * For OpenRouter every id shares one account, one key and one gateway, so the
+ * thing that fails together is the upstream VENDOR, which only the id encodes
+ * (`nvidia/…`, `google/…`). For every other provider the account and the
+ * endpoint are the provider itself, so that is the unit — deriving a family
+ * from the bare model name there reads `gpt-5.2` and `o4-mini` as two
+ * different vendors and lets the "diverse" pass fill every slot with one
+ * provider's models, which is precisely the outage this pass exists to avoid.
  */
-export function selectToolCapableRetryCandidate(
+function candidateFamily(c: ModelConfig): string {
+  return c.provider === "openrouter" ? `openrouter:${getFreeModelFamily(c.model)}` : c.provider;
+}
+
+/**
+ * Up to `limit` candidates for a tool-capable retry: best-scoring, tool-supporting,
+ * healthy, distinct from the brain, prioritising vendor-family diversity.
+ */
+export function selectToolCapableRetryCandidates(
   settings: AppSettings,
-  brainConfig: ModelConfig
-): ModelConfig | null {
+  brainConfig: ModelConfig,
+  limit = 3
+): ModelConfig[] {
   const brainKey = `${brainConfig.provider}/${brainConfig.model}`;
   const seen = new Set<string>([brainKey]);
-  const candidates = buildFinalAnswerPool(settings)
+  const pool = buildFinalAnswerPool(settings)
     .filter((c) => {
       const key = `${c.provider}/${c.model}`;
       if (seen.has(key)) return false;
@@ -123,7 +187,41 @@ export function selectToolCapableRetryCandidate(
     .filter((c) => modelSupportsTools(c.provider, c.model))
     .filter((c) => !isModelCircuitOpen(c.provider, c.model))
     .sort(compareModelsByBenchmarkScoreDesc);
-  return candidates[0] ?? null;
+
+  if (pool.length <= limit) return pool;
+
+  const selected: ModelConfig[] = [];
+  const chosenFamilies = new Set<string>();
+
+  // Pass 1: one candidate per vendor family, best-scoring first.
+  for (const cand of pool) {
+    const fam = candidateFamily(cand);
+    if (!chosenFamilies.has(fam)) {
+      selected.push(cand);
+      chosenFamilies.add(fam);
+      if (selected.length === limit) return selected;
+    }
+  }
+
+  // Pass 2: fill the remaining slots with the next highest-scoring candidates.
+  for (const cand of pool) {
+    if (!selected.includes(cand)) {
+      selected.push(cand);
+      if (selected.length === limit) return selected;
+    }
+  }
+
+  return selected;
+}
+
+/**
+ * Backward-compatible single candidate selector — returns the best-scoring candidate.
+ */
+export function selectToolCapableRetryCandidate(
+  settings: AppSettings,
+  brainConfig: ModelConfig
+): ModelConfig | null {
+  return selectToolCapableRetryCandidates(settings, brainConfig, 1)[0] ?? null;
 }
 
 export interface ToolCapableRetryArgs {
@@ -149,7 +247,7 @@ export interface ToolCapableRetryArgs {
 export interface ToolCapableRetryResult {
   recovered: boolean;
   /**
-   * True iff a tool's `execute()` actually ran during THIS attempt, win or
+   * True iff a tool's `execute()` actually ran during THIS cascade, win or
    * lose. On `recovered: false`, the caller must thread this into whichever
    * instruction the tool-less ladder falls back to next — real tool activity
    * on the retry means that ladder's substitute should summarize honestly,
@@ -160,11 +258,14 @@ export interface ToolCapableRetryResult {
 }
 
 /**
- * Attempt one bounded, tool-capable recovery of a primary-stream failure —
- * the full task, with tools, on a different model. Never throws. Every
- * failure path returns `{recovered: false, toolCallOccurred: <what actually
- * happened this attempt>}` so the caller can fall through to the tool-less
- * ladder with accurate information rather than the primary's stale flag.
+ * Attempt a bounded, multi-candidate tool-capable recovery of a primary-stream failure —
+ * the full task, with tools, cascading through up to 3 substitutes. Never throws.
+ *
+ * Council safety invariant (protake review):
+ * If a candidate fails before executing any tool (toolCallOccurredThisAttempt === false),
+ * we safely cascade to candidate #2 / #3. If a candidate actually executed tools and
+ * then died mid-turn, we stop the cascade to prevent duplicate side effects or orphaned
+ * tool-call messages, cleanly falling through to the tool-less ladder.
  */
 export async function attemptToolCapableRetry(
   args: ToolCapableRetryArgs
@@ -173,8 +274,8 @@ export async function attemptToolCapableRetry(
     return { recovered: false, toolCallOccurred: false };
   }
 
-  const candidate = selectToolCapableRetryCandidate(args.settings, args.brainConfig);
-  if (!candidate) {
+  const candidates = selectToolCapableRetryCandidates(args.settings, args.brainConfig, 3);
+  if (candidates.length === 0) {
     console.warn(
       `[Agent] Tool-capable retry — no tool-capable, healthy substitute available; ` +
         `falling through to the tool-less ladder.`
@@ -182,160 +283,208 @@ export async function attemptToolCapableRetry(
     return { recovered: false, toolCallOccurred: false };
   }
 
-  let substituteModel;
-  try {
-    substituteModel = createModel(candidate, {
-      projectId: args.projectId,
-      currentPath: args.currentPath,
-    });
-  } catch (error) {
+  const cascadeTotalBudget = toolRetryDeadlineMs();
+  const cascadeStartTime = Date.now();
+  const candidateTimeout = toolRetryCandidateDeadlineMs();
+  let anyToolCallOccurred = false;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    const elapsed = Date.now() - cascadeStartTime;
+    const remainingBudget = cascadeTotalBudget - elapsed;
+
+    // Bounded deadline: if less than 8s remains, don't start an attempt doomed to time out
+    if (remainingBudget < 8_000) {
+      console.warn(
+        `[Agent] Tool-capable retry cascade budget exhausted (${elapsed}ms elapsed); ` +
+          `falling through to the tool-less ladder.`
+      );
+      break;
+    }
+
+    if (args.abortSignal?.aborted) {
+      break;
+    }
+
+    // Re-check circuit breaker per attempt (protake council recommendation)
+    if (isModelCircuitOpen(candidate.provider, candidate.model)) {
+      console.warn(
+        `[Agent] Tool-capable retry skipping candidate #${i + 1} (${candidate.provider}/${candidate.model}) — circuit is open.`
+      );
+      continue;
+    }
+
+    let substituteModel;
+    try {
+      substituteModel = createModel(candidate, {
+        projectId: args.projectId,
+        currentPath: args.currentPath,
+      });
+    } catch (error) {
+      console.warn(
+        `[Agent] Tool-capable retry — could not build candidate #${i + 1} (${candidate.provider}/${candidate.model}): ` +
+          (error instanceof Error ? error.message : String(error))
+      );
+      continue;
+    }
+
     console.warn(
-      `[Agent] Tool-capable retry — could not build ${candidate.provider}/${candidate.model}: ` +
-        (error instanceof Error ? error.message : String(error))
+      `[Agent] Tool-capable retry (attempt ${i + 1}/${candidates.length}) — retrying full task WITH tools on ${candidate.provider}/${candidate.model}.`
     );
-    return { recovered: false, toolCallOccurred: false };
-  }
 
-  console.warn(
-    `[Agent] Tool-capable retry — ${args.brainConfig.provider}/${args.brainConfig.model} did no ` +
-      `work before failing; retrying the full task WITH tools on ${candidate.provider}/${candidate.model}.`
-  );
+    const contextWindow = await resolveContextWindow(candidate, { abortSignal: args.abortSignal });
+    const systemPromptTokens = estimateTokenCount([{ role: "system", content: args.systemPrompt }]);
+    const tokenGovernor = createTokenGovernor({
+      contextWindow,
+      reservedOutputTokens: resolveMaxOutputTokens(candidate),
+      systemPromptTokens,
+      modelHint: { provider: candidate.provider, model: candidate.model },
+    });
 
-  const contextWindow = await resolveContextWindow(candidate, { abortSignal: args.abortSignal });
-  const systemPromptTokens = estimateTokenCount([{ role: "system", content: args.systemPrompt }]);
-  const tokenGovernor = createTokenGovernor({
-    contextWindow,
-    reservedOutputTokens: resolveMaxOutputTokens(candidate),
-    systemPromptTokens,
-    modelHint: { provider: candidate.provider, model: candidate.model },
-  });
+    let toolCallOccurredThisAttempt = false;
+    const messages: ModelMessage[] = [...args.messages];
+    const isLastCandidate = i === candidates.length - 1;
+    const candidateBudget = isLastCandidate
+      ? remainingBudget - 1_500
+      : Math.min(candidateTimeout, remainingBudget - 1_500);
+    const attemptDeadline = Math.max(5_000, candidateBudget);
+    // Steps and time are one budget — see `recoveryToolStepBudget`.
+    const stepBudget = recoveryToolStepBudget(args.maxToolSteps, attemptDeadline);
 
-  let toolCallOccurredThisAttempt = false;
-  // Defensive shallow copy — this attempt must not observe (or cause) any
-  // mutation shared with the primary attempt's own message handling.
-  const messages: ModelMessage[] = [...args.messages];
-
-  let generated;
-  try {
-    generated = await generateText({
-      model: substituteModel,
-      system: args.systemPrompt,
-      messages,
-      providerOptions: args.providerOptions,
-      tools: args.tools,
-      // Sprint 3: cap retries to 1 (was 3) so free-tier 429/errors fail fast
-      // to tool-less fallback rather than lingering.
-      maxRetries: 1,
-      prepareStep: withStepBudgetNotice(tokenGovernor, { maxSteps: args.maxToolSteps }),
-      stopWhen: [stepCountIs(args.maxToolSteps), hasToolCall("response"), toolRetryLoopAbortStop],
-      temperature: args.settings.chatModel.temperature ?? 0.7,
-      maxOutputTokens: resolveMaxOutputTokens(candidate),
-      // Sprint 3: bound the single tool retry attempt to 60s (was 10 minutes)
-      // so a hung substitute model does not block the failover cascade.
-      abortSignal: callDeadlineSignal(args.abortSignal, toolRetryDeadlineMs()),
-      onStepFinish: async (event) => {
-        const stepToolCalls = (
-          event as unknown as { toolCalls?: Array<{ toolName?: string }> }
-        ).toolCalls;
-        if (stepToolCalls && stepToolCalls.length > 0) toolCallOccurredThisAttempt = true;
-
-        if (event.usage) {
-          try {
-            await updateChat(args.chatId, (chat) => {
-              chat.cumulativeUsage = foldTurnUsage(
-                chat.cumulativeUsage,
-                candidate.provider,
-                candidate.model,
-                { streamUsage: event.usage }
-              );
-              return chat;
-            });
-          } catch (err) {
-            console.error("[Agent] Tool-capable retry — failed to persist step usage:", err);
+    let generated;
+    try {
+      generated = await generateText({
+        model: substituteModel,
+        system: args.systemPrompt,
+        messages,
+        providerOptions: args.providerOptions,
+        tools: args.tools,
+        maxRetries: 1,
+        prepareStep: withStepBudgetNotice(tokenGovernor, { maxSteps: stepBudget }),
+        stopWhen: [stepCountIs(stepBudget), hasToolCall("response"), toolRetryLoopAbortStop],
+        temperature: args.settings.chatModel.temperature ?? 0.7,
+        maxOutputTokens: resolveMaxOutputTokens(candidate),
+        abortSignal: callDeadlineSignal(args.abortSignal, attemptDeadline),
+        onStepFinish: async (event) => {
+          const stepToolCalls = (
+            event as unknown as { toolCalls?: Array<{ toolName?: string }> }
+          ).toolCalls;
+          if (stepToolCalls && stepToolCalls.length > 0) {
+            toolCallOccurredThisAttempt = true;
+            anyToolCallOccurred = true;
           }
-        }
 
-        if (args.swarmEnabled) {
-          try {
-            for (const call of stepToolCalls ?? []) {
-              publishUiSyncEvent({
-                topic: "chat",
-                chatId: args.chatId,
-                projectId: args.projectId ?? null,
-                reason: `[Agent] ${call.toolName ?? "tool"} (tool-capable retry)`,
+          if (event.usage) {
+            try {
+              await updateChat(args.chatId, (chat) => {
+                chat.cumulativeUsage = foldTurnUsage(
+                  chat.cumulativeUsage,
+                  candidate.provider,
+                  candidate.model,
+                  { streamUsage: event.usage }
+                );
+                return chat;
               });
+            } catch (err) {
+              console.error("[Agent] Tool-capable retry — failed to persist step usage:", err);
             }
-          } catch (activityErr) {
-            console.warn("[Agent] Tool-capable retry — step-activity emit error (non-fatal):", activityErr);
           }
+
+          if (args.swarmEnabled) {
+            try {
+              for (const call of stepToolCalls ?? []) {
+                publishUiSyncEvent({
+                  topic: "chat",
+                  chatId: args.chatId,
+                  projectId: args.projectId ?? null,
+                  reason: `[Agent] ${call.toolName ?? "tool"} (tool-capable retry)`,
+                });
+              }
+            } catch (activityErr) {
+              console.warn("[Agent] Tool-capable retry — step-activity emit error (non-fatal):", activityErr);
+            }
+          }
+        },
+      });
+    } catch (error) {
+      const kind = args.abortSignal?.aborted ? null : classifyModelFailure(error);
+      if (kind) recordModelFailure(candidate.provider, candidate.model, kind);
+      console.warn(
+        `[Agent] Tool-capable retry attempt ${i + 1} failed on ${candidate.provider}/${candidate.model}: ` +
+          (error instanceof Error ? error.message : String(error))
+      );
+      // Protake council safety invariant:
+      // If tools already executed during THIS attempt before crashing, do NOT cascade to
+      // the next candidate to avoid orphaned tool calls or duplicate destructive side effects.
+      if (toolCallOccurredThisAttempt) {
+        console.warn(
+          `[Agent] Tool-capable retry — tools already executed before failure; stopping cascade to prevent duplicate side effects.`
+        );
+        return { recovered: false, toolCallOccurred: true };
+      }
+      continue;
+    }
+
+    const responseMessages = generated.response?.messages ?? [];
+    if (!turnHasDeliverableAnswer(responseMessages)) {
+      console.warn(
+        `[Agent] Tool-capable retry attempt ${i + 1} on ${candidate.provider}/${candidate.model} produced no deliverable answer.`
+      );
+      if (toolCallOccurredThisAttempt) {
+        return { recovered: false, toolCallOccurred: true };
+      }
+      continue;
+    }
+    recordModelSuccess(candidate.provider, candidate.model);
+
+    const finalText = unwrapSerializedResponseCall(
+      getLastResponseToolText(responseMessages) || getLastAssistantText(responseMessages)
+    ).trim();
+
+    let persisted = false;
+    try {
+      const updated = await updateChat(args.chatId, (chat) => {
+        const now = new Date().toISOString();
+        if (responseMessages.length > 0) {
+          for (const msg of responseMessages) {
+            chat.messages.push(...convertModelMessageToChatMessages(msg, now));
+          }
+        } else {
+          chat.messages.push({
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: stripThinkingTags(finalText),
+            createdAt: now,
+          });
         }
+        chat.updatedAt = now;
+        return chat;
+      });
+      persisted = updated !== null;
+    } catch (saveErr) {
+      console.error("[Agent] Tool-capable retry — failed to persist the recovered turn:", saveErr);
+    }
+    if (!persisted) {
+      return { recovered: false, toolCallOccurred: anyToolCallOccurred };
+    }
+
+    publishChatErrorEvent({
+      chatId: args.chatId,
+      projectId: args.projectId,
+      payload: {
+        kind: "turn_recovered_with_tools",
+        message:
+          `[Agent] ${args.brainConfig.provider}/${args.brainConfig.model} failed before completing ` +
+          `any work this turn — ${candidate.provider}/${candidate.model} retried the task with tools ` +
+          `and completed it.`,
+        recoverable: true,
       },
     });
-  } catch (error) {
-    const kind = args.abortSignal?.aborted ? null : classifyModelFailure(error);
-    if (kind) recordModelFailure(candidate.provider, candidate.model, kind);
-    console.warn(
-      `[Agent] Tool-capable retry failed on ${candidate.provider}/${candidate.model}: ` +
-        (error instanceof Error ? error.message : String(error))
-    );
-    return { recovered: false, toolCallOccurred: toolCallOccurredThisAttempt };
+    publishOrchestratorFinished(args.chatId, args.projectId, "completed", "agent_stream_recovered_with_tools");
+    publishUiSyncEvent({ topic: "files", projectId: args.projectId ?? null, reason: "agent_turn_finished" });
+
+    return { recovered: true, toolCallOccurred: anyToolCallOccurred };
   }
 
-  const responseMessages = generated.response?.messages ?? [];
-  if (!turnHasDeliverableAnswer(responseMessages)) {
-    console.warn(
-      `[Agent] Tool-capable retry on ${candidate.provider}/${candidate.model} produced no deliverable answer.`
-    );
-    return { recovered: false, toolCallOccurred: toolCallOccurredThisAttempt };
-  }
-  recordModelSuccess(candidate.provider, candidate.model);
-
-  const finalText = unwrapSerializedResponseCall(
-    getLastResponseToolText(responseMessages) || getLastAssistantText(responseMessages)
-  ).trim();
-
-  let persisted = false;
-  try {
-    await updateChat(args.chatId, (chat) => {
-      const now = new Date().toISOString();
-      if (responseMessages.length > 0) {
-        for (const msg of responseMessages) {
-          chat.messages.push(...convertModelMessageToChatMessages(msg, now));
-        }
-      } else {
-        chat.messages.push({
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: stripThinkingTags(finalText),
-          createdAt: now,
-        });
-      }
-      chat.updatedAt = now;
-      // Usage already folded per-step above (onStepFinish) — do not fold
-      // `generated.usage` again here, that would double-count the spend.
-      return chat;
-    });
-    persisted = true;
-  } catch (saveErr) {
-    console.error("[Agent] Tool-capable retry — failed to persist the recovered turn:", saveErr);
-  }
-  // Never claim a recovery the store didn't durably record.
-  if (!persisted) return { recovered: false, toolCallOccurred: toolCallOccurredThisAttempt };
-
-  publishChatErrorEvent({
-    chatId: args.chatId,
-    projectId: args.projectId,
-    payload: {
-      kind: "turn_recovered_with_tools",
-      message:
-        `[Agent] ${args.brainConfig.provider}/${args.brainConfig.model} failed before completing ` +
-        `any work this turn — ${candidate.provider}/${candidate.model} retried the task with tools ` +
-        `and completed it.`,
-      recoverable: true,
-    },
-  });
-  publishOrchestratorFinished(args.chatId, args.projectId, "completed", "agent_stream_recovered_with_tools");
-  publishUiSyncEvent({ topic: "files", projectId: args.projectId ?? null, reason: "agent_turn_finished" });
-
-  return { recovered: true, toolCallOccurred: toolCallOccurredThisAttempt };
+  return { recovered: false, toolCallOccurred: anyToolCallOccurred };
 }

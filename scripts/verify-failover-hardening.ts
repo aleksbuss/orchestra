@@ -26,11 +26,16 @@ import {
   fallbackAttemptDeadlineMs,
   cascadeBudgetMs,
 } from "../src/lib/agent/final-answer-failover";
-import { toolRetryDeadlineMs } from "../src/lib/agent/tool-capable-retry";
+import {
+  toolRetryDeadlineMs,
+  toolRetryCandidateDeadlineMs,
+  selectToolCapableRetryCandidates,
+} from "../src/lib/agent/tool-capable-retry";
 import {
   isGeneralChatModel,
   isHarnessGatedModel,
   selectFreeModels,
+  getFreeModelFamily,
 } from "../src/lib/agent/free-mode";
 
 interface CheckResult {
@@ -92,8 +97,8 @@ async function run() {
 
   check("Circuit Tripped in Memory", isModelCircuitOpen(testProvider, testModel), "Circuit is OPEN after 3 failures");
 
-  // Give trailing flush loop time to settle to disk
-  await new Promise((r) => setTimeout(r, 200));
+  // Ensure trailing flush loop settles to disk
+  await persistModelHealth();
 
   check("Disk File Created", fsSync.existsSync(cachePath), `File exists at ${cachePath}`);
   const diskData = JSON.parse(fsSync.readFileSync(cachePath, "utf-8"));
@@ -199,10 +204,12 @@ async function run() {
   delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
   delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
   delete process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS;
+  delete process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS;
 
   check("Default Attempt Deadline", fallbackAttemptDeadlineMs() === 25_000, `Default attempt deadline is ${fallbackAttemptDeadlineMs()}ms (25s)`);
   check("Default Cascade Budget", cascadeBudgetMs() === 50_000, `Default cascade budget is ${cascadeBudgetMs()}ms (50s)`);
   check("Default Tool Retry Deadline", toolRetryDeadlineMs() === 60_000, `Default tool retry deadline is ${toolRetryDeadlineMs()}ms (60s)`);
+  check("Default Tool Retry Candidate Deadline", toolRetryCandidateDeadlineMs() === 20_000, `Default candidate deadline is ${toolRetryCandidateDeadlineMs()}ms (20s)`);
 
   // Test clamp: if budget is 40s and attempt is configured as 35s -> clamp to budget / 2 = 20s
   process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS = "40000";
@@ -214,22 +221,50 @@ async function run() {
     `Attempt deadline clamped from 35s to ${clampedAttempt}ms (budget 40s / 2 = 20s)`
   );
 
+  // Test tool retry candidate clamp: if cascade budget is 25s and candidate timeout configured as 30s
+  // clamp to cascadeBudget - 1500ms = 23,500ms
+  process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS = "25000";
+  process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS = "30000";
+  const clampedCandidate = toolRetryCandidateDeadlineMs();
+  check(
+    "Candidate Deadline Clamped to Tool Retry Budget - 1.5s",
+    clampedCandidate === 23_500,
+    `Candidate deadline clamped to ${clampedCandidate}ms`
+  );
+
   // Test invalid / garbage env in tool retry
   process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS = "invalid-nan";
+  process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS = "invalid-nan";
   check(
     "Tool Retry NaN Protection",
     toolRetryDeadlineMs() === 60_000,
     `Fallback on invalid env is ${toolRetryDeadlineMs()}ms`
   );
+  check(
+    "Tool Retry Candidate NaN Protection",
+    toolRetryCandidateDeadlineMs() === 20_000,
+    `Fallback on invalid env is ${toolRetryCandidateDeadlineMs()}ms`
+  );
 
   delete process.env.ORCHESTRA_FALLBACK_CASCADE_BUDGET_MS;
   delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
   delete process.env.ORCHESTRA_TOOL_RETRY_DEADLINE_MS;
+  delete process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS;
 
   // ---------------------------------------------------------------------------
-  // 5. Free Mode Gated Model Filtering
+  // 5. Free Mode Vendor Family Diversification & Gated Filtering
   // ---------------------------------------------------------------------------
-  console.log("\n--- 5. Testing Free Mode & Gated Filter ---");
+  console.log("\n--- 5. Testing Free Mode Family Diversification & Gated Filter ---");
+  check(
+    "Family Canonicalization",
+    getFreeModelFamily("meta-llama/llama-3.3-70b-instruct:free") === "meta" &&
+      getFreeModelFamily("google/gemma-3-27b-it:free") === "google" &&
+      getFreeModelFamily("nvidia/nemotron-3-nano-it:free") === "nvidia" &&
+      getFreeModelFamily("openai/gpt-oss-120b:free") === "openai" &&
+      getFreeModelFamily("qwen/qwen-2.5-coder-32b-instruct:free") === "qwen",
+    "Model IDs correctly map to canonical vendor families"
+  );
+
   check(
     "Thinking Machines Gated Excluded",
     isHarnessGatedModel("thinkingmachines/inkling-small:free") &&
@@ -257,7 +292,61 @@ async function run() {
     !hasGated,
     `Selected models [${selectedModels.join(", ")}] have 0 harness-gated models`
   );
-  console.log(`Selected Free Mode Models: ${selectedModels.join(", ")}`);
+
+  // Check 0 duplicates among utilityModel and proposer tiers
+  const tierModels = [
+    freeSelection.utilityModel.model,
+    freeSelection.proposerTiers.frontier.model,
+    freeSelection.proposerTiers.balanced.model,
+    freeSelection.proposerTiers.fast.model,
+  ];
+  const uniqueTierModels = new Set(tierModels);
+  check(
+    "Zero Model Duplication Among Router and Proposer Tiers",
+    uniqueTierModels.size === 4,
+    `Router and 3 proposer tiers are all distinct: [${tierModels.join(", ")}]`
+  );
+
+  // Check vendor family diversity (at least 3 distinct vendor families among 4 slots)
+  const tierFamilies = new Set(tierModels.map(getFreeModelFamily));
+  check(
+    "Vendor Family Diversification",
+    tierFamilies.size >= 3,
+    `Selected 4 slots span ${tierFamilies.size} distinct vendor families: [${Array.from(tierFamilies).join(", ")}]`
+  );
+
+  // ---------------------------------------------------------------------------
+  // 6. Multi-Candidate Tool-Capable Retry Cascade Selection
+  // ---------------------------------------------------------------------------
+  console.log("\n--- 6. Testing Multi-Candidate Tool Cascade Selection ---");
+  const dummySettings: any = {
+    chatModel: { provider: "openrouter", model: "meta-llama/llama-3.3-70b-instruct:free" },
+    utilityModel: { provider: "openrouter", model: "google/gemma-3-27b-it:free" },
+    proposerTiers: {
+      frontier: { provider: "openrouter", model: "nvidia/nemotron-3-nano-it:free" },
+      balanced: { provider: "openrouter", model: "openai/gpt-oss-120b:free" },
+      fast: { provider: "openrouter", model: "qwen/qwen-2.5-coder-32b-instruct:free" },
+    },
+  };
+
+  const candidates = selectToolCapableRetryCandidates(dummySettings, dummySettings.chatModel, 3);
+  check(
+    "Up to 3 Candidates Selected",
+    candidates.length > 0 && candidates.length <= 3,
+    `Selected ${candidates.length} candidate(s)`
+  );
+  check(
+    "Brain Excluded From Candidates",
+    !candidates.some((c) => c.model === dummySettings.chatModel.model),
+    `Brain model ${dummySettings.chatModel.model} is not in candidates list`
+  );
+
+  const candidateFamilies = new Set(candidates.map((c) => getFreeModelFamily(c.model)));
+  check(
+    "Candidates Have Vendor Diversity",
+    candidateFamilies.size === candidates.length,
+    `Every candidate is from a distinct vendor family: [${Array.from(candidateFamilies).join(", ")}]`
+  );
 
   // Cleanup test artifacts
   resetModelHealth();

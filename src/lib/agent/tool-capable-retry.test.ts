@@ -39,8 +39,11 @@ import {
 import type { AppSettings, Chat, ModelConfig } from "@/lib/types";
 import {
   selectToolCapableRetryCandidate,
+  selectToolCapableRetryCandidates,
   attemptToolCapableRetry,
   toolRetryDeadlineMs,
+  toolRetryCandidateDeadlineMs,
+  recoveryToolStepBudget,
   type ToolCapableRetryArgs,
 } from "./tool-capable-retry";
 
@@ -346,5 +349,257 @@ describe("attemptToolCapableRetry", () => {
       expect(toolRetryDeadlineMs()).toBe(60_000);
     });
   });
+
+  describe("toolRetryCandidateDeadlineMs", () => {
+    afterEach(() => {
+      delete process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS;
+    });
+
+    it("defaults to 20000ms", () => {
+      delete process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS;
+      expect(toolRetryCandidateDeadlineMs()).toBe(20_000);
+    });
+
+    it("respects valid positive numeric override", () => {
+      process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS = "15000";
+      expect(toolRetryCandidateDeadlineMs()).toBe(15_000);
+    });
+
+    it("safely falls back on NaN or negative values without throwing", () => {
+      process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS = "invalid";
+      expect(toolRetryCandidateDeadlineMs()).toBe(20_000);
+
+      process.env.ORCHESTRA_TOOL_RETRY_CANDIDATE_DEADLINE_MS = "-500";
+      expect(toolRetryCandidateDeadlineMs()).toBe(20_000);
+    });
+  });
+
+  describe("multi-candidate cascade execution", () => {
+    it("selectToolCapableRetryCandidates returns up to limit and prioritizes distinct vendor families", () => {
+      __setOpenRouterBenchmarkScoreForTest(
+        new Map([
+          ["nvidia/frontier:free", { intelligence: 95, coding: 95, agentic: 95 }],
+          ["nvidia/second:free", { intelligence: 90, coding: 90, agentic: 90 }],
+          ["openai/balanced:free", { intelligence: 85, coding: 85, agentic: 85 }],
+          ["qwen/fast:free", { intelligence: 80, coding: 80, agentic: 80 }],
+        ])
+      );
+      const s = settings({
+        utilityModel: { provider: "openrouter", model: "nvidia/second:free" },
+        proposerTiers: {
+          frontier: { provider: "openrouter", model: "nvidia/frontier:free" },
+          balanced: { provider: "openrouter", model: "openai/balanced:free" },
+          fast: { provider: "openrouter", model: "qwen/fast:free" },
+        },
+      });
+      const candidates = selectToolCapableRetryCandidates(s, BRAIN, 3);
+      expect(candidates).toHaveLength(3);
+      // First is highest-scoring (nvidia/frontier)
+      expect(candidates[0].model).toBe("nvidia/frontier:free");
+      // Second and third should pick distinct families (openai, qwen) before second nvidia model
+      expect(candidates[1].model).toBe("openai/balanced:free");
+      expect(candidates[2].model).toBe("qwen/fast:free");
+    });
+
+
+    it("treats a NON-OpenRouter provider as the family, so one provider cannot fill every slot", () => {
+      // Two OpenAI models whose bare NAMES share no prefix ("gpt-…" vs "o4-…").
+      // Deriving the family from the model name alone reads those as two
+      // different vendors and lets OpenAI take two of the three slots while
+      // Anthropic — a genuinely independent upstream — is pushed out.
+      __setOpenRouterBenchmarkScoreForTest(
+        new Map([
+          ["gpt-5.2", { intelligence: 95, coding: 95, agentic: 95 }],
+          ["o4-mini", { intelligence: 90, coding: 90, agentic: 90 }],
+          ["claude-sonnet-5", { intelligence: 85, coding: 85, agentic: 85 }],
+        ])
+      );
+      const s = settings({
+        utilityModel: { provider: "openai", model: "gpt-5.2" },
+        proposerTiers: {
+          frontier: { provider: "openai", model: "o4-mini" },
+          balanced: { provider: "anthropic", model: "claude-sonnet-5" },
+          fast: undefined as never,
+        },
+      });
+      // limit 2 over a 3-model pool, so the diversity pass actually runs
+      // (at `pool.length <= limit` every candidate is used regardless).
+      // Deriving the family from the model name picks the two OpenAI models
+      // and leaves the one independent upstream unused.
+      const candidates = selectToolCapableRetryCandidates(s, BRAIN, 2);
+      expect(candidates.map((c) => `${c.provider}/${c.model}`)).toEqual([
+        "openai/gpt-5.2",
+        "anthropic/claude-sonnet-5",
+      ]);
+    });
+
+    it("Candidate #1 fails before executing tools -> Candidate #2 runs with tools and succeeds", async () => {
+      const s = settings({
+        utilityModel: { provider: "openrouter", model: "vendor1/cand1:free" },
+        proposerTiers: {
+          frontier: { provider: "openrouter", model: "vendor2/cand2:free" },
+          balanced: undefined as never,
+          fast: undefined as never,
+        },
+      });
+
+      // Call 1 (Candidate 1): fails immediately with rate limit (0 tool calls executed)
+      mockedGenerateText.mockRejectedValueOnce(new Error("429 Too Many Requests"));
+
+      // Call 2 (Candidate 2): succeeds and executes read_text_file
+      mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+        const o = opts as { onStepFinish?: (e: unknown) => unknown };
+        await o.onStepFinish?.({
+          toolCalls: [{ toolName: "read_text_file" }],
+          usage: { totalTokens: 15 },
+        });
+        return {
+          response: {
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "tool-call", toolCallId: "c1", toolName: "read_text_file", input: { path: "a.txt" } }],
+              },
+              {
+                role: "tool",
+                content: [{ type: "tool-result", toolCallId: "c1", toolName: "read_text_file", output: "hello" }],
+              },
+              { role: "assistant", content: "File read successfully." },
+            ],
+          },
+        };
+      }) as never);
+
+      const out = await attemptToolCapableRetry(args({ settings: s }));
+
+      expect(out).toEqual({ recovered: true, toolCallOccurred: true });
+      expect(mockedGenerateText).toHaveBeenCalledTimes(2);
+      expect(chatState.messages.some((m) => m.content?.includes("File read successfully"))).toBe(true);
+      expect(mockedPublishChatError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            kind: "turn_recovered_with_tools",
+            message: expect.stringContaining("vendor2/cand2:free"),
+          }),
+        })
+      );
+    });
+
+    it("Candidate #1 fails, Candidate #2 fails, Candidate #3 succeeds in 3-failover cascade", async () => {
+      const s = settings({
+        utilityModel: { provider: "openrouter", model: "v1/cand1:free" },
+        proposerTiers: {
+          frontier: { provider: "openrouter", model: "v2/cand2:free" },
+          balanced: { provider: "openrouter", model: "v3/cand3:free" },
+          fast: undefined as never,
+        },
+      });
+
+      // Candidate 1 fails (timeout)
+      mockedGenerateText.mockRejectedValueOnce(new Error("Timeout waiting for first token"));
+      // Candidate 2 fails (500 internal server error)
+      mockedGenerateText.mockRejectedValueOnce(new Error("500 Internal Server Error"));
+      // Candidate 3 succeeds!
+      mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+        const o = opts as { onStepFinish?: (e: unknown) => unknown };
+        await o.onStepFinish?.({ toolCalls: [{ toolName: "write_text_file" }] });
+        return {
+          response: {
+            messages: [
+              {
+                role: "assistant",
+                content: [{ type: "tool-call", toolCallId: "w1", toolName: "write_text_file", input: { path: "x" } }],
+              },
+              {
+                role: "tool",
+                content: [{ type: "tool-result", toolCallId: "w1", toolName: "write_text_file", output: "ok" }],
+              },
+              { role: "assistant", content: "File written by candidate 3." },
+            ],
+          },
+        };
+      }) as never);
+
+      const out = await attemptToolCapableRetry(args({ settings: s }));
+
+      expect(out).toEqual({ recovered: true, toolCallOccurred: true });
+      expect(mockedGenerateText).toHaveBeenCalledTimes(3);
+      expect(chatState.messages.some((m) => m.content?.includes("File written by candidate 3"))).toBe(true);
+      expect(mockedPublishChatError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            message: expect.stringContaining("v3/cand3:free"),
+          }),
+        })
+      );
+    });
+
+    it("Candidate #1 executed tools and crashed -> stops cascade to prevent duplicate side effects", async () => {
+      const s = settings({
+        utilityModel: { provider: "openrouter", model: "v1/cand1:free" },
+        proposerTiers: {
+          frontier: { provider: "openrouter", model: "v2/cand2:free" },
+          balanced: undefined as never,
+          fast: undefined as never,
+        },
+      });
+
+      // Candidate 1 executed tool calls and then crashed
+      mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+        const o = opts as { onStepFinish?: (e: unknown) => unknown };
+        await o.onStepFinish?.({ toolCalls: [{ toolName: "create_file" }] });
+        throw new Error("Stream connection dropped mid-execution");
+      }) as never);
+
+      const out = await attemptToolCapableRetry(args({ settings: s }));
+
+      // Cascade must STOP to prevent re-executing actions; returns recovered:false with toolCallOccurred:true
+      expect(out).toEqual({ recovered: false, toolCallOccurred: true });
+      expect(mockedGenerateText).toHaveBeenCalledTimes(1); // Candidate 2 was NOT called!
+    });
+  });
 });
 
+describe("recovery step budget is DERIVED from the attempt deadline (steps and time are one budget)", () => {
+  it("never hands the turn's own 100-step allowance to a 20s recovery attempt", () => {
+    // 20_000 / 2_000 = 10 affordable steps, clamped by the recovery ceiling.
+    expect(recoveryToolStepBudget(100, 20_000)).toBe(8);
+  });
+
+  it("shrinks with the deadline, so lowering one budget cannot silently leave the other high", () => {
+    expect(recoveryToolStepBudget(100, 6_000)).toBe(3);
+    expect(recoveryToolStepBudget(100, 10_000)).toBe(5);
+  });
+
+  it("never RAISES what the caller asked for", () => {
+    expect(recoveryToolStepBudget(2, 60_000)).toBe(2);
+  });
+
+  it("floors at one step — a budget of zero steps could never deliver an answer", () => {
+    expect(recoveryToolStepBudget(100, 500)).toBe(1);
+  });
+
+  it("the retry DECLARES the derived budget to the model and to stopWhen, not maxToolSteps", async () => {
+    __setOpenRouterBenchmarkScoreForTest(
+      new Map([["vendor/utility:free", { intelligence: 90, coding: 90, agentic: 90 }]])
+    );
+
+    let captured: { stopWhen?: unknown[] } | undefined;
+    mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+      captured = opts as { stopWhen?: unknown[] };
+      return { response: { messages: [{ role: "assistant", content: "recovered" }] } };
+    }) as never);
+
+    await attemptToolCapableRetry(args({ maxToolSteps: 100 }));
+
+    const stepStop = captured?.stopWhen?.[0] as (o: { steps: unknown[] }) => boolean;
+    // The SDK's `stepCountIs(n)` is `steps.length === n` (verified in
+    // `ai/dist/index.mjs`, not assumed), so probe the exact trip point rather
+    // than reading a number the SDK does not expose.
+    expect(stepStop({ steps: Array(8).fill({}) })).toBe(true);
+    expect(stepStop({ steps: Array(7).fill({}) })).toBe(false);
+    // Discriminates against the defect: with the turn's own budget the stop
+    // would trip at 100 and NOT at 8.
+    expect(stepStop({ steps: Array(100).fill({}) })).toBe(false);
+  });
+});

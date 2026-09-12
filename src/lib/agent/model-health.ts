@@ -139,6 +139,7 @@ const DEFAULT_UNUSABLE_COOLDOWN_MS = 24 * 60 * 60_000;
 
 const HEALTH_STORE_KEY = Symbol.for("orchestra.model-health.store");
 const HYDRATED_FLAG_KEY = Symbol.for("orchestra.model-health.hydrated");
+const FLUSH_INSTALLED_KEY = Symbol.for("orchestra.model-health.flush-installed");
 
 export function isModelHealthHydrated(): boolean {
   const g = globalThis as unknown as Record<symbol, boolean | undefined>;
@@ -404,6 +405,57 @@ function scheduleDiskPersist(): void {
     }
   });
 }
+
+/**
+ * Non-negotiable 6 — a buffered writer installs a SIGTERM/SIGINT flush at
+ * module load. `scheduleDiskPersist` coalesces on a microtask and is
+ * fire-and-forget, so a signal arriving between the schedule and the rename
+ * loses whatever the breaker learned this run. Reference implementation:
+ * `installChatStoreShutdownFlush` in `storage/chat-store.ts`.
+ */
+function installModelHealthShutdownFlush(): void {
+  const g = globalThis as unknown as Record<symbol, boolean | undefined>;
+  if (g[FLUSH_INSTALLED_KEY]) return;
+  g[FLUSH_INSTALLED_KEY] = true;
+
+  const onSignal = (sig: string) => {
+    if (!hasPendingWrite && !isPersisting) return;
+    console.log(`[ModelHealth] Received ${sig}, flushing the breaker snapshot before exit.`);
+    // Fire-and-forget on purpose, same as chat-store's: Node keeps the loop
+    // alive while the `safeWriteFile` I/O is pending, so the write drains
+    // before exit. Orchestra never calls `process.exit()` from a handler.
+    void persistModelHealth().catch((err) => {
+      console.error("[ModelHealth] SIGTERM flush failed:", err);
+    });
+  };
+
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+  process.once("SIGINT", () => onSignal("SIGINT"));
+}
+
+// Skipped under Vitest for the same reason chat-store skips it: the runner
+// emits SIGTERM/SIGINT for its own teardown, and a handler racing that is how
+// `.tmp` partials leaked in the first place.
+if (process.env.VITEST !== "true" && process.env.NODE_ENV !== "test") {
+  installModelHealthShutdownFlush();
+}
+
+/** Test-only: expose the installer so the regression test can opt in. */
+export const __modelHealthTestInternals__ = {
+  installModelHealthShutdownFlush,
+  hasPendingWrite: () => hasPendingWrite,
+  /**
+   * Test-only: drop the installed handler so the NEXT install arms a fresh
+   * one. Needed because the handler is `process.once`: the first
+   * `process.emit("SIGTERM")` consumes it, and the install-once flag then
+   * makes every later install a no-op — which silently turned a second
+   * SIGTERM test into a test of nothing (caught by mutation, not by review).
+   */
+  resetFlushInstalledForTest: () => {
+    const g = globalThis as unknown as Record<symbol, boolean | undefined>;
+    g[FLUSH_INSTALLED_KEY] = false;
+  },
+};
 
 /** True for failure kinds that no amount of retrying can fix. */
 export function isPermanentFailureKind(kind: ModelFailureKind | null): boolean {

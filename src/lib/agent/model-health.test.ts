@@ -14,6 +14,7 @@ import {
   getModelHealthCachePath,
   setModelHealthHydrated,
   clearPersistedModelHealth,
+  __modelHealthTestInternals__,
 } from "./model-health";
 import os from "os";
 import fsSync from "fs";
@@ -790,5 +791,76 @@ describe("PM #100 — the breaker never writes into the live data root under tes
     expect(fsSync.existsSync(cachePath)).toBe(true);
 
     fsSync.unlinkSync(fresh);
+  });
+});
+
+describe("non-negotiable 6 — the buffered snapshot writer flushes on SIGTERM", () => {
+  afterEach(() => {
+    resetModelHealth();
+    clearPersistedModelHealth();
+    vi.restoreAllMocks();
+  });
+
+  it("installs exactly one handler, and installing twice is a no-op", () => {
+    const before = process.listenerCount("SIGTERM");
+    __modelHealthTestInternals__.installModelHealthShutdownFlush();
+    const after1 = process.listenerCount("SIGTERM");
+    __modelHealthTestInternals__.installModelHealthShutdownFlush();
+    const after2 = process.listenerCount("SIGTERM");
+
+    expect(after1).toBeGreaterThanOrEqual(before);
+    expect(after2).toBe(after1);
+  });
+
+  /**
+   * SCOPE — read before adding to this block. The handler's job is "on signal,
+   * if a write is pending, trigger a flush", and that DECISION is what these
+   * assert. They deliberately do NOT assert the bytes reach disk.
+   *
+   * An earlier version did, and it was VACUOUS: `scheduleDiskPersist` already
+   * writes on its own microtask, so the snapshot appears whether or not the
+   * handler exists — mutation-verified, the mutant that emptied the handler
+   * body survived with all 70 tests green. Proving delivery would need the
+   * microtask to be losable on demand, which cannot be arranged from outside
+   * the module without test-only plumbing worth more than the 15 lines it
+   * guards. Delivery is covered by the "disk persistence" block above; the
+   * residual gap is the one step between "handler decided to flush" and "the
+   * rename landed", which no test here claims.
+   */
+  it("a SIGTERM with a write pending announces the flush", () => {
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    resetModelHealth();
+    __modelHealthTestInternals__.resetFlushInstalledForTest();
+    __modelHealthTestInternals__.installModelHealthShutdownFlush();
+
+    // Not awaited on purpose: the pending window is what the handler covers.
+    recordModelFailure(P, "vendor/sigterm:free", "unusable");
+    expect(__modelHealthTestInternals__.hasPendingWrite()).toBe(true);
+
+    process.emit("SIGTERM");
+
+    expect(logged.mock.calls.flat().join(" ")).toContain("flushing the breaker snapshot");
+  });
+
+  it("a SIGTERM with NOTHING pending does not touch the disk at all", async () => {
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    resetModelHealth();
+    clearPersistedModelHealth();
+    // `process.once` — the previous test consumed its handler, so re-arm or
+    // this test asserts against no listener at all (it did; mutation caught it).
+    __modelHealthTestInternals__.resetFlushInstalledForTest();
+    __modelHealthTestInternals__.installModelHealthShutdownFlush();
+
+    // Drain anything the reset itself may have queued, so the writer is idle.
+    await persistModelHealth();
+    clearPersistedModelHealth();
+    expect(__modelHealthTestInternals__.hasPendingWrite()).toBe(false);
+
+    process.emit("SIGTERM");
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(logged.mock.calls.flat().join(" ")).not.toContain("flushing the breaker snapshot");
+    // A shutdown must not resurrect a snapshot nobody asked to write.
+    expect(fsSync.existsSync(getModelHealthCachePath())).toBe(false);
   });
 });

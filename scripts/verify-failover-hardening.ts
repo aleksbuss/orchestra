@@ -6,8 +6,11 @@
  */
 
 import fsSync from "fs";
+import os from "os";
+import path from "path";
 import {
   resetModelHealth,
+  clearPersistedModelHealth,
   recordModelFailure,
   isModelCircuitOpen,
   getModelHealthCachePath,
@@ -52,13 +55,31 @@ async function run() {
   console.log("🚀 STARTING ORCHESTRA FAILOVER & RECOVERY HARDENING VERIFICATION");
   console.log("================================================================================\n");
 
+  // PM #100 / PM #62 — this script fabricates endpoint failures and PERSISTS
+  // them. Run against the default root it would poison the operator's real
+  // breaker snapshot (and its own "clean state" precondition used to DELETE
+  // it). Redirect to a throwaway root, then ASSERT the redirect resolved:
+  // an unasserted redirect fails silently, which is the whole PM #100 lesson.
+  const isolatedRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), "orchestra-verify-"));
+  process.env.ORCHESTRA_DATA_DIR = isolatedRoot;
+  check(
+    "Isolated data root",
+    path.resolve(getModelHealthCachePath()).startsWith(path.resolve(isolatedRoot) + path.sep),
+    `Breaker snapshot resolves inside ${isolatedRoot}, not the live data/`
+  );
+
   // ---------------------------------------------------------------------------
   // 1. Model Health: Disk Persistence & Trailing Flush Loop
   // ---------------------------------------------------------------------------
   console.log("--- 1. Testing Model Health: Disk Persistence & Trailing Flush ---");
   resetModelHealth();
+  clearPersistedModelHealth();
   const cachePath = getModelHealthCachePath();
-  check("Clean state", !fsSync.existsSync(cachePath), "Cache file does not exist after reset");
+  check(
+    "Clean state",
+    !fsSync.existsSync(cachePath),
+    "Cache file does not exist after reset + explicit clear"
+  );
 
   // Simulate rapid-fire failures
   const testProvider = "openrouter";
@@ -240,6 +261,7 @@ async function run() {
 
   // Cleanup test artifacts
   resetModelHealth();
+  clearPersistedModelHealth();
 
   console.log("\n================================================================================");
   console.log(`🎉 ALL ${results.length} END-TO-END VERIFICATION CHECKS PASSED PERFECTLY!`);

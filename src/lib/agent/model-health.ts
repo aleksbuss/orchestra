@@ -47,6 +47,8 @@
  */
 
 import fsSync from "fs";
+import os from "os";
+import path from "path";
 import { dataPath } from "@/lib/storage/data-dir";
 import { withFileLock, safeWriteFile } from "@/lib/storage/fs-utils";
 
@@ -208,8 +210,67 @@ interface PersistedHealthFile {
   entries: Record<string, ModelHealthEntry>;
 }
 
+function isTestRun(): boolean {
+  return process.env.VITEST === "true" || process.env.NODE_ENV === "test";
+}
+
+/**
+ * Where the breaker snapshot lives.
+ *
+ * PM #100 — this module both WRITES and (via `clearPersistedModelHealth`)
+ * DELETES its file, so a test that forgot to redirect the data root would
+ * destroy the operator's real breaker state and leak `.tmp` partials into the
+ * live `data/cache/`. Measured: `npm test` wrote `data/cache/model-health.json`
+ * and left 13 orphaned `model-health.<uuid>.json.tmp` files behind.
+ *
+ * Under the test runner the DESTINATION is therefore quarantined to a
+ * per-process temp file — unless the run redirected `ORCHESTRA_DATA_DIR`
+ * itself, which is already an isolated root and must be honoured so the E2E /
+ * isolated-sweep recipes keep observing the real layout. Only the destination
+ * moves: the write, the hydrate and the unlink all stay real fs operations, so
+ * the persistence tests prove the actual code path rather than a no-op (the
+ * vacuous-backstop trap from PM #134's own review).
+ */
 export function getModelHealthCachePath(): string {
+  if (isTestRun() && !process.env.ORCHESTRA_DATA_DIR?.trim()) {
+    return path.join(os.tmpdir(), `orchestra-model-health-${process.pid}.json`);
+  }
   return dataPath("cache", "model-health.json");
+}
+
+/**
+ * Remove `.tmp` partials left by a `safeWriteFile` that never reached its
+ * rename. `safeWriteFile` cleans up after a failed write, so these only appear
+ * when the PROCESS died mid-write — and nothing else sweeps `data/cache/`, so
+ * they accumulated without bound (13 measured after one day of test runs).
+ *
+ * Fails SAFE (non-negotiable rule 4): it resolves the live keep-set from the
+ * filename shape `model-health.<id>.json.tmp` in the snapshot's OWN directory
+ * and skips entirely if that directory cannot be read. It never touches the
+ * snapshot itself, any other module's files, or a partial younger than
+ * `maxAgeMs` (a concurrent write in flight).
+ */
+function sweepStaleTempPartials(maxAgeMs = 60 * 60_000): void {
+  try {
+    const snapshotPath = getModelHealthCachePath();
+    const dir = path.dirname(snapshotPath);
+    const base = path.basename(snapshotPath, ".json");
+    if (!fsSync.existsSync(dir)) return;
+
+    const now = Date.now();
+    for (const name of fsSync.readdirSync(dir)) {
+      if (!name.startsWith(`${base}.`) || !name.endsWith(".json.tmp")) continue;
+      const full = path.join(dir, name);
+      try {
+        if (now - fsSync.statSync(full).mtimeMs < maxAgeMs) continue;
+        fsSync.unlinkSync(full);
+      } catch {
+        // A partial that vanished or is locked is not an error worth failing on.
+      }
+    }
+  } catch {
+    // Unreadable directory ⇒ the keep-set is unknown ⇒ sweep nothing.
+  }
 }
 
 function hydrateFromDiskSync(targetMap: Map<string, ModelHealthEntry>): void {
@@ -217,6 +278,9 @@ function hydrateFromDiskSync(targetMap: Map<string, ModelHealthEntry>): void {
   setModelHealthHydrated(true);
 
   if (isDisabled()) return;
+
+  // Once per process, on the same lazy path that reads the snapshot.
+  sweepStaleTempPartials();
 
   try {
     const filePath = getModelHealthCachePath();
@@ -725,20 +789,40 @@ export function getModelHealthSnapshot(): ModelHealthEntry[] {
     );
 }
 
-/** Test helper — clears all breaker state. */
+/**
+ * Test helper — clears IN-MEMORY breaker state only.
+ *
+ * Deliberately NON-destructive on disk. It used to `unlinkSync` the snapshot,
+ * which made every caller a destructive one: `npm test` and
+ * `scripts/verify-failover-hardening.ts` both deleted the live
+ * `data/cache/model-health.json` as a side effect of "resetting state".
+ * Removing the file is now the separate, explicitly-named
+ * `clearPersistedModelHealth()`.
+ *
+ * Marking the store hydrated is what keeps this safe: a later `store()` will
+ * not re-read the snapshot this call just discarded.
+ */
 export function resetModelHealth(): void {
   hasPendingWrite = false;
   isPersisting = false;
   store().clear();
   setModelHealthHydrated(true);
+}
+
+/**
+ * Test helper — removes the on-disk snapshot AND its crash-leaked `.tmp`
+ * partials. Separate from `resetModelHealth` because it is destructive; call it
+ * only from a test that owns the file (i.e. one running against a quarantined
+ * or explicitly redirected data root).
+ */
+export function clearPersistedModelHealth(): void {
   try {
     const filePath = getModelHealthCachePath();
-    if (fsSync.existsSync(filePath)) {
-      fsSync.unlinkSync(filePath);
-    }
+    if (fsSync.existsSync(filePath)) fsSync.unlinkSync(filePath);
   } catch {
-    // ignore
+    // Best-effort: a missing or locked file is not a test failure.
   }
+  sweepStaleTempPartials(0);
 }
 
 /** Minimal shape `selectHealthyConfig` needs. Any `ModelConfig` satisfies it. */

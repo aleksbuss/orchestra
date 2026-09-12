@@ -6,7 +6,11 @@ import {
   isFreeModeEnabled,
   describeFreeModeSelection,
   sortFreeModelsByScore,
+  getFreeModelFamily,
+  pickDiversifiedTiers,
+  isHarnessGatedModel,
   FREE_ROUTER_FALLBACKS,
+  FREE_GENERAL_FALLBACKS,
 } from "./free-mode";
 import {
   __setOpenRouterSupportedParametersForTest,
@@ -776,4 +780,125 @@ describe("PM #127 — the overlay preserves the tiers it displaces", () => {
     expect(base.proposerTiers?.fast?.model).toBe("paid/one");
     expect(base.freeModeDisplacedTiers).toBeUndefined();
   });
+});
+
+describe("Free Mode — Guaranteed Family Diversification & No-Duplicate Enforcing", () => {
+  beforeEach(() => {
+    __resetOpenRouterPricingForTests();
+  });
+
+  it("getFreeModelFamily maps known vendor prefixes to canonical families", () => {
+    expect(getFreeModelFamily("meta-llama/llama-3.3-70b-instruct:free")).toBe("meta");
+    expect(getFreeModelFamily("google/gemma-4-26b-a4b-it:free")).toBe("google");
+    expect(getFreeModelFamily("nvidia/nemotron-nano-9b-v2:free")).toBe("nvidia");
+    expect(getFreeModelFamily("openai/gpt-oss-20b:free")).toBe("openai");
+    expect(getFreeModelFamily("qwen/qwen-2.5-72b-instruct:free")).toBe("qwen");
+    expect(getFreeModelFamily("mistralai/mistral-small:free")).toBe("mistralai");
+    expect(getFreeModelFamily("deepseek/deepseek-chat:free")).toBe("deepseek");
+    expect(getFreeModelFamily("nousresearch/deephermes-3:free")).toBe("nousresearch");
+    expect(getFreeModelFamily("liquid/lfm-2.5-2.6b:free")).toBe("liquid");
+    expect(getFreeModelFamily("bare-model:free")).toBe("bare");
+  });
+
+  it("guarantees 0 duplicate models among [utilityModel, frontier, balanced, fast] when pool >= 4", () => {
+    seedCatalogue([
+      ["meta-llama/llama-3.3-70b:free", ["tools"]],
+      ["google/gemma-4-26b:free", ["structured_outputs"]],
+      ["nvidia/nemotron-3-super-120b:free", ["tools"]],
+      ["openai/gpt-oss-20b:free", ["tools", "structured_outputs"]],
+      ["qwen/qwen-2.5-72b:free", ["tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    const fourSlots = [
+      s.utilityModel.model,
+      s.proposerTiers.frontier.model,
+      s.proposerTiers.balanced.model,
+      s.proposerTiers.fast.model,
+    ];
+    // No two slots among the four share a model!
+    expect(new Set(fourSlots).size).toBe(4);
+  });
+
+  it("assigns distinct vendor families across all slots when diverse families exist", () => {
+    seedCatalogue([
+      ["meta-llama/llama-3.3-70b:free", ["tools"]],
+      ["google/gemma-4-26b:free", ["structured_outputs"]],
+      ["nvidia/nemotron-3-super-120b:free", ["tools"]],
+      ["openai/gpt-oss-20b:free", ["tools", "structured_outputs"]],
+      ["qwen/qwen-2.5-72b:free", ["tools"]],
+    ]);
+
+    const s = selectFreeModels();
+    const families = [
+      getFreeModelFamily(s.chatModel.model),
+      getFreeModelFamily(s.utilityModel.model),
+      getFreeModelFamily(s.proposerTiers.frontier.model),
+      getFreeModelFamily(s.proposerTiers.balanced.model),
+      getFreeModelFamily(s.proposerTiers.fast.model),
+    ];
+    // Every single slot represents a distinct provider/vendor family!
+    expect(new Set(families).size).toBe(5);
+  });
+
+  it("pickDiversifiedTiers avoids duplicate models and orders by strength", () => {
+    const pool = [
+      "nvidia/strong:free",
+      "google/mid:free",
+      "openai/fast:free",
+    ];
+    const tiers = pickDiversifiedTiers(pool, "meta/brain:free", "qwen/router:free");
+    expect(tiers[0]).toBe("nvidia/strong:free");
+    expect(tiers[1]).toBe("google/mid:free");
+    expect(tiers[2]).toBe("openai/fast:free");
+    expect(new Set(tiers).size).toBe(3);
+  });
+});
+
+/**
+ * The cold-boot lists are the only model ids in the codebase that nothing else
+ * validates: they are used precisely when the live catalogue is unavailable, so
+ * a bad entry surfaces as a 404 on the operator's machine and nowhere else.
+ *
+ * Whether an id still EXISTS upstream needs the network and lives in
+ * `npm run verify:free-fallbacks`. These are the invariants that can be checked
+ * offline, and they are the ones a careless edit actually breaks.
+ */
+describe("Free Mode — cold-boot fallback list invariants", () => {
+  const lists = [
+    ["FREE_ROUTER_FALLBACKS", FREE_ROUTER_FALLBACKS],
+    ["FREE_GENERAL_FALLBACKS", FREE_GENERAL_FALLBACKS],
+  ] as const;
+
+  for (const [label, ids] of lists) {
+    it(`${label} is non-empty and free of duplicates`, () => {
+      expect(ids.length).toBeGreaterThan(0);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it(`${label} carries only \`:free\` ids`, () => {
+      // A paid id here would bill the operator on a cold boot of FREE Mode.
+      expect(ids.filter((id) => !id.endsWith(":free"))).toEqual([]);
+    });
+
+    it(`${label} excludes harness-gated and non-chat ids`, () => {
+      // Harness-gated ids 403 on every call (PM #127); a moderation or
+      // embedding endpoint cannot hold a conversation at all.
+      expect(ids.filter((id) => isHarnessGatedModel(id))).toEqual([]);
+      expect(ids.filter((id) => !isGeneralChatModel(id))).toEqual([]);
+    });
+
+    it(`${label} excludes reasoning-branded ids`, () => {
+      // PM #137 sends `reasoning: { enabled: false }` on every OpenRouter
+      // request, so a model whose value IS its reasoning is strictly weaker
+      // here than a plain instruct model of the same size.
+      expect(ids.filter((id) => id.includes("reasoning"))).toEqual([]);
+    });
+
+    it(`${label} spans more than one vendor family`, () => {
+      // One vendor across every entry means one upstream outage empties the
+      // whole cold-boot pool.
+      expect(new Set(ids.map((id) => getFreeModelFamily(id))).size).toBeGreaterThan(1);
+    });
+  }
 });

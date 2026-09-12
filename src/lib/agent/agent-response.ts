@@ -13,7 +13,7 @@ import type { AppSettings, ModelConfig } from "@/lib/types";
 import { resolveMaxOutputTokens } from "@/lib/providers/model-output-limits";
 import { mergeConsecutiveSameRole } from "@/lib/agent/history";
 import { generateFinalAnswerWithFailover, finalAnswerInstruction } from "@/lib/agent/final-answer-failover";
-import type { DegradationPolicy } from "@/lib/agent/degradation-policy";
+import { resolveDegradationPolicy, type DegradationPolicy } from "@/lib/agent/degradation-policy";
 import { recordToolChannelDegradation } from "@/lib/agent/degradation-telemetry";
 // ONE definition of "free model", shared with Free Mode's own selection
 // (`free-mode.ts` filters the catalogue with this exact predicate) and the

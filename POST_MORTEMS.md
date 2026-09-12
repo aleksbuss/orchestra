@@ -38,6 +38,49 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 136. Giving the circuit breaker a disk snapshot made `npm test` delete the operator's real breaker state — and a 100-step allowance under a 20s deadline
+
+**Date:** 2026-09-12
+**Status:** RESOLVED
+**Severity:** P0 for the storage half (a test run silently destroyed live operator state under `data/` and leaked unbounded `.tmp` debris there), P2 for the budget half (a mis-declared step allowance, not a wrong answer).
+
+**Symptoms:** Two defects introduced by the same hardening commit (`98bc49c`), neither visible to any gate — the full suite was green, every contract gate passed, and `src` typechecked clean.
+
+1. Running the test suite wrote `data/cache/model-health.json` into the LIVE data root and left `model-health.<uuid>.json.tmp` partials behind: **13 measured after one day**, three of them 0 bytes, with nothing sweeping `data/cache/`. `resetModelHealth()` additionally `unlinkSync`-ed that path, so a routine `npm test` — and `scripts/verify-failover-hardening.ts`, which fabricates failures and persists them — deleted whatever breaker state the running install had accumulated.
+2. `attemptToolCapableRetry` kept `stopWhen: stepCountIs(args.maxToolSteps)` with `maxToolSteps = MAX_TOOL_STEPS_PER_TURN = 100` while its wall-clock bound moved from `turnDeadlineSignal` (~10 min) to 60s aggregate / 20s per candidate. One hundred tool steps cannot happen in twenty seconds.
+
+**Detection:** The PM #100 recipe, run as an audit rather than after a symptom: `touch marker && npm test && find data -newer marker` printed `data/cache/model-health.json`. The `.tmp` debris was visible in a plain `ls data/cache/`. The budget contradiction came from reading the diff's own deleted comment, which had justified the turn deadline precisely because this path runs a full multi-step tool turn.
+
+**Root Cause:**
+
+*Storage half — PM #100's defect class, re-entered through a new module.* PM #100's rule (non-negotiable 27) is written as an instruction to TEST AUTHORS: set `ORCHESTRA_DATA_DIR` before importing a storage module. `model-health.ts` was not a storage module when its tests were written, so nothing in that suite redirected anything; adding `dataPath("cache", …)` to it silently enrolled 68 existing tests in writing to the live root. The rule could not have caught this, because the rule addresses the wrong party: it asks every present and future test to remember, while the module itself resolves an unguarded destructive path on request. Compounding it, `resetModelHealth` — named and documented as a state-clearing test helper — was given an `unlinkSync`, which made every one of its callers destructive as a side effect.
+
+*Budget half — a budget PAIR split in one direction.* Steps and wall-clock are one budget: the cheaper bound decides when the call actually stops. Lowering only the time bound does not make the run shorter (the deadline already did that); it changes WHERE the run dies — mid-tool, with the abort recorded against the substitute endpoint — instead of at a stop condition the call declared. It also made `withStepBudgetNotice` tell the model a step allowance it could not spend. Same shape as PM #123 and PM #134's 90s/30s pair, one level down.
+
+**Resolution:**
+
+- `getModelHealthCachePath()` quarantines the destination to a per-process file under `os.tmpdir()` when running under the test runner, UNLESS the run redirected `ORCHESTRA_DATA_DIR` itself (an isolated root must still be honoured, so the E2E and isolated-sweep recipes keep observing the real layout). Only the destination moves — the write, the hydrate and the unlink stay real fs operations, so the persistence tests still prove the code path instead of a no-op.
+- The destructive unlink left `resetModelHealth()` (now in-memory only) for an explicitly-named `clearPersistedModelHealth()`, called by the tests that own the file.
+- `sweepStaleTempPartials()` removes crash-leaked `.tmp` partials on the once-per-process hydration path. Fails SAFE per non-negotiable 4: it sweeps only the `model-health.<id>.json.tmp` shape in the snapshot's own directory, never a partial younger than one hour, and skips entirely if that directory cannot be read.
+- `scripts/verify-failover-hardening.ts` now redirects to a throwaway `mkdtemp` root and ASSERTS the redirect resolved before it fabricates anything.
+- **Non-negotiable 6, also missed by the same commit:** the coalescing writer had no `SIGTERM`/`SIGINT` flush, so a signal landing between the microtask schedule and the rename lost whatever the breaker learned that run — and left the `.tmp` partial. `installModelHealthShutdownFlush` now mirrors `installChatStoreShutdownFlush`, installed at module load and skipped under the test runner for the same reason chat-store skips it.
+- `recoveryToolStepBudget(requestedSteps, attemptDeadlineMs)` DERIVES the step cap from that attempt's actual deadline (`floor(deadline / MIN_PLAUSIBLE_STEP_MS)`, clamped by a `RECOVERY_MAX_TOOL_STEPS = 8` recovery ceiling, floored at 1). Shrink the deadline and the step budget shrinks with it, so the pair cannot be split again and no second constant or pairing gate has to be remembered.
+
+**Regression Coverage:** `src/lib/agent/model-health.test.ts` → describe `"PM #100 — the breaker never writes into the live data root under test"` (4 tests: the path is not inside `<cwd>/data` — asserted with the `path.sep` suffix, since a bare `!==` passes on the bug; an explicit redirect is honoured; `resetModelHealth` leaves the snapshot on disk; the sweeper takes a stale partial and spares a fresh one). `src/lib/agent/tool-capable-retry.test.ts` → describe `"recovery step budget is DERIVED from the attempt deadline"` (5 tests, including a probe of the real `stopWhen` predicate's trip point that discriminates 8 from 100). The shutdown flush adds a third block (handler installed once; a signal with a write pending announces the flush; a signal with nothing pending writes nothing).
+
+Every assertion was mutation-verified, and mutation is what made two of them honest rather than decorative:
+- Six mutants killed: quarantine removed, unlink restored, sweeper age check removed, `args.maxToolSteps` restored, handler body emptied, handler never installed.
+- **Two VACUOUS tests were caught this way, not by review.** (a) A first "SIGTERM drains the snapshot to disk" assertion passed with the handler body emptied — `scheduleDiskPersist` already writes on its own microtask, so the file appears either way. It was replaced with what is actually provable (the handler's flush DECISION), and the residual gap between "decided to flush" and "the rename landed" is stated in the test block rather than papered over. (b) The "nothing pending" test then also survived its mutant, because the handler is `process.once` and the previous test's `process.emit` had consumed it — the install-once flag made every later install a no-op, so the test asserted against no listener at all. Fixed with `resetFlushInstalledForTest`.
+- A pre-change differential on HEAD was itself invalid on the first attempt: running the suite in a worktree with `ORCHESTRA_DATA_DIR` redirected failed 145 tests across 25 storage files (rule 27's import-capture hazard, from the other direction). The instrument had to be fixed before its answer meant anything.
+
+Suite-wide proof re-run: `find data -newer marker` empty. Verified live on a REAL production build (isolated port + data root + dist dir, so the operator's `.next` was never touched): a seeded snapshot hydrated (`/api/health` → `model_endpoints: "1 endpoint(s) tracked, none circuit-open"`, the elapsed cooldown correctly expired on load) and a seeded stale `.tmp` partial was swept, with the snapshot and the pricing cache left intact.
+
+**Doc Updates:** `docs/references/data-layout.md` (the `data/cache/model-health.json` row + its retention), `docs/references/moa-swarm-contracts.md` (the breaker's state is no longer in-memory only), `docs/references/security-patterns.md` (the new timeout knobs + the changed cascade-budget default), `.env.example`.
+
+**Rule:** A module that resolves a destructive path under `data/` must make the SAFE destination the default, not ask every test to remember a redirect — non-negotiable 27 is necessary but it addresses test authors, and a new writer enrolls existing tests that cannot have complied. Never put an `unlink` inside a helper whose name says "reset". And when you tighten one half of a step/time budget pair, derive the other half from it rather than leaving it high: the loose half is not generosity, it is a mis-declaration that moves where the run dies.
+
+---
+
 ## 135. Free Mode's brain outbid the Router for the pool's scarcest capability, so BOTH slots ran demoted — and the Router landed on the one model that prints tool markup
 
 **Date:** 2026-09-08

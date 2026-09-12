@@ -92,3 +92,6 @@ graphify-out/
 
 # Editor-local config
 .obsidian/
+
+# Generated output from the ad-hoc scripts/test-delphi-*.ts probes
+artifacts/

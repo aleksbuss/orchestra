@@ -13,7 +13,9 @@ import {
   persistModelHealth,
   getModelHealthCachePath,
   setModelHealthHydrated,
+  clearPersistedModelHealth,
 } from "./model-health";
+import os from "os";
 import fsSync from "fs";
 import path from "path";
 
@@ -634,11 +636,15 @@ describe("markup failures (PM #134)", () => {
 describe("disk persistence and cold-boot hydration", () => {
   beforeEach(() => {
     resetModelHealth();
+    // `resetModelHealth` is in-memory only — this block owns the file, so it
+    // removes the snapshot explicitly.
+    clearPersistedModelHealth();
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
     resetModelHealth();
+    clearPersistedModelHealth();
     vi.restoreAllMocks();
   });
 
@@ -720,4 +726,69 @@ describe("disk persistence and cold-boot hydration", () => {
   });
 });
 
+describe("PM #100 — the breaker never writes into the live data root under test", () => {
+  afterEach(() => {
+    delete process.env.ORCHESTRA_DATA_DIR;
+    resetModelHealth();
+    clearPersistedModelHealth();
+  });
 
+  it("quarantines the snapshot OUTSIDE <cwd>/data when no data root is redirected", () => {
+    delete process.env.ORCHESTRA_DATA_DIR;
+    const liveRoot = path.resolve(process.cwd(), "data");
+    const resolved = path.resolve(getModelHealthCachePath());
+
+    // The assertion PM #100 actually needs: not merely "different string" but
+    // "not anywhere inside the live root" — the sibling-prefix shape is why
+    // `assertPathInside` exists, and a naive `!==` would pass on
+    // `data/cache/model-health.json` (which is the bug).
+    expect(resolved.startsWith(liveRoot + path.sep)).toBe(false);
+    expect(resolved.startsWith(path.resolve(os.tmpdir()))).toBe(true);
+  });
+
+  it("honours an explicitly redirected ORCHESTRA_DATA_DIR (isolated runs see the real layout)", () => {
+    const isolated = fsSync.mkdtempSync(path.join(os.tmpdir(), "orchestra-isolated-"));
+    process.env.ORCHESTRA_DATA_DIR = isolated;
+
+    expect(path.resolve(getModelHealthCachePath())).toBe(
+      path.join(path.resolve(isolated), "cache", "model-health.json")
+    );
+  });
+
+  it("resetModelHealth() clears memory WITHOUT deleting the snapshot", async () => {
+    recordModelFailure(P, "vendor/persisted:free", "unusable");
+    await persistModelHealth();
+    const cachePath = getModelHealthCachePath();
+    expect(fsSync.existsSync(cachePath)).toBe(true);
+
+    resetModelHealth();
+
+    expect(fsSync.existsSync(cachePath)).toBe(true);
+    expect(getModelHealthSnapshot()).toHaveLength(0);
+  });
+
+  it("sweeps only STALE .tmp partials — keeps a fresh one and the snapshot itself", async () => {
+    recordModelFailure(P, "vendor/sweep-me:free", "unusable");
+    await persistModelHealth();
+    const cachePath = getModelHealthCachePath();
+    const dir = path.dirname(cachePath);
+    const base = path.basename(cachePath, ".json");
+
+    const stale = path.join(dir, `${base}.aaaaaaaa-stale.json.tmp`);
+    const fresh = path.join(dir, `${base}.bbbbbbbb-fresh.json.tmp`);
+    fsSync.writeFileSync(stale, "{}");
+    fsSync.writeFileSync(fresh, "{}");
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60_000);
+    fsSync.utimesSync(stale, twoHoursAgo, twoHoursAgo);
+
+    // Force the once-per-process hydration path to run the sweep.
+    setModelHealthHydrated(false);
+    isModelCircuitOpen(P, "vendor/anything:free");
+
+    expect(fsSync.existsSync(stale)).toBe(false);
+    expect(fsSync.existsSync(fresh)).toBe(true);
+    expect(fsSync.existsSync(cachePath)).toBe(true);
+
+    fsSync.unlinkSync(fresh);
+  });
+});

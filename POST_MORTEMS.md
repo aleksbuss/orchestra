@@ -38,6 +38,53 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 137. Every OpenRouter reasoning model was a dead turn — the OpenAI adapter drops `delta.reasoning`, so the watchdog aborted a stream that had been flowing for two seconds
+
+**Date:** 2026-09-12
+**Status:** MITIGATED (body-field workaround shipped; the provider-adapter fix is the real one and is not done)
+**Severity:** P0 — the operator's install was completely unusable. Every interactive turn died, across paid and free models alike, and the error told them the provider was at fault.
+
+**Symptoms:** Operator report: "endpoint лежат в любом случае … постоянно ошибка возвращает … теперь он полностью отказывается openrouter", with the reasonable guesses that Orchestra had tripped an OpenRouter security check or hit a rate limit. Both were wrong, and the product's own error message is what pointed away from the cause: `<endpoint> sent no response within 90s`.
+
+**Detection:** `data/postmortems/` — 8 of the 9 most recent records were `stream_stalled`, 7 of them `ttft`, spanning 2026-08-31 to 2026-09-12 and six different models. That date range is the first finding: this is not a regression from the 2026-09-09..11 hardening work, it predates it by twelve days. The breaker's own snapshot then gave the differential for free: `deepseek/deepseek-chat` had **16 successes**, while `qwen/qwen3.8-flash` and `openrouter/free` had **zero successes** and only failures.
+
+**Root Cause:** `llm-provider.ts`'s `case "openrouter"` builds its model with `createOpenAI` from `@ai-sdk/openai` (it needs the OR-* headers, so it does not go through the shared compatible factory). OpenRouter carries a reasoning model's thinking in a NON-STANDARD `delta.reasoning` / `delta.reasoning_details` field. The OpenAI adapter has never heard of that field and silently drops every chunk carrying it.
+
+So the provider streams continuously while Orchestra observes absolutely nothing: no `text-delta`, no `reasoning-delta`, therefore `agent.ts`'s `onChunk` never fires, therefore `watchdog.noteActivity()` is never called, therefore the time-to-first-token bound aborts at 90s. The message it produces is FALSE — the provider answered in about two seconds and never stopped.
+
+Measured through Orchestra's own `createModel`, one ~10K-token prompt:
+
+| model | first `onChunk` | chunk types | text |
+| --- | --- | --- | --- |
+| `deepseek/deepseek-chat` (no reasoning) | 2091 ms | 645 × `text-delta` | 4998 chars |
+| `qwen/qwen3.8-flash` (reasoning) | NEVER | none | 0 |
+| `qwen/qwen3.6-plus` (reasoning) | NEVER | none | 0 |
+
+Raw HTTP to that same `qwen/qwen3.8-flash`, same prompt: 618 reasoning chunks starting at 1.8s. And the account was never the problem — `GET /api/v1/key` returned 200, `is_free_tier: false`, no limit, with usage recorded that same day.
+
+**RAISING THE WATCHDOG BUDGET IS NOT THE FIX, and this is the trap to remember.** A probe allowed to run to `finish` returned ZERO characters: the entire output budget went into reasoning the adapter discarded. At `max_tokens: 8192` the model emitted 2496 reasoning chunks and still never reached content. A watchdog change alone converts "aborted at 90s" into "empty answer, fully billed" — a worse failure, because the empty-delivery ladder then walks the whole substitute pool for nothing.
+
+**Resolution (mitigation).** `withOpenRouterReasoningDisabled` ([`openrouter-reasoning.ts`](../../src/lib/providers/openrouter-reasoning.ts)) composes around the PM #98 headers-timeout fetch and adds `reasoning: { enabled: false }` to OpenRouter chat-completion bodies. Which field matters — three of the four plausible ones do nothing:
+
+| body field | reasoning | content | chars |
+| --- | --- | --- | --- |
+| (none — what Orchestra sent) | 1.8s | never | 0 |
+| `reasoning: {"exclude": true}` | never | never | 0 |
+| `reasoning: {"effort": "low"}` | 2.0s | never | 0 |
+| **`reasoning: {"enabled": false}`** | never | **2.1s** | **405** |
+
+`exclude` only hides the thinking from the response; the model still spends the budget, so it is strictly worse than doing nothing.
+
+**Regression Coverage:** [`openrouter-reasoning.test.ts`](../../src/lib/providers/openrouter-reasoning.test.ts) — 9 tests, mostly about what the wrapper must NOT touch (a non-JSON body, an unparseable body, an array, a body with no `messages` so embeddings are safe, an existing `reasoning`/`reasoning_effort` preference), plus the stale `Content-Length` and the strict-string opt-out. Four mutants killed: dropping the `messages` guard, dropping the existing-preference guard, making the opt-out truthy instead of strict-string, and keeping the stale Content-Length. `llm-provider.headers-timeout.test.ts` still passes, which is what proves the PM #98 bound survived the composition.
+
+**Verified live, control arm included.** With the wrapper: `qwen/qwen3.8-flash` first chunk 6121 ms, 804 `text-delta`, 7066 chars of real prose; `qwen/qwen3.6-plus` 2127 ms, 6905 chars; `deepseek/deepseek-chat` 1566 ms, 5970 chars, i.e. the field does not harm a non-reasoning model. With `ORCHESTRA_OPENROUTER_REASONING=on` the bug reproduces exactly: NEVER, zero chunks, zero chars.
+
+**Still open, deliberately.** Disabling reasoning on a reasoning model throws away the capability the operator chose it for. The real fix is an OpenRouter-aware provider that maps `delta.reasoning` onto the SDK's `reasoning-delta` part, which feeds the watchdog AND keeps the thinking: `@openrouter/ai-sdk-provider@2.10.0` peers `ai@^6.0.0` and so is compatible with the pinned `ai@6.0.193` (3.x requires `ai@^7`). Two related items found in the same investigation and not fixed here: every `data/postmortems/` record has `logs: []`, which is why the operator could not diagnose this from the artifact built for diagnosing it; and `google/gemini-3.8-flash:batch` had been seated as an interactive brain, a batch endpoint that cannot stream at all.
+
+**Rule:** An OpenAI-compatible adapter pointed at a non-OpenAI gateway is only compatible for the fields OpenAI defines — everything the gateway adds is dropped SILENTLY, and a dropped stream field reads downstream as a dead provider. When a watchdog reports that a provider sent nothing, verify against raw HTTP before believing it: the instrument that says "no response" may simply be unable to see the response. And never conclude a stall is a timeout budget problem until you have let one run to completion.
+
+---
+
 ## 136. Giving the circuit breaker a disk snapshot made `npm test` delete the operator's real breaker state — and a 100-step allowance under a 20s deadline
 
 **Date:** 2026-09-12

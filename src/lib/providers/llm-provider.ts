@@ -1,5 +1,6 @@
 import { createOpenAI } from "@ai-sdk/openai";
 import { createHeadersTimeoutFetch } from "@/lib/providers/fetch-timeout";
+import { withOpenRouterReasoningDisabled } from "@/lib/providers/openrouter-reasoning";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import type { LanguageModel } from "ai";
@@ -327,7 +328,14 @@ export function createModel(
         // through `createOpenAICompatibleChatModel` (it needs the OR-* headers),
         // so the bound has to be repeated here; that duplication is what
         // `llm-provider.headers-timeout.test.ts` pins.
-        fetch: createHeadersTimeoutFetch({ label: "openrouter" }),
+        // PM #137 — the OpenAI adapter drops OpenRouter's non-standard
+        // `delta.reasoning`, so a reasoning model streams for minutes while
+        // Orchestra sees zero chunks and the TTFT watchdog kills the turn at
+        // 90s claiming the provider "sent no response". See
+        // `openrouter-reasoning.ts` for the measurements and the real fix.
+        fetch: withOpenRouterReasoningDisabled(
+          createHeadersTimeoutFetch({ label: "openrouter" })
+        ),
       });
       return provider.chat(config.model);
     }

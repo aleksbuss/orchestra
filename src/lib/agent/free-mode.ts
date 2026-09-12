@@ -95,31 +95,48 @@ import { isModelCircuitOpen } from "@/lib/agent/model-health";
  * Used when the live catalogue has not loaded (cold boot before the first
  * fetch, no network, or Privacy Mode having suppressed the refresh).
  *
- * These are ids observed to exist AND to advertise `structured_outputs`.
- * The list is a FALLBACK, not the source of truth — free ids churn, which is
- * exactly why the live catalogue is preferred. A stale entry here degrades to
- * "that model 404s", which the failover stack already handles; it cannot
- * silently disable the Router the way a capability mismatch can.
+ * Every id here is verified against the live `/api/v1/models` catalogue to
+ * EXIST and to advertise `structured_outputs`. Re-check it with
+ * `npm run verify:free-fallbacks` — free ids churn hard, and an earlier
+ * revision of this list carried three ids OpenRouter had already withdrawn.
+ *
+ * A withdrawn id degrades to "that model 404s", which the failover stack
+ * already handles. An id WITHOUT `structured_outputs` is the worse failure:
+ * `routerPool` takes this list unfiltered on cold boot, so such an entry
+ * silently drops the Router to static personas — exactly the capability
+ * mismatch this list exists to prevent.
  */
 export const FREE_ROUTER_FALLBACKS: readonly string[] = [
-  "nvidia/nemotron-nano-9b-v2:free",
-  "openai/gpt-oss-20b:free",
-  "google/gemma-4-26b-a4b-it:free",
   "nvidia/nemotron-3-super-120b-a12b:free",
+  "nex-agi/nex-n2.5-pro:free",
+  "nex-agi/nex-n2.5-mini:free",
+  "dots-studio/dots-3-note-preview:free",
 ];
 
 /**
  * Fallback pool for the brain + proposers.
  *
- * Ordered tool-capable-first so that even a cold-boot run with no catalogue
- * puts a tool-calling model in the brain slot. `google/gemma-4-…` is kept last
- * rather than removed: it is a fine proposer, and dropping ids from a pool that
- * is already tiny is how Free Mode ends up with nothing to run.
+ * Ordered strongest-first, and every id is tool-capable, so even a cold-boot
+ * run with no catalogue puts a tool-calling model in the brain slot. Vendor
+ * families are spread on purpose (`nvidia`, `nex-agi`, `cohere`, `google`,
+ * `poolside`) so a single upstream outage cannot take every slot at once —
+ * the property `pickDiversifiedTiers` gives the live path, applied by hand to
+ * the cold-boot path where there is no catalogue to diversify over.
+ *
+ * Two exclusions worth stating, because both look like omissions:
+ * `thinkingmachines/*` is harness-gated (PM #127) and would 403 on every
+ * call, and `*-reasoning` ids are left out because PM #137 sends
+ * `reasoning: { enabled: false }` on every OpenRouter request — a
+ * reasoning-branded model with reasoning off is a weaker model, not a
+ * stronger one.
  */
 export const FREE_GENERAL_FALLBACKS: readonly string[] = [
   "nvidia/nemotron-3-super-120b-a12b:free",
-  "openai/gpt-oss-20b:free",
-  "nvidia/nemotron-nano-9b-v2:free",
+  "nex-agi/nex-n2.5-pro:free",
+  "cohere/north-mini-code:free",
+  "google/gemma-4-31b-it:free",
+  "nvidia/nemotron-3.5-lightning:free",
+  "poolside/laguna-s-2.1:free",
   "google/gemma-4-26b-a4b-it:free",
 ];
 
@@ -228,16 +245,6 @@ function cfg(model: string): ModelConfig {
   // is also the security shape the per-request Skeptic override settled on: a
   // model selection must never carry a key or a baseUrl.
   return { provider: "openrouter", model };
-}
-
-/**
- * Pick `n` ids spread across the pool, wrapping when the pool is smaller.
- * Deterministic: the same catalogue always yields the same assignment, so a
- * run is reproducible and a bug report names the same models twice.
- */
-function spread(pool: readonly string[], n: number): string[] {
-  if (pool.length === 0) return [];
-  return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
 }
 
 /**
@@ -415,6 +422,116 @@ export function isGeneralChatModel(id: string): boolean {
   return !NON_CHAT_PATTERNS.some((p) => lower.includes(p));
 }
 
+/**
+ * Known mapping from OpenRouter model prefix to canonical vendor/provider family.
+ * Unmapped prefixes fallback to the prefix itself (e.g. "nousresearch", "liquid").
+ */
+const KNOWN_FAMILY_MAP: Record<string, string> = {
+  "meta-llama": "meta",
+  "meta": "meta",
+  "google": "google",
+  "nvidia": "nvidia",
+  "openai": "openai",
+  "qwen": "qwen",
+  "mistralai": "mistralai",
+  "mistral": "mistralai",
+  "deepseek": "deepseek",
+  "anthropic": "anthropic",
+  "nousresearch": "nousresearch",
+  "liquid": "liquid",
+  "dots-studio": "dots-studio",
+};
+
+/**
+ * Derive vendor/provider family from OpenRouter model id or bare name.
+ */
+export function getFreeModelFamily(modelId: string): string {
+  const lower = (modelId ?? "").toLowerCase().trim();
+  const withoutTag = lower.split(":")[0];
+  if (withoutTag.includes("/")) {
+    const prefix = withoutTag.split("/")[0];
+    return KNOWN_FAMILY_MAP[prefix] ?? prefix;
+  }
+  const leadingAlpha = withoutTag.match(/^([a-z]+)/);
+  if (leadingAlpha) {
+    const p = leadingAlpha[1];
+    return KNOWN_FAMILY_MAP[p] ?? p;
+  }
+  return "unknown";
+}
+
+/**
+ * Pick 3 proposer tiers (frontier, balanced, fast) ensuring:
+ * 1. No duplicate models among [utilityModel (router), frontier, balanced, fast] when pool >= 4.
+ * 2. Guaranteed vendor family diversification across the slots where pool allows.
+ * 3. Proposer tiers maintain capability ranking: frontier is strongest, fast is not the brain.
+ * 4. Graceful soft degradation when pool has fewer than 4 models or fewer families.
+ */
+export function pickDiversifiedTiers(
+  generalPool: readonly string[],
+  brain: string,
+  router: string
+): [string, string, string] {
+  if (generalPool.length === 0) return [router, router, router];
+  if (generalPool.length === 1) return [generalPool[0], generalPool[0], generalPool[0]];
+
+  const routerFamily = getFreeModelFamily(router);
+  const brainFamily = getFreeModelFamily(brain);
+
+  // Candidates distinct from both router and brain, in score-descending order
+  const nonBrainNonRouter = generalPool.filter((id) => id !== router && id !== brain);
+
+  // If we have at least 3 models that are neither router nor brain:
+  if (nonBrainNonRouter.length >= 3) {
+    const chosen: string[] = [];
+    const chosenFamilies = new Set<string>([routerFamily, brainFamily]);
+    const chosenModels = new Set<string>([router, brain]);
+
+    for (let slot = 0; slot < 3; slot++) {
+      // 1. Unused model with unused family
+      let cand = nonBrainNonRouter.find(
+        (id) => !chosenModels.has(id) && !chosenFamilies.has(getFreeModelFamily(id))
+      );
+      // 2. Unused model
+      if (!cand) {
+        cand = nonBrainNonRouter.find((id) => !chosenModels.has(id));
+      }
+      // 3. Fallback to any nonBrainNonRouter
+      if (!cand) {
+        cand = nonBrainNonRouter[slot % nonBrainNonRouter.length];
+      }
+      chosen.push(cand);
+      chosenModels.add(cand);
+      chosenFamilies.add(getFreeModelFamily(cand));
+    }
+    return [chosen[0], chosen[1], chosen[2]];
+  }
+
+  // If we have exactly 2 models that are neither router nor brain:
+  // We place the strongest in frontier, the second in fast (so fast != brain), and brain in balanced.
+  if (nonBrainNonRouter.length === 2) {
+    const frontier = nonBrainNonRouter[0];
+    const fast = nonBrainNonRouter[1];
+    const balanced = brain !== router ? brain : nonBrainNonRouter[0];
+    return [frontier, balanced, fast];
+  }
+
+  // If we have 1 model that is neither router nor brain:
+  if (nonBrainNonRouter.length === 1) {
+    const frontier = nonBrainNonRouter[0];
+    const balanced = brain !== router ? brain : frontier;
+    const fast = frontier;
+    return [frontier, balanced, fast];
+  }
+
+  // If 0 models are neither router nor brain:
+  const pool = [brain, router].filter(Boolean);
+  const frontier = pool[0];
+  const balanced = pool[1] ?? pool[0];
+  const fast = pool[0];
+  return [frontier, balanced, fast];
+}
+
 export function selectFreeModels(): FreeModeSelection {
   // Sorted so selection is stable across processes — catalogue order is not.
   // Gated harness models are filtered out so they never enter the working catalogue.
@@ -481,22 +598,18 @@ export function selectFreeModels(): FreeModeSelection {
   const routerCandidates = routerFloored.length > 0 ? routerFloored : routerPool;
 
   // Router on a DIFFERENT endpoint from the brain where the pool allows it
-  // (PM #112). `routerPool[0]` and `pickBrain` both resolve to the first
-  // structured-capable id, so taking [0] unconditionally guaranteed a
-  // collision. Falls back to sharing rather than leaving the slot empty — a
-  // Router on the brain's endpoint still works; no Router does not.
-  const router = routerCandidates.find((id) => id !== brain) ?? routerCandidates[0];
+  // (PM #112). Prefer a different vendor family first, then different endpoint.
+  // Falls back to sharing rather than leaving the slot empty — a Router on
+  // the brain's endpoint still works; no Router does not.
+  const brainFamily = getFreeModelFamily(brain);
+  const router =
+    routerCandidates.find((id) => id !== brain && getFreeModelFamily(id) !== brainFamily) ??
+    routerCandidates.find((id) => id !== brain) ??
+    routerCandidates[0];
 
-  // Spread the three proposer tiers across DISTINCT endpoints where possible.
-  // Rotating the pool to start AFTER the brain keeps the brain's endpoint out
-  // of the first proposer slot, so its own quota is not the first one hammered.
-  // Rotating by the brain's index — not by a hardcoded 1 — is what keeps that
-  // true now that the brain is chosen by capability rather than by position.
-  const brainAt = Math.max(0, generalPool.indexOf(brain));
-  const rotated = generalPool.length > 1
-    ? [...generalPool.slice(brainAt + 1), ...generalPool.slice(0, brainAt + 1)]
-    : generalPool;
-  const tiers = spread(rotated, 3);
+  // Guaranteed diversification: assign frontier, balanced, fast ensuring no duplicate
+  // models among [utilityModel, frontier, balanced, fast] and distinct families where pool allows.
+  const tiers = pickDiversifiedTiers(generalPool, brain, router);
 
   return {
     chatModel: cfg(brain),

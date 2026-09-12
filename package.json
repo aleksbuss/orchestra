@@ -40,6 +40,7 @@
     "scrub:secrets": "npx tsx scripts/scrub-secrets.ts",
     "auth:reset": "npx tsx scripts/auth-reset.ts",
     "evals": "npx tsx scripts/run-evals.ts",
+    "verify:free-fallbacks": "npx tsx scripts/verify-free-fallbacks.ts",
     "trace:list": "npx tsx scripts/trace-memory-admin.ts list",
     "trace:show": "npx tsx scripts/trace-memory-admin.ts show",
     "trace:stats": "npx tsx scripts/trace-memory-admin.ts stats",

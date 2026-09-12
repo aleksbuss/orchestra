@@ -106,6 +106,19 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
+  // Drain the chat store's BUFFERED writer before removing the directory it
+  // writes into. `updateChat` schedules `flushNow` on a `setTimeout` and the
+  // flush is fire-and-forget, so an immediate `rm` races it: under a loaded
+  // suite the timer fires after the directory is gone, `safeWriteFile`'s
+  // `fs.rename` throws ENOENT, and nothing is awaiting it — surfacing as an
+  // "Unhandled Rejection" attributed to this file that fails the whole run
+  // while every test in it passes. Load-dependent, so it reproduces only
+  // under `npm test`, never on this file alone.
+  // Imported LAZILY on purpose: `chat-store` captures `getDataDir()` at module
+  // load, so a static import here would resolve the root before `beforeAll`
+  // redirects it — the exact trap non-negotiable 27 is about.
+  const { flushAllPendingChats } = await import("@/lib/storage/chat-store");
+  await flushAllPendingChats().catch(() => {});
   if (originalDataDir === undefined) delete process.env.ORCHESTRA_DATA_DIR;
   else process.env.ORCHESTRA_DATA_DIR = originalDataDir;
   if (originalEnvKey === undefined) delete process.env.OPENROUTER_API_KEY;

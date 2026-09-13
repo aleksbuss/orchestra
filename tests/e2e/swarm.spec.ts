@@ -30,12 +30,13 @@ test.describe('Orchestra Swarm Intelligence & Background Daemon', () => {
     );
     await chatInput.press('Enter');
 
-    // Open the Swarm Activity panel — its trigger button is always present while
-    // Swarm is ON. The SwarmDAG inside renders ONLY once the backend emits agent
-    // nodes (it returns null for an empty DAG), and shows a live status header;
-    // that header's presence proves a hierarchical swarm trace was emitted for
-    // this turn. Real-model MoA needs more headroom than CI mocks.
-    await page.getByRole('button', { name: /swarm activity/i }).first().click();
+    // Open the Agent Activity panel. PM #138 renamed it from "Swarm Activity"
+    // and made it render on every turn, not only swarm ones — the trigger is now
+    // unconditionally present. The SwarmDAG inside still renders ONLY once the
+    // backend emits agent nodes (it returns null for an empty DAG), and its
+    // status header keeps the "Swarm …" wording for a real swarm run, which is
+    // what this spec drives. Real-model MoA needs more headroom than CI mocks.
+    await page.getByRole('button', { name: /agent activity/i }).first().click();
 
     await expect(
       page

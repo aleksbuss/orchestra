@@ -108,6 +108,10 @@ All four are lifted:
 
 `swarm_reset` is a control signal for the DAG, not an activity; `swarm-terminal.tsx` now filters it instead of rendering a bare `swarm_reset` line on every turn.
 
+**The pane's own copy had to change with it, and that was missed on the first cut.** Its header said "Swarm Active — N agents thinking" / "Swarm Work Completed" unconditionally, which is a false statement about a plain turn — found only by re-reading the component AFTER the un-gating had shipped. The wording is now chosen by `dagStatusLabel()`, and whether a run was a swarm at all by `summarizeDagNodes()` — both pure, exported, and unit-tested, because this repo has no RTL harness for JSX. A swarm run is one that produced an agent node BESIDES the orchestrator root.
+
+Renaming the trigger button also broke `tests/e2e/swarm.spec.ts`, which selected it by `/swarm activity/i`. The selector is updated, and a unit test now pins the swarm labels against that spec's own regex — a 2.3-minute Playwright run is a slow way to learn you changed a string.
+
 ---
 
 ## MCP server — direct AI access (Sprint 4)

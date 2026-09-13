@@ -38,6 +38,38 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 138. The delivery ladder narrated every decision to stdout and nothing to the UI, so a failover that WORKED looked like an empty turn
+
+**Date:** 2026-09
+**Status:** RESOLVED
+**Severity:** P2 — nothing was computed wrong and nothing was lost. What it cost was diagnosis: the operator reported the same non-bug repeatedly, and each report was investigated as a defect in the cascade that was in fact running correctly every time.
+
+**Symptoms:** Recurring operator question, across several sessions — "почему не запустился failover". The UI showed a turn that produced no visible output; the answer, when one arrived, appeared with no indication that a different model had produced it.
+
+**Detection:** A live production sweep on 2026-09-13 (isolated port + data dir + `ORCHESTRA_NEXT_DIST_DIR=.next-verify`). The brain `nvidia/nemotron-3-ultra-550b-a55b:free` timed out, PM #69's forced answer fired, the cascade announced its 50000ms/25000ms budget, `google/gemma-4-31b-it:free` failed after three attempts, and `cohere/north-mini-code:free` delivered. The chat persisted `user` + `assistant`. **All of that was in the server terminal. The SSE stream carried `start / start-step / finish-step / finish` and nothing else.** The failover had never failed to run; it had never once said so.
+
+**Root Cause:** Counted, not estimated — `src/lib/agent/final-answer-failover.ts` held **14 `console.warn` calls, 0 `publishUiSyncEvent` calls and 0 structured-logger calls.** Two of its branches (a substitute delivering, and the ladder exhausting) narrated nothing at all, even to stdout.
+
+The transport was never the missing piece. `publishUiSyncEvent` → `/api/events` → `useUiSyncEvents` → `SwarmTerminal` existed and worked, and `SwarmTerminal`'s listener is **not swarm-specific**: it renders any `topic: "chat"` event carrying a `reason` string. It looked swarm-specific only because none of the single-agent recovery path published. The same asymmetry runs through `agent.ts`: the per-step tool-activity emit and the orchestrator DAG node are both behind `if (options.swarmEnabled !== false)`, while `finalizeDag` → `publishOrchestratorFinished` is **not** gated — so today the single-agent path can close a DAG node it never opened.
+
+**Resolution:** A closed activity vocabulary in [`agent-activity.ts`](../../src/lib/agent/agent-activity.ts), wired at all 20 decision points of the ladder (the 14 that logged, plus the 6 that were silent). `chatId` is threaded from the three call sites (`agent-response.ts` ×2, `primary-stream-recovery.ts`); without one the feed is a no-op, so every existing caller and test is unaffected.
+
+**The `console.warn` lines were kept, not replaced.** They carry the long-form rationale that several entries in this file quote by wording; the feed is the short operator-legible sibling, not a second copy of the forensics.
+
+**Why the public surface accepts NO caller-supplied string.** The obvious cut — mirror each warn into `publishUiSyncEvent({ reason })` — was rejected on a security read. Those strings interpolate upstream text: the `createModel` failure branch prints `error.message`, which can carry a request URL or a key fragment, and an SSE frame reaches every connected tab. The existing precedent is worse than hypothetical — `summarizeToolArgs` (`agent.ts`) falls back to `JSON.stringify(args)` and ships 80 characters of arbitrary tool input down the same bus on the swarm path. So `publishAgentActivity` takes a code from a fixed union plus numbers, enums and `ModelConfig`s whose labels are derived inside the module. A call site cannot route model output through it, and that is enforced by the parameter types rather than by review.
+
+**Regression Coverage:** `agent-activity.test.ts` (34 cases) — every code renders without `undefined`/`NaN`; an `apiKey` on a `ModelConfig` is never rendered; markup is reported as a character COUNT, never as the markup; and a source scan fails the build if `AgentActivityFields` ever declares a bare `string` member. `final-answer-failover.test.ts` § "operator activity feed" (7 cases) owns the wiring: a brain that answers first time publishes nothing, the cascade narrates start → substitute → delivery in order, every line is scoped to the recovering chat, a caller with no `chatId` publishes nothing, and an upstream error message never reaches the bus.
+
+Thirteen mutants killed: dropping each of `cascade_started` / `substitute_trying` / `substitute_delivered` / `cascade_exhausted`, hardcoding the `chatId`, and re-introducing a raw `publishUiSyncEvent({ reason: error.message })` all turn the suite red, as do the seven against the vocabulary module.
+
+**One mutant SURVIVED and changed the code.** The first cut wrapped the publish in `try/catch` with a comment claiming it protected a degraded turn, and a test asserting it. Deleting the `try/catch` left the suite green: the bus already guards each listener call (`event-bus.ts`), so a throwing *listener* proves nothing about this module's guard. The test was vacuous. It is now a pair — one case for the bus's containment, one that mocks `publishUiSyncEvent` itself to throw — and the second dies when the guard is removed.
+
+**Doc Updates:** `docs/observability.md` § 5 (the feed, its vocabulary, and why it is not free-form); `docs/references/file-size-decomposition.md` (the file crossed the 800-line soft cap and the named seam to pay it back).
+
+**Rule:** A recovery path that only writes to stdout is invisible to the person the recovery is for — if a branch changes which model answers the user, it owes the UI a line. And when you give it one, publish a CODE plus numbers, never an interpolated string: the bus reaches every browser tab, and the upstream text you are tempted to include is exactly the text you cannot vouch for.
+
+---
+
 ## 137. Every OpenRouter reasoning model was a dead turn — the OpenAI adapter drops `delta.reasoning`, so the watchdog aborted a stream that had been flowing for two seconds
 
 **Date:** 2026-09-12

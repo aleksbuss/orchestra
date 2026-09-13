@@ -71,6 +71,29 @@ The UI subscribes via `useChatError(chatId)` and renders the structured banner. 
 
 ---
 
+### 5. Recovery activity feed — `src/lib/agent/agent-activity.ts` (PM #138)
+
+The delivery ladder (`final-answer-failover.ts`) used to narrate every decision it made to stdout and nothing to the UI: 14 `console.warn` calls, zero bus events. A live production turn whose brain timed out and whose second substitute delivered printed the whole cascade to the server terminal while the browser showed an apparently empty turn — the mechanical cause of the recurring "why didn't failover run?" report.
+
+All 20 decision points now publish an operator-legible line onto the existing bus, so `SwarmTerminal` renders the cascade as it happens:
+
+```
+[Failover] openrouter/vendor/brain:free delivered nothing — starting the substitute
+           cascade (50.0s aggregate budget, 25.0s per attempt).
+[Failover] Trying substitute openrouter/vendor/utility (candidate 1 of 3, 12.4s elapsed).
+[Failover] openrouter/vendor/utility delivered the answer after 31.8s.
+```
+
+**The publisher accepts no caller-supplied string.** `publishAgentActivity(target, code, fields)` takes a code from a fixed union (`AgentActivityCode`) plus numbers, enums, and `ModelConfig`s whose `provider/model` labels are derived inside the module. Display text is a template over exactly those. This is deliberate and load-bearing: an SSE frame reaches every connected tab, and the `console.warn` lines it mirrors interpolate upstream text — the `createModel` failure branch prints `error.message`, which can carry a request URL or a key fragment. A source-scanning test fails the build if `AgentActivityFields` ever grows a bare `string` member, so "just add a `detail` field" cannot land quietly.
+
+**To add an activity, add a code.** Never smuggle detail through an existing one, and never publish a raw `reason` string from the ladder.
+
+Without a `chatId` the feed is a silent no-op — `matchesScope` filters chat events by id, so an unscoped event could reach no pane anyway. That is what keeps every pre-existing caller and unit test unaffected.
+
+⚠️ **The single-agent path is still only half-wired.** This covers the recovery ladder. The per-step tool-activity emit and the orchestrator DAG root in `agent.ts` remain behind `if (options.swarmEnabled !== false)`, and `chat-panel.tsx` hides the whole "Swarm Activity" pane unless swarm is on — while `finalizeDag` → `publishOrchestratorFinished` is NOT gated, so the single-agent path can close a node it never opened. Un-gating all three is the next cut.
+
+---
+
 ## MCP server — direct AI access (Sprint 4)
 
 `scripts/mcp-orchestra-server.ts` is a stdio Model Context Protocol server that exposes Orchestra's logs, chats, and health to any MCP client (Claude Code, Cursor, etc.). It reads `data/logs/*.jsonl` and `data/chats/*.json` directly and calls `/api/health` over HTTP.

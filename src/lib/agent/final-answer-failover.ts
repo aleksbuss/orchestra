@@ -49,6 +49,7 @@ import { estimateTokenCount } from "@/lib/agent/compressor";
 import { governMessages } from "@/lib/agent/token-governor";
 import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
 import { gateForcedAnswer } from "@/lib/agent/printed-tool-call";
+import { activityReporter } from "@/lib/agent/agent-activity";
 import type { AppSettings, ModelConfig } from "@/lib/types";
 import {
   classifyModelFailure,
@@ -231,6 +232,13 @@ export interface FinalAnswerAttemptArgs {
    * was requested.
    */
   skipBrainRetry?: boolean;
+  /**
+   * The chat this recovery belongs to. Optional only so the existing unit
+   * suites keep constructing args without one; when absent the operator-facing
+   * activity feed is silently skipped (it has no UI scope to attach to) and the
+   * `console.warn` narration below is unaffected either way.
+   */
+  chatId?: string;
 }
 
 export interface FinalAnswerResult {
@@ -502,6 +510,13 @@ export async function generateFinalAnswerWithFailover(
 ): Promise<FinalAnswerResult> {
   const { brainConfig, abortSignal } = args;
   const recoveryStartedAt = Date.now();
+  // Operator-facing feed. Every `console.warn` below has a one-line sibling
+  // here so the ladder is visible in the UI and not only in the server
+  // terminal — see `agent-activity.ts` for why this takes codes, never strings.
+  const say = activityReporter(
+    { chatId: args.chatId, projectId: args.projectId },
+    recoveryStartedAt
+  );
   // PM #109 follow-up — bound the context ONCE, up front, and reuse it for every
   // attempt. Prune-once (not per-attempt) is right for THIS pool: in Free Mode
   // every substitute is itself a free model, so there is no larger-window
@@ -563,6 +578,7 @@ export async function generateFinalAnswerWithFailover(
     if (first?.text) return { text: first.text, usage, endpoint: brainConfig };
     if (abortSignal?.aborted) {
       logRecoveryAborted("after brain attempt 1", recoveryStartedAt);
+      say("recovery_aborted", { phase: "brain_attempt_1" });
       return { text: "", usage, markupDegradation };
     }
 
@@ -584,11 +600,13 @@ export async function generateFinalAnswerWithFailover(
           `attempt 1 printed a '${first.markup.toolName}' tool call as text, and the retry would ` +
           `re-send the same context that caused it. Going straight to a substitute model.`
       );
+      say("brain_retry_skipped_markup", { endpoint: brainConfig });
     }
     if (!nowTripped && !first?.markup) {
       await abortableSleep(retryBackoffMs(), abortSignal);
       if (abortSignal?.aborted) {
         logRecoveryAborted("during brain retry backoff", recoveryStartedAt);
+        say("recovery_aborted", { phase: "brain_retry_backoff" });
         return { text: "", usage, markupDegradation };
       }
       const second = await attemptOnce(args.model, args, brainConfig);
@@ -597,6 +615,7 @@ export async function generateFinalAnswerWithFailover(
       if (second?.text) return { text: second.text, usage, endpoint: brainConfig };
       if (abortSignal?.aborted) {
         logRecoveryAborted("after brain attempt 2", recoveryStartedAt);
+        say("recovery_aborted", { phase: "brain_attempt_2" });
         return { text: "", usage, markupDegradation };
       }
     }
@@ -605,11 +624,13 @@ export async function generateFinalAnswerWithFailover(
       `[Agent] Final answer — circuit OPEN on ${brainConfig!.provider}/${brainConfig!.model}; ` +
         `going straight to a substitute model.`
     );
+    say("brain_circuit_open", { endpoint: brainConfig });
   } else if (brainConfig) {
     console.warn(
       `[Agent] Final answer — skipping the same-endpoint retry on ${brainConfig.provider}/${brainConfig.model} ` +
         `(the triggering error was not evidence of a transient condition); going straight to a substitute model.`
     );
+    say("brain_retry_skipped_nontransient", { endpoint: brainConfig });
   }
 
   // ── Attempt 3+ — cascade through the substitute pool ────────────────────────
@@ -671,6 +692,7 @@ export async function generateFinalAnswerWithFailover(
         `substitute candidate's circuit is OPEN (${candidates.length} candidate(s): ` +
         `${candidates.map((c) => `${c.provider}/${c.model}`).join(", ") || "none configured"}).`
     );
+    say("cascade_all_breakers_open", { endpoint: brainConfig, candidateCount: candidates.length });
     return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, false), markupDegradation };
   }
 
@@ -682,6 +704,7 @@ export async function generateFinalAnswerWithFailover(
       `[Agent] Final answer — ${endpointLabel} delivered nothing and degradation policy is ` +
         `"${policy}"; NOT substituting (${candidates.length} candidate(s) available).`
     );
+    say("cascade_substitution_not_allowed", { endpoint: brainConfig, policy });
     return { text: "", usage, notice: undeliverableNotice(policy, endpointLabel, true), markupDegradation };
   }
 
@@ -699,17 +722,25 @@ export async function generateFinalAnswerWithFailover(
         `running on the short budget (${budgetMs}ms aggregate, ${attemptDeadlineMs}ms per attempt) ` +
         `so the substitute pool is not walked at full length on a degraded free tier.`
     );
+    say("cascade_started_markup", {
+      endpoint: brainConfig,
+      budgetMs,
+      attemptDeadlineMs,
+      markupChars: markupDegradation?.markupChars,
+    });
   } else {
     console.warn(
       `[Agent] Final answer — cascade running with ${budgetMs}ms aggregate budget, ` +
         `${attemptDeadlineMs}ms per attempt.`
     );
+    say("cascade_started", { endpoint: brainConfig, budgetMs, attemptDeadlineMs });
   }
   const cascadeStartedAt = Date.now();
 
   for (const substitute of candidates) {
     if (abortSignal?.aborted) {
       logRecoveryAborted(`before trying substitute ${substitute.provider}/${substitute.model}`, recoveryStartedAt);
+      say("recovery_aborted", { phase: "before_substitute" });
       return { text: "", usage };
     }
     if (isModelCircuitOpen(substitute.provider, substitute.model)) continue;
@@ -727,6 +758,7 @@ export async function generateFinalAnswerWithFailover(
           `${Date.now() - cascadeStartedAt}ms; NOT trying ${remaining.length} remaining ` +
           `candidate(s): ${remaining.join(", ")}.`
       );
+      say("cascade_budget_exhausted", { budgetMs, remainingCount: remaining.length });
       break;
     }
 
@@ -734,6 +766,11 @@ export async function generateFinalAnswerWithFailover(
       `[Agent] Final answer — ${brainConfig.provider}/${brainConfig.model} delivered nothing; ` +
         `trying substitute ${substitute.provider}/${substitute.model}.`
     );
+    say("substitute_trying", {
+      substitute,
+      attempt: candidates.indexOf(substitute) + 1,
+      candidateCount: candidates.length,
+    });
 
     let substituteModel;
     try {
@@ -746,6 +783,9 @@ export async function generateFinalAnswerWithFailover(
         `[Agent] Could not build the substitute model ${substitute.provider}/${substitute.model}: ` +
           (error instanceof Error ? error.message : String(error))
       );
+      // The upstream message is deliberately NOT forwarded to the feed — it can
+      // carry a request URL or key fragment. The code says what to do about it.
+      say("substitute_build_failed", { substitute });
       continue; // e.g. vault key missing for THIS candidate — try the next one.
     }
 
@@ -753,6 +793,7 @@ export async function generateFinalAnswerWithFailover(
     fold(attempt?.usage);
     noteMarkup(attempt, substitute);
     if (attempt?.text) {
+      say("substitute_delivered", { substitute });
       return {
         text: attempt.text,
         usage,
@@ -764,10 +805,12 @@ export async function generateFinalAnswerWithFailover(
     }
     if (abortSignal?.aborted) {
       logRecoveryAborted(`after substitute ${substitute.provider}/${substitute.model}`, recoveryStartedAt);
+      say("recovery_aborted", { phase: "after_substitute" });
       return { text: "", usage, markupDegradation };
     }
   }
 
+  say("cascade_exhausted");
   return {
     text: "",
     usage,

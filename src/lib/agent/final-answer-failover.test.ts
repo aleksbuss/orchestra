@@ -33,6 +33,7 @@ import {
   getModelHealthEntry,
 } from "./model-health";
 import { FORCED_ANSWER_TOOL_OVERRIDE } from "@/lib/agent/prompts";
+import { subscribeUiSyncEvents } from "@/lib/realtime/event-bus";
 import {
   __setOpenRouterBenchmarkScoreForTest,
   __resetOpenRouterPricingForTests,
@@ -1177,3 +1178,139 @@ describe("fallback cascade budget guards (Sprint 3)", () => {
   });
 });
 
+
+/**
+ * The ladder's operator-facing feed (2026-09-13).
+ *
+ * Before this, `final-answer-failover.ts` held fourteen `console.warn` calls and
+ * zero `publishUiSyncEvent` calls. A real production turn whose brain timed out
+ * and whose second substitute delivered printed the whole cascade to the server
+ * terminal and showed the browser an empty turn — the mechanical cause of the
+ * recurring "why didn't failover run?" report.
+ *
+ * These tests own the WIRING. The vocabulary and its redaction boundary are
+ * tested directly in `agent-activity.test.ts`.
+ */
+describe("generateFinalAnswerWithFailover — operator activity feed", () => {
+  const FRONTIER: ModelConfig = { provider: "openrouter", model: "vendor/frontier", apiKey: "k" };
+
+  function poolSettings(): AppSettings {
+    const s = settings();
+    s.proposerTiers = { frontier: { ...FRONTIER } } as AppSettings["proposerTiers"];
+    return s;
+  }
+
+  /** Collect every bus event published while `fn` runs. */
+  async function feed(fn: () => Promise<unknown>): Promise<string[]> {
+    const seen: string[] = [];
+    const unsubscribe = subscribeUiSyncEvents((e) => {
+      if (e.reason) seen.push(e.reason);
+    });
+    try {
+      await fn();
+    } finally {
+      unsubscribe();
+    }
+    return seen;
+  }
+
+  it("a brain that answers on the first attempt publishes NOTHING", async () => {
+    mockedGenerateText.mockResolvedValueOnce({ text: "fine" } as never);
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(args({ chatId: "chat-A" }))
+    );
+    expect(lines).toEqual([]);
+  });
+
+  it("narrates the cascade: start, the substitute tried, the substitute that delivered", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never) // brain
+      .mockResolvedValueOnce({ text: "" } as never) // brain retry
+      .mockResolvedValueOnce({ text: "delivered" } as never); // utility substitute
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(args({ chatId: "chat-B", settings: poolSettings() }))
+    );
+    expect(lines.some((l) => l.includes("starting the substitute cascade"))).toBe(true);
+    expect(lines.some((l) => l.includes("Trying substitute openrouter/vendor/utility"))).toBe(true);
+    expect(lines.some((l) => l.includes("delivered the answer"))).toBe(true);
+    // Order matters — the feed is read top to bottom.
+    const start = lines.findIndex((l) => l.includes("starting the substitute cascade"));
+    const trying = lines.findIndex((l) => l.includes("Trying substitute"));
+    const done = lines.findIndex((l) => l.includes("delivered the answer"));
+    expect(start).toBeLessThan(trying);
+    expect(trying).toBeLessThan(done);
+  });
+
+  it("scopes every line to the chat that is recovering", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "ok" } as never);
+    const scoped: Array<string | undefined> = [];
+    const unsubscribe = subscribeUiSyncEvents((e) => {
+      if (e.reason) scoped.push(e.chatId);
+    });
+    try {
+      await generateFinalAnswerWithFailover(
+        args({ chatId: "chat-C", projectId: "proj-C", settings: poolSettings() })
+      );
+    } finally {
+      unsubscribe();
+    }
+    expect(scoped.length).toBeGreaterThan(0);
+    expect(scoped.every((id) => id === "chat-C")).toBe(true);
+  });
+
+  it("publishes nothing at all when the caller passes no chatId (back-compat)", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "ok" } as never);
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(args({ settings: poolSettings() }))
+    );
+    expect(lines).toEqual([]);
+  });
+
+  it("reports a policy that forbids substitution instead of silently stopping", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "" } as never);
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(
+        args({ chatId: "chat-D", settings: poolSettings(), degradationPolicy: "quality" })
+      )
+    );
+    expect(lines.some((l) => l.includes('"quality" degradation policy'))).toBe(true);
+  });
+
+  it("reports an exhausted ladder — the branch that used to return silently", async () => {
+    mockedGenerateText.mockResolvedValue({ text: "" } as never);
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(args({ chatId: "chat-E", settings: poolSettings() }))
+    );
+    expect(lines.some((l) => l.includes("none delivered an answer"))).toBe(true);
+  });
+
+  /**
+   * The security regression net for the WIRING. `createModel` throwing is the
+   * one branch whose `console.warn` interpolates an upstream message, and that
+   * message can carry a request URL or a key fragment. The feed must report the
+   * branch without the payload.
+   */
+  it("never forwards an upstream error message to the bus", async () => {
+    mockedGenerateText
+      .mockResolvedValueOnce({ text: "" } as never)
+      .mockResolvedValueOnce({ text: "" } as never);
+    vi.mocked(createModel).mockImplementation((() => {
+      throw new Error("401 from https://openrouter.ai/api/v1 key=sk-or-v1-LEAKED-SECRET");
+    }) as never);
+    const lines = await feed(() =>
+      generateFinalAnswerWithFailover(args({ chatId: "chat-F", settings: poolSettings() }))
+    );
+    expect(lines.some((l) => l.includes("Could not build"))).toBe(true);
+    expect(lines.join("\n")).not.toContain("LEAKED-SECRET");
+    expect(lines.join("\n")).not.toContain("sk-or-v1");
+    expect(lines.join("\n")).not.toContain("openrouter.ai/api/v1");
+  });
+});

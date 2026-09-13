@@ -5,10 +5,12 @@
  * workaround: what it patches, and — mostly — what it must leave alone.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { generateText } from "ai";
 import {
   disableReasoningInBody,
   withOpenRouterReasoningDisabled,
 } from "./openrouter-reasoning";
+import { createModel } from "@/lib/providers/llm-provider";
 
 const CHAT = JSON.stringify({
   model: "qwen/qwen3.8-flash",
@@ -117,5 +119,71 @@ describe("withOpenRouterReasoningDisabled", () => {
     const init = { method: "GET", headers: { "X-Title": "Orchestra" } };
     await withOpenRouterReasoningDisabled(fn)("https://openrouter.ai/api/v1/models", init);
     expect(calls[0].init).toBe(init);
+  });
+});
+
+/**
+ * End-to-end through the REAL factory. Everything above proves the wrapper
+ * works IF it sits on the path; nothing proved that it does, or that the SDK
+ * does not build a body the wrapper then declines to touch — it bails out on
+ * an existing `reasoning` / `reasoning_effort` key, and the OpenAI adapter is
+ * the one component entitled to set the latter.
+ *
+ * So: real `createModel`, real `generateText`, and assert on the bytes that
+ * actually left. The operator's standing direction is that reasoning must
+ * never be enabled; this is the only test that can fail if a future provider
+ * refactor quietly drops the wrapper.
+ */
+describe("PM #137 end-to-end — the body that really leaves createModel", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  /** Stub the network and hand back the outgoing body. */
+  function captureOutgoingBody(): () => string {
+    let seen: unknown;
+    globalThis.fetch = (async (_input: unknown, init?: { body?: unknown }) => {
+      seen = init?.body;
+      return new Response(
+        JSON.stringify({
+          id: "x",
+          object: "chat.completion",
+          created: 0,
+          model: "qwen/qwen3.8-flash",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as typeof globalThis.fetch;
+    return () => String(seen);
+  }
+
+  async function runOneTurn(): Promise<Record<string, unknown>> {
+    const body = captureOutgoingBody();
+    const model = createModel({
+      provider: "openrouter",
+      model: "qwen/qwen3.8-flash",
+      apiKey: "test-key-not-a-real-one",
+    } as never);
+    await generateText({ model, prompt: "hi", abortSignal: AbortSignal.timeout(10_000) });
+    return JSON.parse(body()) as Record<string, unknown>;
+  }
+
+  it("an OpenRouter chat completion carries reasoning.enabled=false", async () => {
+    const sent = await runOneTurn();
+    expect(sent.reasoning).toEqual({ enabled: false });
+    // The bail-out key the adapter could legitimately set. If this ever appears
+    // the wrapper goes silent and every reasoning model is a dead turn again.
+    expect(sent).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("falsifier — with the documented opt-out ON, the field is absent", async () => {
+    process.env.ORCHESTRA_OPENROUTER_REASONING = "on";
+    const sent = await runOneTurn();
+    expect(sent).not.toHaveProperty("reasoning");
   });
 });

@@ -1,5 +1,13 @@
 /**
- * PM #81 Sprint 2 — active self-heal for hallucinated tool calls.
+ * PM #81 Sprint 2 + PM #97 — active self-heal for a tool call that never ran.
+ *
+ * Two ways a turn loses a tool call, one recovery each, both entered through
+ * `recoverMissingToolCall` at the bottom of this file:
+ *   - PM #81, the model PRINTED the call as text instead of calling it, and
+ *   - PM #97, the model emitted a VALID native call the provider DROPPED.
+ * They share one chat-scoped budget and are mutually exclusive by construction.
+ * Both lived inside `runAgent`'s `onFinish` closure until 2026-09-12; they were
+ * moved here verbatim so they can be tested without the streamText harness.
  *
  * When a degraded model (qwen3-coder via OpenRouter under long context) PRINTS a
  * tool call as raw text instead of calling it natively, Sprint 1 detects it and
@@ -37,11 +45,15 @@ import { estimateTokenCount } from "@/lib/agent/compressor";
 import { governMessages } from "@/lib/agent/token-governor";
 import {
   argumentByteSize,
+  readUpstreamProvider,
   recordToolChannelDegradation,
 } from "@/lib/agent/degradation-telemetry";
 import {
+  detectActionHallucination,
   getLastAssistantText,
   getLastResponseToolText,
+  isDroppedNativeToolCall,
+  stripHallucinatedTrailingText,
 } from "@/lib/agent/agent-response";
 import {
   extractHallucinatedToolCall,
@@ -297,4 +309,217 @@ export async function attemptToolReissue(args: {
     );
     return null;
   }
+}
+
+/**
+ * The narrow slice of streamText's `onFinish` event that the recovery below
+ * reads for telemetry. Declared structurally rather than importing the SDK's
+ * own event type: both fields are read defensively because `steps` is absent on
+ * a one-step turn and `providerMetadata` appears only when the gateway names an
+ * upstream.
+ *
+ * Inside the closure this shape was two inline `as unknown as` casts. It is
+ * NOT one here — `OnFinishEvent` satisfies this interface structurally, so the
+ * call site passes `event` with no cast at all and `steps[].usage` is really
+ * type-checked against `RawUsage`. Keep it that way: re-introducing a cast here
+ * would hide an SDK shape change instead of failing the build on it.
+ */
+export interface ReissueTelemetrySource {
+  steps?: ReadonlyArray<{ usage?: RawUsage }>;
+  providerMetadata?: unknown;
+}
+
+/** What a streamed turn persists once both tool-call recovery layers have run. */
+export interface ToolCallRecoveryResult {
+  /**
+   * The messages to persist: markup stripped on the PM #81 path, the re-issue's
+   * real messages appended on both. Identical to the input when neither layer
+   * fired, which is the overwhelmingly common case.
+   */
+  responseMessages: ModelMessage[];
+  /** Billing for the re-issue generation, when one ran AND delivered. */
+  reissueUsage?: RawUsage;
+}
+
+/**
+ * Both tool-call recovery layers of a streamed turn, in the order they must run.
+ *
+ *   Layer 1 (PM #81) — the model PRINTED a tool call as text instead of calling
+ *     it natively. Re-prompt WITH tools so it re-issues for real, and suppress
+ *     the raw markup so the user never sees XML.
+ *   Layer 2 (PM #97) — the model emitted a VALID native call that the provider
+ *     DROPPED in transit. The drop is intermittent, so one bounded re-issue
+ *     usually lands.
+ *
+ * The two share one chat-scoped budget (`recordReissueAttempt`) and are mutually
+ * exclusive by construction: layer 2's gate requires `hallucinated: false`.
+ *
+ * Moved out of `runAgent`'s `onFinish` closure verbatim. The point of the move
+ * is testability, not line count: inside a closure the only way to reach either
+ * layer was the full streamText integration harness.
+ */
+export async function recoverMissingToolCall(args: {
+  /** `event.response.messages` — what the stream actually produced. */
+  rawResponseMessages: ModelMessage[];
+  /** `event.finishReason`, already narrowed to a string or undefined. */
+  finishReason: string | undefined;
+  /** False in plain-chat mode: there are no tools to re-issue with. */
+  useTools: boolean;
+  /** The turn stopped at the per-turn step cap — a pause, not a lost call. */
+  stepLimitReached: boolean;
+  /** The turn stopped on repeated identical blocked calls — also not a drop. */
+  loopAbortReached: boolean;
+  telemetrySource: ReissueTelemetrySource;
+  /** The turn's input messages, replayed (short) as the re-issue's base. */
+  baseMessages: ModelMessage[];
+  model: Parameters<typeof generateText>[0]["model"];
+  systemPrompt: string;
+  tools: ToolSet;
+  providerOptions: Parameters<typeof generateText>[0]["providerOptions"];
+  prepareStep: Parameters<typeof generateText>[0]["prepareStep"];
+  settings: AppSettings;
+  abortSignal?: AbortSignal;
+  chatId: string;
+  /** Endpoint identity for the degradation record — NOT the model handle. */
+  provider: string;
+  modelId: string;
+}): Promise<ToolCallRecoveryResult> {
+  const { rawResponseMessages } = args;
+
+  // PM #81 Sprint 2 — action-tool hallucination self-heal. A degraded model
+  // (qwen3-coder under long context) PRINTS a tool call as raw text instead
+  // of calling it natively; Orchestra never executed it and shipped XML to
+  // the user. Re-prompt WITH tools so the model re-issues the call for real,
+  // and SUPPRESS the raw markup so the user never sees it. Bounded by a
+  // chat-scoped retry budget (circuit breaker). Skipped at a step-cap pause
+  // and in plain-chat mode (no tools to re-issue with).
+  const hallucinatedCall =
+    args.useTools && !args.stepLimitReached
+      ? detectActionHallucination(rawResponseMessages)
+      : null;
+  let reissueUsage: RawUsage | undefined;
+  let reissueMessages: ModelMessage[] = [];
+  if (hallucinatedCall) {
+    // PM #82 — printing a tool call as text is the degradation symptom.
+    // Flag the chat so its NEXT pre-flight pass compacts aggressively and
+    // escapes the long-context loop (behavior-triggered backstop).
+    // PM #109 — and RECORD the conditions (argument size, context size,
+    // provider-reported prompt tokens, upstream) so the boundary can be
+    // learned from data instead of guessed at.
+    const lastStepUsage = (args.telemetrySource.steps ?? []).at(-1)?.usage;
+    recordToolChannelDegradation({
+      stage: "main-turn",
+      chatId: args.chatId,
+      provider: args.provider,
+      model: args.modelId,
+      toolName: hallucinatedCall.name,
+      argBytes: argumentByteSize(hallucinatedCall.args),
+      markupChars: hallucinatedCall.raw.length,
+      contextTokensEstimate: estimateTokenCount([
+        ...args.baseMessages,
+        ...rawResponseMessages,
+      ]),
+      promptTokens: lastStepUsage?.inputTokens ?? lastStepUsage?.promptTokens,
+      upstreamProvider: readUpstreamProvider(args.telemetrySource),
+    });
+    const budget = recordReissueAttempt(args.chatId);
+    console.warn(
+      `[Agent] PM #81 — model printed "${hallucinatedCall.name}" as text instead of ` +
+        `calling it (re-issue attempt ${budget.count}, allowed=${budget.allowed}).`
+    );
+    if (budget.allowed) {
+      const reissue = await attemptToolReissue({
+        model: args.model,
+        systemPrompt: args.systemPrompt,
+        baseMessages: args.baseMessages,
+        priorMessages: rawResponseMessages,
+        tools: args.tools,
+        providerOptions: args.providerOptions,
+        prepareStep: args.prepareStep,
+        settings: args.settings,
+        abortSignal: args.abortSignal,
+        telemetry: {
+          chatId: args.chatId,
+          provider: args.provider,
+          model: args.modelId,
+        },
+      });
+      if (reissue) {
+        reissueMessages = reissue.responseMessages;
+        reissueUsage = reissue.usage;
+        resetReissueBudget(args.chatId); // delivered → reset for later turns
+      }
+    }
+  }
+
+  // ── Layer 2 (PM #97) — intermittent NATIVE tool-call DROP recovery ──
+  // Problem C: the model emitted a VALID native tool call that the provider
+  // (OpenRouter's deepseek→OpenAI mapping) intermittently DROPPED in transit
+  // — the SDK sees finishReason="tool-calls" but ZERO tool calls parsed, no
+  // printed markup (so PM #81 didn't fire), and no delivered answer. The
+  // action silently never ran. Since the drop is intermittent, ONE bounded
+  // re-issue usually lands. NARROW gate — distinct from every other
+  // no-delivery case: NOT a hallucination (handled above), NOT a step-cap
+  // pause, tools ON, finishReason EXACTLY "tool-calls" (a real answer is
+  // "stop"), and nothing deliverable came through. Shares the PM #81 reissue
+  // budget (circuit breaker). Reads turnHasDeliverableAnswer, never mutates it.
+  let dropReissued = false;
+  if (
+    isDroppedNativeToolCall({
+      finishReason: args.finishReason,
+      useTools: args.useTools,
+      // A loop-abort is a STOP REASON, not a dropped native call — treat it
+      // like the step-cap so the dropped-call re-issue never fires on it.
+      stepLimitReached: args.stepLimitReached || args.loopAbortReached,
+      hallucinated: hallucinatedCall !== null,
+      responseMessages: rawResponseMessages,
+    })
+  ) {
+    const budget = recordReissueAttempt(args.chatId);
+    console.warn(
+      `[Agent] Layer 2 (PM #97) — native tool-call DROP detected ` +
+        `(finishReason=tool-calls, no tool call parsed, no answer; likely an ` +
+        `intermittent provider drop). Re-issue attempt ${budget.count}, allowed=${budget.allowed}.`
+    );
+    if (budget.allowed) {
+      const reissue = await attemptToolReissue({
+        model: args.model,
+        systemPrompt: args.systemPrompt,
+        baseMessages: args.baseMessages,
+        priorMessages: rawResponseMessages,
+        tools: args.tools,
+        providerOptions: args.providerOptions,
+        prepareStep: args.prepareStep,
+        settings: args.settings,
+        abortSignal: args.abortSignal,
+        correction: DROP_REISSUE_CORRECTION,
+        telemetry: {
+          chatId: args.chatId,
+          provider: args.provider,
+          model: args.modelId,
+        },
+      });
+      if (reissue) {
+        reissueMessages = reissue.responseMessages;
+        reissueUsage = reissue.usage;
+        dropReissued = true;
+        resetReissueBudget(args.chatId); // delivered → reset for later turns
+      }
+    }
+  }
+
+  // When a hallucination was detected, drop its raw markup message (the
+  // user must not see XML) and append the re-issue's real messages, if any.
+  // On a Layer-2 drop the prior text is legit (a short preamble, no markup),
+  // so KEEP it and append the re-issue's real messages.
+  const responseMessages = hallucinatedCall
+    ? [
+        ...stripHallucinatedTrailingText(rawResponseMessages),
+        ...reissueMessages,
+      ]
+    : dropReissued
+      ? [...rawResponseMessages, ...reissueMessages]
+      : rawResponseMessages;
+
+  return { responseMessages, reissueUsage };
 }

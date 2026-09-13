@@ -186,7 +186,7 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
 // `foldTurnUsage` is the ONE place both callers fold spend, and they pass
 // DISJOINT keys: `onStepFinish` passes `{ streamUsage }`, `onFinish` passes
 // `{ continuationUsage, reissueUsage, turnExtraUsage }` and — deliberately —
-// never `streamUsage` (agent.ts:1207 "We no longer extract it here to avoid
+// never `streamUsage` (agent.ts's onFinish: "We no longer extract it here to avoid
 // double-counting"). Recording the `sources` shape therefore pins the
 // EXCLUSION directly, instead of doing arithmetic over a mutable store where a
 // double-count plus a compensating under-count would still sum correctly.
@@ -716,7 +716,7 @@ describe("agent integration — onStepFinish contract (multi-step, mock model)",
     expect(totalTokens(chat?.cumulativeUsage)).toBe(EXPECTED_TOTAL);
   });
 
-  it("does NOT re-count the main stream in onFinish (agent.ts:1207 double-count exclusion)", async () => {
+  it("does NOT re-count the main stream in onFinish (the double-count exclusion)", async () => {
     const chatId = `integ-bill-once-${Date.now()}`;
     await runScripted(threeStepScript(), chatId);
     await waitForChat(chatId, (c) => totalTokens(c.cumulativeUsage) >= EXPECTED_TOTAL);

@@ -14,6 +14,8 @@ import {
   recordReissueAttempt,
   resetReissueBudget,
   attemptToolReissue,
+  recoverMissingToolCall,
+  type ReissueTelemetrySource,
   buildReissueMessages,
   recordChatDegradation,
   isChatDegraded,
@@ -299,5 +301,182 @@ describe("PM #109 — buildReissueMessages (the retry runs at a SHORT context)",
     const { messages } = buildReissueMessages(base, prior, "CORRECTION", 1500);
     expect(messages[0]?.role).not.toBe("tool");
     expectCorrectionLast(messages);
+  });
+});
+
+/**
+ * PM #81 + PM #97 — `recoverMissingToolCall`, both layers, driven DIRECTLY.
+ *
+ * While this lived inside `runAgent`'s `onFinish` closure the ONLY way to reach
+ * it was the full streamText integration harness, and that harness exercises one
+ * happy path. The branches below — budget exhausted, loop-abort suppression,
+ * layer exclusivity, plain-chat — had no test at all. That is what the
+ * extraction bought; the line count is incidental.
+ */
+const MARKUP =
+  '<tool_call>{"name":"write_text_file","arguments":{"file_path":"a.py","content":"x"}}</tool_call>';
+/** A dropped native call usually leaves a short prose PREAMBLE, never markup. */
+const PREAMBLE = "Начинаю работу над файлом 🚀";
+
+const assistant = (text: string): ModelMessage => ({ role: "assistant", content: text });
+
+type RecoveryArgs = Parameters<typeof recoverMissingToolCall>[0];
+
+function recoveryArgs(over: Partial<RecoveryArgs> = {}): RecoveryArgs {
+  return {
+    rawResponseMessages: [assistant("All done.")],
+    finishReason: "stop",
+    useTools: true,
+    stepLimitReached: false,
+    loopAbortReached: false,
+    telemetrySource: {} as ReissueTelemetrySource,
+    baseMessages: [{ role: "user", content: "write a.py" }],
+    model: modelReturning("Re-issued and done.") as never,
+    systemPrompt: "sys",
+    tools: {} as ToolSet,
+    providerOptions: undefined,
+    prepareStep: undefined,
+    settings,
+    chatId: "recovery-chat",
+    provider: "openrouter",
+    modelId: "qwen/qwen3-coder",
+    ...over,
+  };
+}
+
+/** Flatten every message to searchable text, whatever part shape it uses. */
+function allText(messages: ModelMessage[]): string {
+  return JSON.stringify(messages);
+}
+
+describe("PM #81 + #97 — recoverMissingToolCall", () => {
+  beforeEach(() => resetReissueBudget());
+
+  it("passes a clean turn straight through — same array, nothing spent", async () => {
+    const args = recoveryArgs();
+    const out = await recoverMissingToolCall(args);
+    // Identity, not just equality: the overwhelmingly common path must not
+    // rebuild the message array.
+    expect(out.responseMessages).toBe(args.rawResponseMessages);
+    expect(out.reissueUsage).toBeUndefined();
+    // The budget is untouched, so the NEXT real degradation gets both attempts.
+    expect(recordReissueAttempt("recovery-chat").count).toBe(1);
+  });
+
+  it("never fires layer 1 in plain-chat mode — there is no tool to re-issue with", async () => {
+    const args = recoveryArgs({
+      useTools: false,
+      rawResponseMessages: [assistant(MARKUP)],
+    });
+    const out = await recoverMissingToolCall(args);
+    expect(out.responseMessages).toBe(args.rawResponseMessages);
+    expect(recordReissueAttempt("recovery-chat").count).toBe(1);
+  });
+
+  it("treats a step-cap pause as a pause, not a hallucination", async () => {
+    const args = recoveryArgs({
+      stepLimitReached: true,
+      rawResponseMessages: [assistant(MARKUP)],
+    });
+    const out = await recoverMissingToolCall(args);
+    expect(out.responseMessages).toBe(args.rawResponseMessages);
+    expect(recordReissueAttempt("recovery-chat").count).toBe(1);
+  });
+
+  it("layer 1: STRIPS the printed markup and appends the re-issue's messages", async () => {
+    const out = await recoverMissingToolCall(
+      recoveryArgs({ rawResponseMessages: [assistant(MARKUP)] })
+    );
+    expect(allText(out.responseMessages)).not.toContain("tool_call");
+    expect(allText(out.responseMessages)).toContain("Re-issued and done.");
+    expect(out.reissueUsage).toBeDefined();
+  });
+
+  it("layer 1: strips the markup even when the BUDGET IS EXHAUSTED", async () => {
+    // The circuit breaker stops the re-prompt, never the suppression — a user
+    // who has already burned both attempts must still not be shown raw XML.
+    recordReissueAttempt("recovery-chat");
+    recordReissueAttempt("recovery-chat");
+    const out = await recoverMissingToolCall(
+      recoveryArgs({ rawResponseMessages: [assistant(MARKUP)] })
+    );
+    expect(out.responseMessages).toEqual([]);
+    expect(out.reissueUsage).toBeUndefined();
+  });
+
+  it("layer 1: a DELIVERED re-issue RESETS the budget for later turns", async () => {
+    // Without the reset a chat that self-heals twice would arrive at its third
+    // real degradation with the breaker already open. Found by a surviving
+    // mutant: deleting the reset left all nine other tests green.
+    recordReissueAttempt("recovery-chat"); // one already spent this chat
+    await recoverMissingToolCall(
+      recoveryArgs({ rawResponseMessages: [assistant(MARKUP)] })
+    );
+    expect(recordReissueAttempt("recovery-chat").count).toBe(1);
+  });
+
+  it("layer 1: drops ONLY the markup message, not the turn before it", async () => {
+    // The single-message case cannot tell "strip the trailing markup" apart from
+    // "discard everything" — both produce []. Two messages can.
+    const out = await recoverMissingToolCall(
+      recoveryArgs({
+        rawResponseMessages: [assistant("Reading the file now."), assistant(MARKUP)],
+      })
+    );
+    expect(allText(out.responseMessages)).toContain("Reading the file now.");
+    expect(allText(out.responseMessages)).not.toContain("tool_call");
+    expect(allText(out.responseMessages)).toContain("Re-issued and done.");
+  });
+
+  it("layer 2: re-issues a DROPPED native call and KEEPS the preamble", async () => {
+    const out = await recoverMissingToolCall(
+      recoveryArgs({
+        finishReason: "tool-calls",
+        rawResponseMessages: [assistant(PREAMBLE)],
+      })
+    );
+    expect(allText(out.responseMessages)).toContain(PREAMBLE);
+    expect(allText(out.responseMessages)).toContain("Re-issued and done.");
+    expect(out.reissueUsage).toBeDefined();
+  });
+
+  it("layer 2: a LOOP-ABORT is a stop reason, not a dropped call", async () => {
+    const args = recoveryArgs({
+      finishReason: "tool-calls",
+      loopAbortReached: true,
+      rawResponseMessages: [assistant(PREAMBLE)],
+    });
+    const out = await recoverMissingToolCall(args);
+    expect(out.responseMessages).toBe(args.rawResponseMessages);
+    expect(out.reissueUsage).toBeUndefined();
+    expect(recordReissueAttempt("recovery-chat").count).toBe(1);
+  });
+
+  it("layer 2 never fires after layer 1 — one degradation spends ONE attempt", async () => {
+    // A re-issue that degrades into markup AGAIN returns null, so the budget is
+    // NOT reset: the count it leaves behind is the honest measure of how many
+    // attempts ran. Two would mean the layers double-charged the same turn.
+    const out = await recoverMissingToolCall(
+      recoveryArgs({
+        finishReason: "tool-calls",
+        rawResponseMessages: [assistant(MARKUP)],
+        model: modelReturning(MARKUP) as never,
+      })
+    );
+    expect(recordReissueAttempt("recovery-chat").count).toBe(2);
+    expect(out.responseMessages).toEqual([]);
+    expect(out.reissueUsage).toBeUndefined();
+  });
+
+  it("both layers draw on the SAME budget", async () => {
+    recordReissueAttempt("recovery-chat");
+    recordReissueAttempt("recovery-chat");
+    const args = recoveryArgs({
+      finishReason: "tool-calls",
+      rawResponseMessages: [assistant(PREAMBLE)],
+    });
+    const out = await recoverMissingToolCall(args);
+    expect(out.responseMessages).toBe(args.rawResponseMessages);
+    expect(out.reissueUsage).toBeUndefined();
   });
 });

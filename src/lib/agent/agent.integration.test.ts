@@ -145,6 +145,9 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
         },
         doStream: async (options) => {
           promptLog.streams.push(JSON.stringify(options?.prompt ?? []));
+          promptLog.streamTools.push(
+            ((options?.tools ?? []) as Array<{ name?: string }>).map((t) => t.name ?? "?")
+          );
           if (modelOut.streamThrows) {
             const err = new Error(modelOut.streamThrows) as Error & { statusCode?: number };
             err.statusCode = 400; // matches the real AI_APICallError shape (postmortem evidence)
@@ -200,6 +203,8 @@ vi.mock("@/lib/providers/llm-provider", async (orig) => {
 const promptLog = vi.hoisted(() => ({
   streams: [] as string[],
   generates: [] as string[],
+  /** Tool names handed to the provider on each doStream — PM #138 swarm gating. */
+  streamTools: [] as string[][],
 }));
 
 const foldCalls = vi.hoisted(() => ({ sources: [] as Array<Record<string, unknown>> }));
@@ -254,7 +259,11 @@ vi.mock("@/lib/agent/stream-watchdog", async (orig) => {
 // make the publisher throw — the emit is wrapped in agent.ts precisely so a
 // telemetry failure cannot take a turn down with it.
 const uiEvents = vi.hoisted(() => ({
-  published: [] as Array<{ reason?: string }>,
+  published: [] as Array<{
+    reason?: string;
+    nodeType?: string;
+    swarmNode?: { role?: string; status?: string; toolName?: string; nodeId?: string };
+  }>,
   throwOnPublish: false,
 }));
 
@@ -263,7 +272,7 @@ vi.mock("@/lib/realtime/event-bus", async (orig) => {
   return {
     ...actual,
     publishUiSyncEvent: (input: Parameters<typeof actual.publishUiSyncEvent>[0]) => {
-      const rec = input as { reason?: string };
+      const rec = input as (typeof uiEvents.published)[number];
       uiEvents.published.push(rec);
       // Throw ONLY for the step-activity emit. agent.ts publishes elsewhere
       // (turn start, orchestrator finish) and those calls are NOT wrapped —
@@ -282,6 +291,18 @@ function agentActivityReasons() {
   return uiEvents.published
     .map((e) => e.reason ?? "")
     .filter((r) => r.startsWith("[Agent] "));
+}
+
+/** Every DAG node published this run, as `role:status` pairs. */
+function publishedNodes() {
+  return uiEvents.published
+    .filter((e) => e.swarmNode)
+    .map((e) => `${e.swarmNode?.role}:${e.swarmNode?.status}`);
+}
+
+/** Tool names the provider saw on the FIRST stream call of the run. */
+function firstStreamToolNames(): string[] {
+  return promptLog.streamTools[0] ?? [];
 }
 
 // Fault injection for the "a billing write that fails must not kill the turn"
@@ -317,6 +338,7 @@ function resetHarness() {
   uiEvents.throwOnPublish = false;
   promptLog.streams.length = 0;
   promptLog.generates.length = 0;
+  promptLog.streamTools.length = 0;
 }
 
 /** Total prompt+completion tokens the accumulator recorded for a chat. */
@@ -841,10 +863,19 @@ describe("agent integration — onStepFinish contract (multi-step, mock model)",
  *
  * PM #96 exists because the panel looked "done" while the brain worked for
  * minutes: the ensemble's nodes went green fast and the multi-step tool loop
- * that does the actual work emitted nothing. The emit is gated to the swarm
- * path and fully try/caught — both halves are pinned here.
+ * that does the actual work emitted nothing.
+ *
+ * PM #138 (2026-09-13) REVERSED this emit's swarm gating, and the test below
+ * that pinned the old behaviour was flipped with it — deliberately, and noted
+ * here rather than quietly rewritten. The gate's own stated reason was "the
+ * panel only renders when `swarmEnabled`", which was circular: the events were
+ * suppressed because the pane was hidden and the pane was hidden because swarm
+ * was off. It was also incoherent on its own terms — `finalizeDag` was never
+ * gated, so a plain turn CLOSED an orchestrator node it was never allowed to
+ * open. What stays swarm-only is `call_agent`, the one part that really does
+ * need a swarm, and that is pinned below in both directions.
  */
-describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {
+describe("agent integration — tool loop + Agent-Activity emit (multi-step)", { timeout: MULTI_STEP_TIMEOUT_MS }, () => {
   async function runToolLoop(chatId: string, opts: { swarmEnabled?: boolean } = {}) {
     resetHarness();
     modelOut.steps = [
@@ -881,16 +912,47 @@ describe("agent integration — tool loop + Swarm-Activity emit (multi-step)", {
     expect(modelOut.stepCursor).toBe(2);
   });
 
-  it("emits one Swarm-Activity line naming the tool when the swarm panel is live", async () => {
+  it("emits one activity line naming the tool with swarm ON", async () => {
     await runToolLoop(`integ-activity-on-${Date.now()}`, { swarmEnabled: true });
     const reasons = agentActivityReasons();
     expect(reasons.length).toBeGreaterThan(0);
     expect(reasons.some((r) => r.includes("read_text_file"))).toBe(true);
   });
 
-  it("emits NOTHING when swarm is off — the panel that would render it is absent", async () => {
+  it("emits the SAME line with swarm OFF — a plain turn runs the same tool loop (PM #138)", async () => {
     await runToolLoop(`integ-activity-off-${Date.now()}`, { swarmEnabled: false });
-    expect(agentActivityReasons()).toEqual([]);
+    const reasons = agentActivityReasons();
+    expect(reasons.length).toBeGreaterThan(0);
+    expect(reasons.some((r) => r.includes("read_text_file"))).toBe(true);
+  });
+
+  it("opens a root node with swarm OFF, and closes it — the asymmetry PM #138 removed", async () => {
+    await runToolLoop(`integ-dagroot-off-${Date.now()}`, { swarmEnabled: false });
+    const nodes = publishedNodes();
+    expect(nodes).toContain("orchestrator:running");
+    // `finalizeDag` was ALREADY ungated; before PM #138 this close had no open.
+    expect(nodes.some((n) => n.startsWith("orchestrator:completed"))).toBe(true);
+  });
+
+  it("publishes a tool node with swarm OFF — `dagContext` is no longer swarm-scoped", async () => {
+    await runToolLoop(`integ-toolnode-off-${Date.now()}`, { swarmEnabled: false });
+    expect(publishedNodes().some((n) => n.startsWith("tool:"))).toBe(true);
+  });
+
+  /**
+   * The over-un-gating guard. Everything else in that block became
+   * unconditional; `call_agent` must NOT have, because a peer to delegate to
+   * is exactly what a non-swarm turn does not have. Both directions, so a
+   * future edit cannot satisfy this by removing the tool entirely.
+   */
+  it("does NOT hand the model `call_agent` when swarm is off", async () => {
+    await runToolLoop(`integ-callagent-off-${Date.now()}`, { swarmEnabled: false });
+    expect(firstStreamToolNames()).not.toContain("call_agent");
+  });
+
+  it("DOES hand the model `call_agent` when swarm is on", async () => {
+    await runToolLoop(`integ-callagent-on-${Date.now()}`, { swarmEnabled: true });
+    expect(firstStreamToolNames()).toContain("call_agent");
   });
 
   // ⚠️ Same caveat as the billing-write case above, and for the same reason:

@@ -90,7 +90,23 @@ All 20 decision points now publish an operator-legible line onto the existing bu
 
 Without a `chatId` the feed is a silent no-op — `matchesScope` filters chat events by id, so an unscoped event could reach no pane anyway. That is what keeps every pre-existing caller and unit test unaffected.
 
-⚠️ **The single-agent path is still only half-wired.** This covers the recovery ladder. The per-step tool-activity emit and the orchestrator DAG root in `agent.ts` remain behind `if (options.swarmEnabled !== false)`, and `chat-panel.tsx` hides the whole "Swarm Activity" pane unless swarm is on — while `finalizeDag` → `publishOrchestratorFinished` is NOT gated, so the single-agent path can close a node it never opened. Un-gating all three is the next cut.
+### 6. The activity graph is not a swarm feature (PM #138, step 2)
+
+Four gates used to hide the whole picture from a plain turn, and they were circular: `agent.ts` suppressed the events because the pane was hidden, and `chat-panel.tsx` hid the pane because swarm was off. It was incoherent on its own terms too — `finalizeDag` → `publishOrchestratorFinished` was never gated, so a single-agent turn CLOSED an orchestrator node it was never allowed to open.
+
+All four are lifted:
+
+| was gated on `swarmEnabled` | now |
+| --- | --- |
+| `dagContext` (feeds `tool-guard.ts`'s `tool_node` start/complete) | always built |
+| the `swarm_reset` signal + the orchestrator root node | always published |
+| `onStepFinish`'s per-step tool-activity line | always published |
+| the fatal-error root node | always published |
+| the "Swarm Activity" pane in `chat-panel.tsx` | always rendered, renamed **Agent Activity** |
+
+**`call_agent` stays swarm-only** — it is the one part that genuinely needs a swarm, since a plain turn has no peer to delegate to. Pinned in both directions in `agent.integration.test.ts`, and mutation-verified: removing that gate turns the suite red.
+
+`swarm_reset` is a control signal for the DAG, not an activity; `swarm-terminal.tsx` now filters it instead of rendering a bare `swarm_reset` line on every turn.
 
 ---
 

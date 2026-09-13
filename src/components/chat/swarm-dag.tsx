@@ -37,6 +37,72 @@ interface DAGNode {
 
 /* ─────────────────────── hook ─────────────────────── */
 
+/**
+ * One walk over the node map for every count the header needs.
+ *
+ * Pure and exported for the same reason as `dagStatusLabel` below — and for one
+ * more: mutation testing showed the label's tests could not catch a wrong
+ * `isSwarmRun` DERIVATION, only a wrong use of it. This is where that lives now,
+ * so both halves are covered. It also replaces four separate `Array.from(...)`
+ * passes that ran on every render of a streaming turn.
+ */
+export function summarizeDagNodes(
+  nodes: Iterable<{ role: string; status: string }>
+): {
+  hasErrors: boolean;
+  runningCount: number;
+  totalAgentNodes: number;
+  toolCount: number;
+  isSwarmRun: boolean;
+} {
+  let hasErrors = false;
+  let runningCount = 0;
+  let totalAgentNodes = 0;
+  let toolCount = 0;
+  for (const n of nodes) {
+    if (n.status === "error") hasErrors = true;
+    if (n.status === "running") runningCount += 1;
+    if (n.role === "tool") toolCount += 1;
+    else totalAgentNodes += 1;
+  }
+  return {
+    hasErrors,
+    runningCount,
+    totalAgentNodes,
+    toolCount,
+    // A swarm run is the one that produced an agent node BESIDES the
+    // orchestrator root — a proposer, an aggregator, a subordinate. A plain
+    // turn has exactly one, so `> 1` and not `>= 1`.
+    isSwarmRun: totalAgentNodes > 1,
+  };
+}
+
+/**
+ * The status line at the top of the pane.
+ *
+ * Pure and exported because the pane itself is JSX with no RTL harness in this
+ * repo (see `docs/observability.md` § "What's NOT yet covered"), and because
+ * PM #138 made the wording conditional: this pane now opens on plain turns,
+ * where "Swarm Active" was simply a false statement about what ran.
+ *
+ * `isSwarmRun` is the caller's, derived from the node array — a swarm run is
+ * the one that produced an agent node besides the orchestrator root.
+ */
+export function dagStatusLabel(args: {
+  isActuallyFinished: boolean;
+  hasErrors: boolean;
+  isSwarmRun: boolean;
+  runningCount: number;
+}): string {
+  const { isActuallyFinished, hasErrors, isSwarmRun, runningCount } = args;
+  if (isActuallyFinished) {
+    if (hasErrors) return isSwarmRun ? "Swarm Execution Failed" : "Turn Failed";
+    return isSwarmRun ? "Swarm Work Completed" : "Turn Completed";
+  }
+  if (!isSwarmRun) return "Agent Active — working";
+  return `Swarm Active — ${runningCount} agent${runningCount !== 1 ? "s" : ""} thinking`;
+}
+
 export function useSwarmDAGEvents(chatId: string | null) {
   const [nodes, setNodes] = useState<Map<string, DAGNode>>(new Map());
 
@@ -278,11 +344,10 @@ export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: stri
 
   if (!chatId || nodes.size === 0) return null;
 
-  const hasErrors = Array.from(nodes.values()).some((n) => n.status === "error");
-  const runningCount = Array.from(nodes.values()).filter((n) => n.status === "running").length;
-  const totalAgentNodes = Array.from(nodes.values()).filter(
-    (n) => n.role !== "tool"
-  ).length;
+  // PM #138 — the pane now opens on plain turns too, where "Swarm" wording is
+  // simply false, so the header needs to know which kind of run this was.
+  const { hasErrors, runningCount, totalAgentNodes, toolCount, isSwarmRun } =
+    summarizeDagNodes(nodes.values());
 
   return (
     <div className="mx-4 my-2 glass-panel rounded-xl overflow-hidden text-sm">
@@ -312,11 +377,7 @@ export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: stri
           )}
           <div className="flex flex-col items-start">
             <span className="font-medium text-foreground text-sm tracking-tight">
-              {isActuallyFinished
-                ? hasErrors
-                  ? "Swarm Execution Failed"
-                  : "Swarm Work Completed"
-                : `Swarm Active — ${runningCount} agent${runningCount !== 1 ? "s" : ""} thinking`}
+              {dagStatusLabel({ isActuallyFinished, hasErrors, isSwarmRun, runningCount })}
             </span>
           </div>
 
@@ -351,9 +412,9 @@ export function SwarmDAG({ chatId, externalNodes, onClearNodes }: { chatId: stri
             <span className="text-xs px-2 py-0.5 rounded-full bg-foreground/5 text-muted-foreground font-medium border border-border/60">
               {totalAgentNodes} agent{totalAgentNodes !== 1 ? "s" : ""}
             </span>
-            {Array.from(nodes.values()).filter((n) => n.role === "tool").length > 0 && (
+            {toolCount > 0 && (
               <span className="text-xs px-2 py-0.5 rounded-full bg-foreground/5 text-muted-foreground font-medium border border-border/60">
-                {Array.from(nodes.values()).filter((n) => n.role === "tool").length} tools
+                {toolCount} tools
               </span>
             )}
           </div>

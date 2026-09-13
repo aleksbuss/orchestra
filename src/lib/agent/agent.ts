@@ -1018,23 +1018,21 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       // because the pane was hidden, and the pane was hidden because swarm was
       // off. Both gates lifted together (PM #138). Fully try/caught so a
       // telemetry emit can never break the run.
-      {
-        try {
-          const stepToolCalls = (event as unknown as {
-            toolCalls?: Array<{ toolName?: string; input?: unknown; args?: unknown }>;
-          }).toolCalls;
-          for (const call of stepToolCalls ?? []) {
-            const toolName = call.toolName ?? "tool";
-            publishUiSyncEvent({
-              topic: "chat",
-              chatId: options.chatId,
-              projectId: options.projectId ?? null,
-              reason: `[Agent] ${toolName}${summarizeToolArgs(call.input ?? call.args)}`,
-            });
-          }
-        } catch (activityErr) {
-          console.warn("[Agent] step-activity emit error (non-fatal):", activityErr);
+      try {
+        const stepToolCalls = (event as unknown as {
+          toolCalls?: Array<{ toolName?: string; input?: unknown; args?: unknown }>;
+        }).toolCalls;
+        for (const call of stepToolCalls ?? []) {
+          const toolName = call.toolName ?? "tool";
+          publishUiSyncEvent({
+            topic: "chat",
+            chatId: options.chatId,
+            projectId: options.projectId ?? null,
+            reason: `[Agent] ${toolName}${summarizeToolArgs(call.input ?? call.args)}`,
+          });
         }
+      } catch (activityErr) {
+        console.warn("[Agent] step-activity emit error (non-fatal):", activityErr);
       }
     },
     onFinish: async (event) => {
@@ -1420,20 +1418,18 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       try { await mcpCleanup(); } catch { /* non-critical */ }
     }
 
-    {
-      publishUiSyncEvent({
-        topic: "chat",
-        chatId: options.chatId,
-        nodeType: "agent_node",
-        swarmNode: {
-          nodeId: options.chatId,
-          role: "orchestrator",
-          status: "error",
-          taskSummary: `Fatal error: ${error instanceof Error ? error.message : String(error)}`,
-          completedAt: new Date().toISOString(),
-        },
-      });
-    }
+    publishUiSyncEvent({
+      topic: "chat",
+      chatId: options.chatId,
+      nodeType: "agent_node",
+      swarmNode: {
+        nodeId: options.chatId,
+        role: "orchestrator",
+        status: "error",
+        taskSummary: `Fatal error: ${error instanceof Error ? error.message : String(error)}`,
+        completedAt: new Date().toISOString(),
+      },
+    });
 
     throw error;
   }

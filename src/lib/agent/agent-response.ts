@@ -823,6 +823,7 @@ export async function resolveTurnContinuation(args: {
           abortSignal: undefined,
           brainConfig: brainConfig ?? settings.chatModel,
           projectId,
+          chatId,
           currentPath,
           degradationPolicy: degradationPolicy ?? resolveDegradationPolicy(settings),
           skipBrainRetry: true,
@@ -911,6 +912,7 @@ export async function resolveTurnContinuation(args: {
       abortSignal: undefined,
       brainConfig,
       projectId,
+      chatId,
       currentPath,
       degradationPolicy,
     });

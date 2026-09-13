@@ -373,6 +373,7 @@ export async function recoverPrimaryStreamFailure(
       abortSignal: args.abortSignal,
       brainConfig: args.brainConfig,
       projectId: args.projectId,
+      chatId: args.chatId,
       currentPath: args.currentPath,
       degradationPolicy: policy,
       skipBrainRetry,

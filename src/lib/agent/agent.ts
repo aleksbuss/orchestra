@@ -602,38 +602,47 @@ export async function runAgent(options: RunAgentOptions) {
   // Build tools: base + optional MCP tools from project .meta/mcp, always
   // wrapped in the loop guard (assembleAgentToolSet — CLAUDE.md §4/§10).
   const orchestratorNodeId = options.chatId;
-  const dagContext = options.swarmEnabled !== false
-    ? { chatId: options.chatId, parentNodeId: orchestratorNodeId }
-    : undefined;
+  // PM #138 — the activity graph is not a swarm FEATURE, it is the turn's own
+  // shape. A plain turn runs the same tool loop and the same recovery ladder,
+  // and gating this was incoherent on its own terms: `finalizeDag` (below) was
+  // never gated, so the single-agent path could CLOSE an orchestrator node it
+  // was never allowed to open. `tool-guard.ts` reads this to publish a
+  // tool_node per executed call; `call_agent` and `process` are suppressed
+  // there already.
+  const dagContext = { chatId: options.chatId, parentNodeId: orchestratorNodeId };
   const { tools, mcpCleanup, mcpDocs } = await assembleAgentToolSet(context, settings, {
     mcpDocsLimit: contextWindow,
     guardContext: dagContext,
   });
 
-  // Inject Swarm P2P call_agent tool if swarm is enabled
+  // ── Activity reset: clear stale UI nodes from previous turns ──────────
+  // A control signal, not an activity line — `swarm-terminal.tsx` filters it.
+  publishUiSyncEvent({
+    topic: "chat",
+    chatId: options.chatId,
+    projectId: options.projectId ?? null,
+    reason: "swarm_reset",
+  });
+
+  // DAG: publish the turn's root node. Its terminal status comes from
+  // `finalizeDag` / `publishOrchestratorFinished`, which run on every exit of
+  // every path — normal finish, error, abort, and both recovery modules.
+  publishUiSyncEvent({
+    topic: "chat",
+    chatId: options.chatId,
+    nodeType: "agent_node",
+    swarmNode: {
+      nodeId: orchestratorNodeId,
+      role: "orchestrator",
+      taskSummary: options.userMessage.slice(0, 120),
+      status: "running",
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  // Swarm P2P delegation is the ONE part of this that really is swarm-only:
+  // without the swarm there is no peer to delegate to.
   if (options.swarmEnabled !== false) {
-    // ── Swarm Reset: Clear stale UI nodes from previous turns ──────────
-    publishUiSyncEvent({
-      topic: "chat",
-      chatId: options.chatId,
-      projectId: options.projectId ?? null,
-      reason: "swarm_reset",
-    });
-
-    // DAG: publish orchestrator node
-    publishUiSyncEvent({
-      topic: "chat",
-      chatId: options.chatId,
-      nodeType: "agent_node",
-      swarmNode: {
-        nodeId: orchestratorNodeId,
-        role: "orchestrator",
-        taskSummary: options.userMessage.slice(0, 120),
-        status: "running",
-        startedAt: new Date().toISOString(),
-      },
-    });
-
     tools.call_agent = createCallAgentTool((role, desc, extra) => {
       publishUiSyncEvent({
         topic: "chat",
@@ -1003,10 +1012,13 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       // UI, so the Swarm Activity panel showed only the (already-green) router /
       // proposer / aggregator nodes and looked "done" while the brain worked
       // invisibly. Emit one activity line per executed tool call so the operator
-      // sees the live course of actions in the Deep Audit terminal. Gated to the
-      // swarm path (the panel only renders when `swarmEnabled`); fully try/caught
-      // so a telemetry emit can never break the run.
-      if (options.swarmEnabled !== false) {
+      // sees the live course of actions in the Deep Audit terminal. This was
+      // gated to the swarm path for one reason — "the panel only renders when
+      // `swarmEnabled`" — which was circular: the events were suppressed
+      // because the pane was hidden, and the pane was hidden because swarm was
+      // off. Both gates lifted together (PM #138). Fully try/caught so a
+      // telemetry emit can never break the run.
+      {
         try {
           const stepToolCalls = (event as unknown as {
             toolCalls?: Array<{ toolName?: string; input?: unknown; args?: unknown }>;
@@ -1408,7 +1420,7 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
       try { await mcpCleanup(); } catch { /* non-critical */ }
     }
 
-    if (options.swarmEnabled !== false) {
+    {
       publishUiSyncEvent({
         topic: "chat",
         chatId: options.chatId,

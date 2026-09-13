@@ -17,6 +17,11 @@ export function SwarmTerminal({ chatId }: { chatId: string | null }) {
   // Subscribe to chat events
   useUiSyncEvents({ chatId, topics: ["chat"] }, (parsed) => {
     // Only capture events with a reason or a taskSummary (which means they are meaningful agent actions)
+    // `swarm_reset` is a control signal for the DAG (it clears stale nodes),
+    // not an activity. It was always published on swarm turns and always
+    // rendered here as a bare "swarm_reset" line; now that every turn publishes
+    // it (PM #138), filter it rather than multiply the noise.
+    if (parsed.reason === "swarm_reset") return;
     const message = parsed.reason || parsed.swarmNode?.taskSummary;
     if (!message) return;
     

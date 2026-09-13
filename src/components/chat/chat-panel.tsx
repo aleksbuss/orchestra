@@ -663,31 +663,33 @@ export function ChatPanel() {
 
   return (
     <div className="flex flex-col h-full min-h-0 relative">
-      {swarmEnabled && (
-        <div className="absolute top-4 right-4 z-20">
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="outline" size="sm" className="glass-panel text-primary gap-2 rounded-xl border-border/70 hover:bg-foreground/5 transition-colors shadow-lg shadow-black/10 dark:shadow-black/20">
-                <Activity className="size-4" />
-                Swarm Activity
-              </Button>
-            </SheetTrigger>
-            <SheetContent className="w-[400px] sm:w-[540px] border-l border-border/70 bg-background/95 backdrop-blur-3xl overflow-y-auto p-0 z-[100] !max-w-none">
-              <SheetHeader className="p-4 border-b border-border/70 sticky top-0 bg-background/95 backdrop-blur z-10">
-                <SheetTitle className="text-foreground flex items-center gap-2 text-sm font-semibold">
-                  <Activity className="size-4 text-primary" />
-                  Swarm Activity
-                </SheetTitle>
-              </SheetHeader>
-              <div className="p-4 space-y-4">
-                <GoalTree chatId={activeChatId || internalChatId} syncTick={syncTick} />
-                <SwarmDAG chatId={activeChatId || internalChatId} externalNodes={swarmNodes} onClearNodes={clearSwarmNodes} />
-                <SwarmTerminal chatId={activeChatId || internalChatId} />
-              </div>
-            </SheetContent>
-          </Sheet>
-        </div>
-      )}
+      {/* PM #138 — the activity pane is not swarm-only. A plain turn runs the
+          same tool loop and the same failover ladder, and hiding this was half
+          of a circular gate: `agent.ts` suppressed the events because the pane
+          was hidden, and the pane was hidden because swarm was off. */}
+      <div className="absolute top-4 right-4 z-20">
+        <Sheet>
+          <SheetTrigger asChild>
+            <Button variant="outline" size="sm" className="glass-panel text-primary gap-2 rounded-xl border-border/70 hover:bg-foreground/5 transition-colors shadow-lg shadow-black/10 dark:shadow-black/20">
+              <Activity className="size-4" />
+              Agent Activity
+            </Button>
+          </SheetTrigger>
+          <SheetContent className="w-[400px] sm:w-[540px] border-l border-border/70 bg-background/95 backdrop-blur-3xl overflow-y-auto p-0 z-[100] !max-w-none">
+            <SheetHeader className="p-4 border-b border-border/70 sticky top-0 bg-background/95 backdrop-blur z-10">
+              <SheetTitle className="text-foreground flex items-center gap-2 text-sm font-semibold">
+                <Activity className="size-4 text-primary" />
+                Agent Activity
+              </SheetTitle>
+            </SheetHeader>
+            <div className="p-4 space-y-4">
+              <GoalTree chatId={activeChatId || internalChatId} syncTick={syncTick} />
+              <SwarmDAG chatId={activeChatId || internalChatId} externalNodes={swarmNodes} onClearNodes={clearSwarmNodes} />
+              <SwarmTerminal chatId={activeChatId || internalChatId} />
+            </div>
+          </SheetContent>
+        </Sheet>
+      </div>
 
       {/* Auto-Pilot status toast */}
       {autoPilotStatus === "queued" && (

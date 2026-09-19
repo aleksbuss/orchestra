@@ -114,6 +114,106 @@ describe("generateFinalAnswerWithFailover", () => {
     expect(createModel).not.toHaveBeenCalled(); // no substitution needed
   });
 
+  /**
+   * 2026-09-19 — OUR OWN attempt budget is not the endpoint's fault, and a
+   * second attempt under the same budget is decided before it starts.
+   *
+   * Live incident (chat 5e74ec92): the seated Free Mode brain's provider-side
+   * latency floor is 56–100s, measured 8/8 and independent of prompt size. The
+   * 25s attempt deadline could only expire, so the ladder spent ~26.5s on a
+   * retry that could not differ, and recorded TWO `"unreachable"` failures —
+   * a NETWORK fault — against a reachable model, tripping its breaker at a
+   * threshold of 3. The user was then told the agent had no web-search ability.
+   *
+   * The mock waits for the REAL composed deadline signal rather than rejecting
+   * immediately, so this exercises `callDeadlineSignal` itself; a change that
+   * stopped composing the deadline would fail here rather than pass silently.
+   */
+  describe("our own attempt deadline", () => {
+    /** Reject only once the attempt's own deadline signal has fired. */
+    function rejectOnDeadline() {
+      return async (opts: unknown) => {
+        const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+        await new Promise<void>((resolve) => {
+          if (!signal || signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        const err = new Error("The operation was aborted due to timeout");
+        err.name = "TimeoutError";
+        throw err;
+      };
+    }
+
+    beforeEach(() => {
+      process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS = "5";
+    });
+
+    afterEach(() => {
+      delete process.env.ORCHESTRA_FINAL_ANSWER_ATTEMPT_DEADLINE_MS;
+    });
+
+    it("records a missed budget as `deadline`, NOT as `unreachable`", async () => {
+      mockedGenerateText
+        .mockImplementationOnce(rejectOnDeadline() as never)
+        .mockResolvedValueOnce({ text: "answered by the substitute" } as never);
+
+      await generateFinalAnswerWithFailover(args());
+
+      const entry = getModelHealthEntry(BRAIN.provider, BRAIN.model);
+      expect(entry?.lastFailureKind).toBe("deadline");
+      // The regression: a status-less TimeoutError used to fall through to
+      // `classifyModelFailure`'s message-text fallback and come back as a
+      // network fault.
+      expect(entry?.lastFailureKind).not.toBe("unreachable");
+    });
+
+    it("does NOT retry the brain under the same budget — one attempt, then substitute", async () => {
+      mockedGenerateText
+        .mockImplementationOnce(rejectOnDeadline() as never)
+        .mockResolvedValueOnce({ text: "answered by the substitute" } as never);
+
+      const out = await generateFinalAnswerWithFailover(args());
+
+      expect(out.text).toBe("answered by the substitute");
+      expect(calledModels()).toEqual(["brain-handle", UTILITY.model]);
+      // Exactly ONE brain attempt, and one failure record — not two.
+      expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)?.totalFailures).toBe(1);
+    });
+
+    it("still retries the brain when the failure was NOT our budget", async () => {
+      // The falsifier: an endpoint-side error is exactly what the same-endpoint
+      // retry exists for, and it must survive this change untouched.
+      mockedGenerateText
+        .mockRejectedValueOnce(Object.assign(new Error("Service Unavailable"), { statusCode: 503 }))
+        .mockResolvedValueOnce({ text: "recovered on the retry" } as never);
+
+      const out = await generateFinalAnswerWithFailover(args());
+
+      expect(out.text).toBe("recovered on the retry");
+      expect(calledModels()).toEqual(["brain-handle", "brain-handle"]);
+      expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)?.lastFailureKind).toBe("server");
+    });
+
+    it("a caller abort still wins — it is never charged to the endpoint", async () => {
+      // The caller's signal is composed INTO the deadline, so both report
+      // aborted. The user pressing stop must not become a model failure.
+      const caller = new AbortController();
+      mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+        caller.abort();
+        const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+        await new Promise<void>((resolve) => {
+          if (!signal || signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        throw Object.assign(new Error("aborted"), { name: "AbortError" });
+      }) as never);
+
+      await generateFinalAnswerWithFailover(args({ abortSignal: caller.signal }));
+
+      expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)).toBeNull();
+    });
+  });
+
   it("substitutes a healthy model when the brain stays empty — and SAYS SO", async () => {
     mockedGenerateText
       .mockResolvedValueOnce({ text: "" } as never)

@@ -29,6 +29,12 @@ const BOUND_MARKERS = [
   "watchdog.signal", // the streaming watchdog
   "judgeSignal", // tournament-aggregator's pre-built bounded signal
   "proposerSignal", // moa-proposers' pre-built bounded signal
+  // final-answer-failover's pre-built bounded signal. Built one line above the
+  // call instead of inline because the `catch` has to be able to ask "was it
+  // OUR budget that fired?" — the error text alone cannot answer that, since
+  // `AbortSignal.timeout` and an upstream read timeout both reject with a
+  // `TimeoutError` reading "The operation was aborted due to timeout".
+  "attemptDeadlineSignal",
 ];
 
 interface Callsite {

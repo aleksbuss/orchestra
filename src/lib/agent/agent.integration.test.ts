@@ -471,6 +471,53 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
     ).toBe(true);
   });
 
+  /**
+   * 2026-09-19 — a delivered interactive turn RECORDS A SUCCESS.
+   *
+   * Before this, `recordModelSuccess` had three call sites and none was the
+   * ordinary turn, so `consecutiveFailures` on the brain only ever counted up.
+   * Combined with `isModelCircuitOpen` staying true until a success is
+   * recorded — and every free-model dispatch site gating on it — a tripped
+   * circuit was terminal: never dispatched, so never successful, so never
+   * closed, and persisted to disk across restarts.
+   *
+   * Driven through the real `runAgent`, not through the predicate, because the
+   * defect was a MISSING CALL: a test of the condition alone would have passed
+   * against the broken code.
+   */
+  it("a delivered turn records a model success and clears the failure run", async () => {
+    modelOut.text = "DELIVERED_OK";
+    const chatId = `integ-health-${Date.now()}`;
+    const { runAgent } = await import("./agent");
+    const { createChat } = await import("@/lib/storage/chat-store");
+    const { resetModelHealth, recordModelFailure, getModelHealthEntry } = await import(
+      "./model-health"
+    );
+
+    resetModelHealth();
+    // Two prior failures — one short of the threshold, exactly where the
+    // operator's seated brain sat in the live incident.
+    recordModelFailure("openai", "gpt-4o", "deadline");
+    recordModelFailure("openai", "gpt-4o", "deadline");
+    expect(getModelHealthEntry("openai", "gpt-4o")?.consecutiveFailures).toBe(2);
+
+    await createChat(chatId, "integ-health");
+    const result = await runAgent({ chatId, userMessage: "ping", swarmEnabled: false });
+    for await (const _chunk of result.textStream) {
+      void _chunk;
+    }
+
+    let entry = getModelHealthEntry("openai", "gpt-4o");
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline && (entry?.totalSuccesses ?? 0) === 0) {
+      await new Promise((r) => setTimeout(r, 25));
+      entry = getModelHealthEntry("openai", "gpt-4o");
+    }
+
+    expect(entry?.totalSuccesses, "a delivered turn is evidence the endpoint works").toBe(1);
+    expect(entry?.consecutiveFailures, "and it invalidates the failure run").toBe(0);
+  });
+
   it("PM #81: a streamed hallucinated tool call is SUPPRESSED and re-issued (onFinish wiring)", async () => {
     // The stream emits a printed-as-text tool call (the degradation). The
     // onFinish self-heal must: detect it, drop the markup so it never persists,

@@ -49,6 +49,10 @@ import { updateChat } from "@/lib/storage/chat-store";
 import { publishChatErrorEvent } from "@/lib/realtime/event-bus";
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { resetModelHealth, getModelHealthEntry } from "@/lib/agent/model-health";
+import {
+  ProviderHeadersTimeoutError,
+  StreamStalledError,
+} from "@/lib/observability/stream-stall";
 import type { AppSettings, Chat, ModelConfig } from "@/lib/types";
 import {
   recoverPrimaryStreamFailure,
@@ -289,6 +293,60 @@ describe("recoverPrimaryStreamFailure — gates", () => {
     mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
 
     await recoverPrimaryStreamFailure(baseArgs({ error: apiError(429) }));
+
+    expect(mockedFailover).toHaveBeenCalledWith(
+      expect.objectContaining({ skipBrainRetry: false })
+    );
+  });
+
+  /**
+   * 2026-09-19 — a STALL also skips the retry.
+   *
+   * `isDeterministicClientError` keys on an HTTP status and a stall carries
+   * none, so a silent endpoint kept the doomed same-endpoint retry. The class
+   * that actually reaches this function is `ProviderHeadersTimeoutError`
+   * (headers never arrived inside 60s): `ai@6` routes an AbortController abort
+   * to `onAbort`, so the stream watchdog's own kill never gets here, while the
+   * fetch wrapper's rejection does. The retry then runs on a 25s budget — less
+   * than half the bound that just expired — against an endpoint measured at a
+   * 56–100s floor.
+   */
+  it("gate 2: a provider headers-timeout stall sets skipBrainRetry=true", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
+
+    await recoverPrimaryStreamFailure(
+      baseArgs({ error: new ProviderHeadersTimeoutError(60_000, 60_123, "openrouter") })
+    );
+
+    expect(mockedFailover).toHaveBeenCalledWith(
+      expect.objectContaining({ skipBrainRetry: true })
+    );
+  });
+
+  it("gate 2: a watchdog stall would also skip, if the SDK ever routed one here", async () => {
+    // Pinned both directions on purpose. The guard is written against the
+    // shared `orchestraStreamStall` marker rather than against one class, so
+    // it stays correct if `ai@6`'s abort routing changes under us.
+    mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
+
+    await recoverPrimaryStreamFailure(
+      baseArgs({ error: new StreamStalledError("ttft", 90_000, 90_400, "openrouter/brain") })
+    );
+
+    expect(mockedFailover).toHaveBeenCalledWith(
+      expect.objectContaining({ skipBrainRetry: true })
+    );
+  });
+
+  it("gate 2: a plain user AbortError is NOT a stall and keeps the retry", async () => {
+    // The falsifier. `StreamStalledError.name` is deliberately "AbortError",
+    // so a guard that keyed on the NAME instead of the marker would swallow a
+    // genuine cancellation into the same branch.
+    mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
+
+    await recoverPrimaryStreamFailure(
+      baseArgs({ error: Object.assign(new Error("aborted"), { name: "AbortError" }) })
+    );
 
     expect(mockedFailover).toHaveBeenCalledWith(
       expect.objectContaining({ skipBrainRetry: false })

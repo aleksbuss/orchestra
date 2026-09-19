@@ -28,6 +28,7 @@ const ALL_CODES: AgentActivityCode[] = [
   "brain_circuit_open",
   "brain_retry_skipped_markup",
   "brain_retry_skipped_nontransient",
+  "brain_retry_skipped_deadline",
   "substitute_trying",
   "substitute_build_failed",
   "substitute_delivered",

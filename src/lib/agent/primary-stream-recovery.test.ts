@@ -261,6 +261,37 @@ describe("recoverPrimaryStreamFailure — gates", () => {
     expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)).toBeNull();
   });
 
+  /**
+   * A STALL is OUR bound expiring, so gate 4 must charge the endpoint nothing.
+   *
+   * This pins behaviour that `classifyModelFailure` currently produces by
+   * accident: it returns `null` for `ProviderHeadersTimeoutError` only because
+   * that error's wording ("sent no response headers within 60s") happens to
+   * miss its `"timeout"`/`"timed out"` substrings. Reword the error and the
+   * brain silently starts collecting `"unreachable"` — a NETWORK fault — for a
+   * budget Orchestra chose. Without this test the explicit guard is vacuous:
+   * replacing it with `"unreachable"` left the whole suite green.
+   */
+  it("gate 4: a stall is OUR bound, never charged to the endpoint", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
+
+    await recoverPrimaryStreamFailure(
+      baseArgs({ error: new ProviderHeadersTimeoutError(60_000, 60_123, "openrouter") })
+    );
+
+    expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)).toBeNull();
+  });
+
+  it("gate 4: a watchdog stall is likewise never charged to the endpoint", async () => {
+    mockedFailover.mockResolvedValueOnce({ text: "recovered", usage: undefined });
+
+    await recoverPrimaryStreamFailure(
+      baseArgs({ error: new StreamStalledError("ttft", 90_000, 90_400, "openrouter/brain") })
+    );
+
+    expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)).toBeNull();
+  });
+
   it("gate 5: quality policy never substitutes — returns false WITHOUT calling the ladder at all", async () => {
     const out = await recoverPrimaryStreamFailure(
       baseArgs({ settings: { ...settings(), degradationPolicy: "quality" } })

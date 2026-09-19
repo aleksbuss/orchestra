@@ -24,6 +24,7 @@ import {
   buildFinalAnswerPool,
   finalAnswerInstruction,
   compareModelsByBenchmarkScoreDesc,
+  isAbortShapedError,
   UNDELIVERABLE_NOTICE,
 } from "./final-answer-failover";
 import {
@@ -192,6 +193,39 @@ describe("generateFinalAnswerWithFailover", () => {
       expect(out.text).toBe("recovered on the retry");
       expect(calledModels()).toEqual(["brain-handle", "brain-handle"]);
       expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)?.lastFailureKind).toBe("server");
+    });
+
+    it("a real server error on the deadline boundary is NOT recorded as `deadline`", async () => {
+      // The race a frontier council caught in the first cut (3 of 4 reviewers).
+      // Node runs the timers phase before the poll phase, so an upstream 5xx
+      // detected at ~t=deadline arrives AFTER our timer fired: reading
+      // `signal.aborted` alone files a server fault as a missed budget AND
+      // suppresses the same-endpoint retry a 5xx deserves.
+      mockedGenerateText.mockImplementationOnce((async (opts: unknown) => {
+        const signal = (opts as { abortSignal?: AbortSignal }).abortSignal;
+        await new Promise<void>((resolve) => {
+          if (!signal || signal.aborted) return resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        // Aborted signal, but the error is a genuine upstream failure.
+        throw Object.assign(new Error("Service Unavailable"), { statusCode: 503 });
+      }) as never);
+      mockedGenerateText.mockResolvedValueOnce({ text: "recovered on the retry" } as never);
+
+      const out = await generateFinalAnswerWithFailover(args());
+
+      expect(getModelHealthEntry(BRAIN.provider, BRAIN.model)?.lastFailureKind).toBe("server");
+      // And the retry it deserves is NOT suppressed.
+      expect(calledModels()).toEqual(["brain-handle", "brain-handle"]);
+      expect(out.text).toBe("recovered on the retry");
+    });
+
+    it("isAbortShapedError knows the two names a cancellation arrives under", () => {
+      expect(isAbortShapedError(Object.assign(new Error("x"), { name: "TimeoutError" }))).toBe(true);
+      expect(isAbortShapedError(Object.assign(new Error("x"), { name: "AbortError" }))).toBe(true);
+      expect(isAbortShapedError(Object.assign(new Error("x"), { statusCode: 503 }))).toBe(false);
+      expect(isAbortShapedError(null)).toBe(false);
+      expect(isAbortShapedError("timeout")).toBe(false);
     });
 
     it("a caller abort still wins — it is never charged to the endpoint", async () => {

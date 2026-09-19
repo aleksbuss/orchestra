@@ -291,7 +291,21 @@ export async function recoverPrimaryStreamFailure(
   try {
     // Gate 4 — feed the breaker. Positive-evidence only, same rule as every
     // other call site in this codebase.
-    const failureKind = classifyModelFailure(args.error);
+    //
+    // A STALL is EXPLICITLY not evidence about the endpoint here, because it is
+    // OUR bound that expired — `ProviderHeadersTimeoutError` is the fetch
+    // wrapper's 60s headers budget, `StreamStalledError` the watchdog's.
+    // Measured: `classifyModelFailure` already returns `null` for all three
+    // stall classes, so this changes no behaviour today. It is written down
+    // because the ONLY thing producing that `null` is the wording of those
+    // messages ("sent no response headers within 60s") happening to miss the
+    // classifier's `"timeout"`/`"timed out"` substrings. Rewording either error
+    // would silently start charging the endpoint a `"unreachable"` network
+    // fault for our own budget — which is exactly the defect PM #139 fixed one
+    // layer down, at the site that fires SECOND. Named by a frontier council
+    // review; the specific claim that it was already happening was false, the
+    // hazard it pointed at was real.
+    const failureKind = isStreamStall(args.error) ? null : classifyModelFailure(args.error);
     if (failureKind) {
       recordModelFailure(args.brainConfig.provider, args.brainConfig.model, failureKind);
     }

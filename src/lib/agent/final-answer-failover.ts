@@ -372,6 +372,20 @@ function readUsage(result: unknown): RawUsage | undefined {
   return (result as { usage?: RawUsage }).usage ?? undefined;
 }
 
+/**
+ * Does this error carry the SHAPE of a cancellation?
+ *
+ * The two names an aborted call can arrive under: `AbortSignal.timeout` rejects
+ * with `"TimeoutError"`, an `AbortController.abort()` with `"AbortError"`.
+ * Exported for direct unit testing — pairing it with `signal.aborted` is what
+ * keeps a real server error that happens to land on the deadline boundary from
+ * being recorded as a missed budget.
+ */
+export function isAbortShapedError(error: unknown): boolean {
+  const name = (error as { name?: unknown } | null | undefined)?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 /** `provider/model`, or a stable placeholder when the slot is unknown. */
 function endpointLabelFor(endpoint: ModelConfig | undefined): string {
   return endpoint ? `${endpoint.provider}/${endpoint.model}` : "the brain model";
@@ -497,10 +511,26 @@ async function attemptOnce(
     // floor, so a 25s attempt deadline could only ever expire, and two such
     // expiries per degraded turn were quarantining a reachable model against a
     // threshold of 3.
+    // TWO conditions, not one. A frontier council review (2026-09-19, flagged
+    // by 3 of 4 reviewers) caught the first cut reading `signal.aborted` alone:
+    // that samples the signal at CATCH time, not at rejection time. Node runs
+    // the timers phase before the poll phase, so a genuine upstream 5xx or
+    // socket error detected at ~t=deadline lands AFTER our timer has already
+    // fired — `aborted` is true, and a real server fault gets filed as
+    // `"deadline"`. Worse, `deadlineExpired` then suppresses the same-endpoint
+    // retry that this file's own comment says a 5xx deserves, because a 5xx
+    // does resolve between attempts.
+    //
+    // So the error itself must also LOOK like an abort. Verified against the
+    // real SDK at this exact call shape (no `maxRetries` override): our
+    // deadline surfaces as `name: "TimeoutError"` with `signal.reason.name`
+    // matching — the SDK does not wrap it in `AI_RetryError`, because an abort
+    // is not retried.
     const callerAborted = args.abortSignal?.aborted === true;
+    const abortShaped = isAbortShapedError(error);
     const kind: ModelFailureKind | null = callerAborted
       ? null
-      : attemptDeadlineSignal?.aborted
+      : attemptDeadlineSignal?.aborted && abortShaped
         ? "deadline"
         : classifyModelFailure(error);
     if (endpoint && kind) recordModelFailure(endpoint.provider, endpoint.model, kind);

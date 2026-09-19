@@ -398,6 +398,13 @@ beforeEach(async () => {
   await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
   resetHarness();
+  // The breaker is a process-global on a `globalThis` singleton, and since
+  // PM #139 the ordinary turn WRITES to it — so every test in this file now
+  // mutates shared state that the next one would inherit. Same reason
+  // `moa.test.ts` carries this line: without it a health assertion passes or
+  // fails depending on file order, which only shows up under shuffle.
+  const { resetModelHealth } = await import("./model-health");
+  resetModelHealth();
 });
 
 afterAll(async () => {

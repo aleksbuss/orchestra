@@ -38,6 +38,70 @@ When adding a new PM, prepend it above the current top entry and increment the n
 
 ---
 
+## 139. The agent told the operator it had no web search. It did — the model that said so was the tool-less last rung, reached because our own 25s budget had just quarantined a model whose floor is 56s
+
+**Date:** 2026-09
+**Status:** RESOLVED
+**Severity:** P1 — the product made a false statement about its own capabilities to the user, and the user believed it. Not a slow turn: a wrong answer.
+
+**Symptoms:** The operator asked the agent to find jobs on the web. It replied *"I don't have access to current job listings or the ability to search for new job postings"* and asked to be given the listings instead. The operator typed the single word `web_search`. The very next turn made eleven successful tool calls (`search_web`, `fetch_webpage`, `web_task`, `memory_save`). Nothing in the configuration changed between those two turns, so the obvious reading — and the one the model itself offered when asked — was that the model had been too weak to pick the right tool.
+
+**Detection:** Chat `5e74ec92`, turn wall-clock against the breaker ledger. The turns:
+
+```
+user#0 -> assistant#1     32.2s   toolCalls=false
+user#2 -> assistant#3    129.8s   toolCalls=false     <- the false refusal
+user#4 -> assistant#5    109.1s   toolCalls=true (11 calls)
+user#28 -> assistant#29   17.1s   toolCalls=true
+```
+
+and `data/cache/model-health.json`, written by the same process in the same minutes:
+
+```
+z-ai/glm-5.2:free              unusable     OPENED 22:21:42
+nvidia/nemotron-3-ultra-550b   unreachable  OPENED 22:24:48  consecutiveFailures=3
+google/gemma-4-31b-it:free     throttle     OPENED 22:24:55  consecutiveFailures=3
+                                            snapshot flushed 22:24:58.255
+```
+
+The refusal was persisted at `22:24:58.368` — **113 ms after that flush**. `find data/chats -newermt` showed exactly one chat file touched in the window, so no cron or background run is in the picture. The brain and its first substitute were quarantined *inside the turn that produced the refusal*, and the next request seated a different brain.
+
+**Root Cause:** Four defects in series, each individually minor.
+
+1. **The seated brain is slow, not broken, and nothing measures that.** `nvidia/nemotron-3-ultra-550b-a55b:free` is Free Mode's rank-1 pick (intelligence 23.4 vs 15.4 for the next). Its provider-side latency is **56–100s and does not depend on prompt size** — measured 8/8 against OpenRouter's own `latency` telemetry field: 6 prompt tokens → 55.5s, 25 045 prompt tokens → 56.2s. It is a provider queue, not prefill. Every other model in the pool answers in 0.3–1.8s. Selection ranks on benchmark score and has no latency input at all.
+
+2. **One deadline constant, two populations that differ by ~50×.** `attemptOnce` bounded every attempt — the brain's own retries included — with `fallbackAttemptDeadlineMs()`, 25s by default. Against a 56s floor those attempts could only expire, at ~26.5s each including the backoff.
+
+3. **Our own expired budget was recorded as a NETWORK fault.** The `catch` asked `args.abortSignal?.aborted` — the CALLER's signal — which is false when it is the composed deadline that fired, so the error fell through to `classifyModelFailure`, whose status-absent fallback matches the word "timeout" and returns `"unreachable"`. Proven directly against the real SDK, not inferred:
+
+```
+name        : TimeoutError
+message     : "The operation was aborted due to timeout"
+caller aborted?: false
+classifyModelFailure -> "unreachable"
+```
+
+Two such records per degraded turn, against `DEFAULT_THRESHOLD = 3`.
+
+4. **The ledger had no other side.** `recordModelSuccess` had three call sites — the proposer path, the tool-capable retry, and the ladder — and none was the ordinary interactive turn (`grep model-health src/lib/agent/agent.ts` returned **zero**). So `consecutiveFailures` counted up and never down. Combined with `isModelCircuitOpen` staying true until a SUCCESS is recorded, and every free-model dispatch site gating on it (`free-mode.ts` selection, `moa-proposers.ts`, `tool-capable-retry.ts`, the ladder) rather than asking `tryAcquireProbe` — which only `selectHealthyConfig` spends, and only when nothing healthy is left — **an open circuit on a free model was terminal: never dispatched, so never successful, so never closed.** Since PM #136 it also persists to disk, so it survived restarts.
+
+The turn then fell to the tool-less last rung, whose instruction reads, verbatim: *"Do not call any tools. You have NOT performed any actions this turn — no files were read or edited, no code was run, no web page was fetched."* The model relayed that to the user as a capability limit. `finalAnswerInstruction(false)` asks for an exact honest string naming a *technical failure*; the model paraphrased, and the paraphrase blamed the product instead of the incident.
+
+**Resolution:**
+
+- **`"deadline"` is its own `ModelFailureKind`** with its own threshold knob (`ORCHESTRA_MODEL_DEADLINE_THRESHOLD`, same default). `attemptOnce` now keeps the signal it builds (`attemptDeadlineSignal`) so the `catch` can ask which bound fired; the caller's signal is still checked FIRST, because a user abort composes into the deadline and must never be read as a missed budget. It still counts toward the breaker — a genuinely dead endpoint hangs the same way, and removing it would leave one selected forever — it just stops asserting a network fault about a model that is merely slow.
+- **Attempt 2 is skipped when attempt 1 died on our budget.** Same shape as PM #134's markup skip: attempt 1 did not fail, it was never given long enough, and attempt 2 hands the identical endpoint the identical budget. Deliberately NOT keyed on the breaker — a single missed budget is below every threshold, so the breaker cannot see it yet, and waiting for it to is what spends the turn.
+- **A stall skips the same-endpoint retry** (`primary-stream-recovery.ts`, gate 2). `isDeterministicClientError` keys on an HTTP status and a stall carries none. The class that actually reaches this function is `ProviderHeadersTimeoutError` — `ai@6` routes an `AbortController` abort to `onAbort`, so the stream watchdog's own kill never enters the recovery path, while the fetch wrapper's rejection does. The guard is written against the shared `orchestraStreamStall` marker so it stays correct if that routing changes.
+- **A delivered turn records a success** (`agent.ts` `onFinish`), at stream COMPLETION and only when `turnHasDeliverableAnswer` — the judgment the turn already trusts, which rejects printed tool markup. A turn rescued by the continuation or the ladder is excluded: that answer is another endpoint's work, and crediting the brain for it would launder the failure the ladder exists to record (PM #134's "never heal on output nobody judged", one level up).
+
+**Regression Coverage:** `final-answer-failover.test.ts` § "our own attempt deadline" (4) — the kind is `deadline` and not `unreachable`; exactly one brain attempt and one failure record; a 503 still retries and still records `server`; a caller abort records nothing. The mock waits on the REAL composed signal, so a change that stopped composing the deadline fails there rather than passing silently. `primary-stream-recovery.test.ts` (4) — a headers-timeout and a watchdog stall both set `skipBrainRetry`, pinned both directions, and a plain user `AbortError` does not: `StreamStalledError.name` is deliberately `"AbortError"`, so a guard keyed on the NAME would swallow a real cancellation. `model-health.test.ts` § "deadline" (2) — it still opens at the default, and its knob does not loosen the endpoint-side kinds. `agent.integration.test.ts` — a delivered turn through the real `runAgent` records a success and clears a 2-deep failure run; driven end-to-end rather than against the predicate, because the defect was a MISSING CALL and a test of the condition alone would have passed against the broken code. Five mutants killed, one per change plus the policy branch.
+
+**Doc Updates:** `docs/references/moa-swarm-contracts.md` § layer 2 and layer 4 (the timeout-is-a-failure line was the one this entry amends); `docs/references/file-size-decomposition.md` (`final-answer-failover.ts` 830 → 892, the second crossing of the 800 cap recorded rather than papered over).
+
+**Rule:** A budget you chose is not evidence about the endpoint. Before recording a failure, ask which bound fired — yours or theirs — and never let a timeout you imposed masquerade as a network fault. And a health ledger that only ever counts failures is not a ledger: if the happy path records nothing, the counter is a countdown.
+
+---
+
 ## 138. The delivery ladder narrated every decision to stdout and nothing to the UI, so a failover that WORKED looked like an empty turn
 
 **Date:** 2026-09

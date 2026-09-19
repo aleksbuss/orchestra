@@ -52,6 +52,7 @@ export type AgentActivityCode =
   | "brain_circuit_open"
   | "brain_retry_skipped_markup"
   | "brain_retry_skipped_nontransient"
+  | "brain_retry_skipped_deadline"
   | "substitute_trying"
   | "substitute_build_failed"
   | "substitute_delivered"
@@ -161,6 +162,11 @@ export function renderAgentActivity(
       return (
         `[Failover] ${endpoint} failed in a way a retry cannot fix — skipping the same-endpoint ` +
         `retry and going straight to a substitute.`
+      );
+    case "brain_retry_skipped_deadline":
+      return (
+        `[Failover] ${endpoint} ran out of our attempt budget rather than failing — skipping the ` +
+        `same-endpoint retry, which would hand it the same budget, and going straight to a substitute.`
       );
     case "substitute_trying":
       return (

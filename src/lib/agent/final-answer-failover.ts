@@ -56,6 +56,7 @@ import {
   isModelCircuitOpen,
   recordModelFailure,
   recordModelSuccess,
+  type ModelFailureKind,
 } from "@/lib/agent/model-health";
 import { abortableSleep } from "@/lib/agent/proposer-pacing";
 import { resolveWorkerKey } from "@/lib/agent/moa-personas";
@@ -385,6 +386,14 @@ interface AttemptOutcome {
   text: string;
   usage?: RawUsage;
   markup?: { toolName: string; chars: number };
+  /**
+   * OUR OWN per-attempt budget expired before the endpoint answered.
+   *
+   * Distinct from "the attempt threw", which is `null`: this one carries the
+   * reason, because a retry under the SAME budget against the SAME endpoint
+   * cannot do better. Same class of evidence the `markup` flag exists for.
+   */
+  deadlineExpired?: true;
 }
 
 /**
@@ -398,6 +407,17 @@ async function attemptOnce(
   /** Override the per-call deadline — see `markupAttemptDeadlineMs`. */
   deadlineMs?: number
 ): Promise<AttemptOutcome | null> {
+  // The deadline is built HERE, and kept, rather than being constructed inline
+  // inside the `generateText` call. The `catch` below has to be able to ask
+  // "was it OUR budget that fired?", and the only honest way to answer that is
+  // to hold the signal that would have fired. Inspecting the error text cannot
+  // do it: `AbortSignal.timeout` rejects with a plain `TimeoutError` whose
+  // message is "The operation was aborted due to timeout", which is
+  // indistinguishable from an upstream read timeout.
+  const attemptDeadlineSignal = callDeadlineSignal(
+    args.abortSignal,
+    deadlineMs ?? fallbackAttemptDeadlineMs()
+  );
   try {
     const result = await generateText({
       model,
@@ -415,7 +435,7 @@ async function attemptOnce(
       // PM #98 / Sprint 3 — the RECOVERY ladder. Bound each attempt with
       // fallbackAttemptDeadlineMs() (default 25s) so a stalled free endpoint
       // cannot hang the turn.
-      abortSignal: callDeadlineSignal(args.abortSignal, deadlineMs ?? fallbackAttemptDeadlineMs()),
+      abortSignal: attemptDeadlineSignal,
     });
     const text = (result.text || "").trim();
     // PM #134 — a non-empty string is NOT proof of an answer. This ladder is
@@ -464,12 +484,37 @@ async function attemptOnce(
   } catch (error) {
     // Same evidence rule as the proposer path: only endpoint-side signatures
     // count against the breaker, and a user abort never does.
-    const kind = args.abortSignal?.aborted ? null : classifyModelFailure(error);
+    //
+    // The caller's signal is checked FIRST and still wins: a user pressing stop
+    // is never an endpoint failure, and their abort also aborts
+    // `attemptDeadlineSignal` (they are composed), so asking about the deadline
+    // first would misread a cancellation as a missed budget.
+    //
+    // Our own expired budget is recorded as `"deadline"`, not left to
+    // `classifyModelFailure`, whose status-absent fallback matches the word
+    // "timeout" and calls it `"unreachable"` — a NETWORK fault. Measured
+    // 2026-09-19: the seated Free Mode brain answers at a 56–100s provider-side
+    // floor, so a 25s attempt deadline could only ever expire, and two such
+    // expiries per degraded turn were quarantining a reachable model against a
+    // threshold of 3.
+    const callerAborted = args.abortSignal?.aborted === true;
+    const kind: ModelFailureKind | null = callerAborted
+      ? null
+      : attemptDeadlineSignal?.aborted
+        ? "deadline"
+        : classifyModelFailure(error);
     if (endpoint && kind) recordModelFailure(endpoint.provider, endpoint.model, kind);
     console.warn(
       `[Agent] Final-answer attempt failed on ${endpoint ? `${endpoint.provider}/${endpoint.model}` : "the brain model"}: ` +
         (error instanceof Error ? error.message : String(error))
     );
+    // Tell the caller WHICH kind of nothing this was. `null` stays "it threw
+    // for a reason we cannot act on"; a budget we set ourselves is actionable,
+    // because re-running the same endpoint under the same budget is a
+    // guaranteed second expiry.
+    if (kind === "deadline") {
+      return { text: "", deadlineExpired: true };
+    }
     return null;
   }
 }
@@ -602,7 +647,24 @@ export async function generateFinalAnswerWithFailover(
       );
       say("brain_retry_skipped_markup", { endpoint: brainConfig });
     }
-    if (!nowTripped && !first?.markup) {
+    // Same shape again, for the budget. Attempt 1 did not fail — it was never
+    // given long enough to finish, by us. Attempt 2 hands the identical
+    // endpoint the identical budget, so its outcome is decided before it
+    // starts: measured 2026-09-19, the seated free brain's provider-side floor
+    // is 56–100s against a 25s attempt deadline, so the pair cost ~26.5s of the
+    // operator's wait and a second `deadline` record, for an outcome that could
+    // not differ. Deliberately NOT keyed on the breaker (`nowTripped`): a
+    // single missed budget is below every threshold, so the breaker cannot see
+    // this yet — and waiting for it to is what spends the turn.
+    else if (first?.deadlineExpired) {
+      console.warn(
+        `[Agent] Final answer — skipping the same-endpoint retry on ${endpointLabelFor(brainConfig)}: ` +
+          `attempt 1 ran out of OUR ${fallbackAttemptDeadlineMs()}ms attempt budget rather than failing, ` +
+          `and the retry would hand it the same budget. Going straight to a substitute model.`
+      );
+      say("brain_retry_skipped_deadline", { endpoint: brainConfig });
+    }
+    if (!nowTripped && !first?.markup && !first?.deadlineExpired) {
       await abortableSleep(retryBackoffMs(), abortSignal);
       if (abortSignal?.aborted) {
         logRecoveryAborted("during brain retry backoff", recoveryStartedAt);

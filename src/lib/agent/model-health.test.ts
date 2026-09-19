@@ -72,6 +72,44 @@ describe("model-health circuit breaker", () => {
     expect(isModelCircuitOpen(P, M)).toBe(true);
   });
 
+  /**
+   * 2026-09-19 — `"deadline"` (OUR budget expired) is tuned SEPARATELY from
+   * the endpoint-side kinds.
+   *
+   * It still trips: an endpoint that cannot answer inside the budget we give
+   * it is unusable for that call, and a genuinely dead endpoint hangs exactly
+   * the same way, so removing it from the count would leave a dead endpoint
+   * selected forever. What it must NOT do is hide inside `"unreachable"`,
+   * which asserts a NETWORK fault and invites the wrong remediation for a
+   * model that is merely slow.
+   */
+  describe("deadline — our own budget, not the endpoint's fault", () => {
+    afterEach(() => {
+      delete process.env.ORCHESTRA_MODEL_DEADLINE_THRESHOLD;
+    });
+
+    it("still opens the circuit at the default threshold", () => {
+      recordModelFailure(P, M, "deadline");
+      recordModelFailure(P, M, "deadline");
+      expect(isModelCircuitOpen(P, M)).toBe(false);
+      recordModelFailure(P, M, "deadline");
+      expect(isModelCircuitOpen(P, M)).toBe(true);
+    });
+
+    it("honors its OWN knob without loosening the endpoint-side kinds", () => {
+      process.env.ORCHESTRA_MODEL_DEADLINE_THRESHOLD = "5";
+
+      for (let i = 0; i < 4; i++) recordModelFailure(P, M, "deadline");
+      expect(isModelCircuitOpen(P, M), "4 missed budgets, threshold 5").toBe(false);
+
+      // The transient knob is untouched: a different endpoint still trips at 3.
+      recordModelFailure(P, ALT, "server");
+      recordModelFailure(P, ALT, "server");
+      recordModelFailure(P, ALT, "server");
+      expect(isModelCircuitOpen(P, ALT), "server failures keep threshold 3").toBe(true);
+    });
+  });
+
   it("is a strict no-op when ORCHESTRA_MODEL_CIRCUIT_DISABLED=true", () => {
     process.env.ORCHESTRA_MODEL_CIRCUIT_DISABLED = "true";
     failTimes(10);

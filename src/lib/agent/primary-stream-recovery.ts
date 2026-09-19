@@ -62,6 +62,7 @@ import {
 } from "@/lib/agent/final-answer-failover";
 import { attemptToolCapableRetry } from "@/lib/agent/tool-capable-retry";
 import { classifyModelFailure, recordModelFailure } from "@/lib/agent/model-health";
+import { isStreamStall } from "@/lib/observability/stream-stall";
 import {
   resolveDegradationPolicy,
   allowsModelSubstitution,
@@ -350,7 +351,30 @@ export async function recoverPrimaryStreamFailure(
     }
 
     // Gate 2 — classify THIS error, don't blanket-skip the same-endpoint retry.
-    const skipBrainRetry = isDeterministicClientError(args.error);
+    //
+    // A STALL is added to the deterministic-4xx case on measured evidence
+    // (2026-09-19). `isDeterministicClientError` keys on an HTTP status, and a
+    // stall carries none, so a silent endpoint kept the doomed retry.
+    //
+    // Which stall reaches here, precisely: the stream watchdog aborts through
+    // an `AbortController`, and `ai@6` routes an abort to `onAbort`, never to
+    // `onError` — so a TTFT/idle watchdog kill never enters this function at
+    // all. `ProviderHeadersTimeoutError` does: `fetch-timeout.ts` rejects the
+    // FETCH when response headers never arrive (60s default), which surfaces
+    // as a stream error. `isStreamStall` is true for both classes because both
+    // carry the `orchestraStreamStall` marker, so this guard is written once
+    // and stays correct if the routing ever changes.
+    //
+    // Why a retry cannot help THIS class: headers never arrived inside 60s,
+    // and the retry runs on `fallbackAttemptDeadlineMs()` — 25s by default.
+    // The budget shrinks by more than half while the endpoint's behaviour is
+    // unchanged. Measured on the operator's seated free brain: a 56–100s
+    // provider-side floor, independent of prompt size (8/8 samples), so the
+    // retry pair could only expire. Everything WITHOUT the stall marker —
+    // 429, 5xx, a bare network error — keeps the retry, because those do
+    // resolve between attempts.
+    const skipBrainRetry =
+      isDeterministicClientError(args.error) || isStreamStall(args.error);
 
     const instructionContent = isContinuation
       ? continuationInstruction(trimmedPartial)

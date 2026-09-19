@@ -68,7 +68,37 @@ export type ModelFailureKind =
   | "server"
   | "unreachable"
   | "unusable"
-  | "markup";
+  | "markup"
+  /**
+   * OUR OWN call deadline expired — the endpoint never got the chance to
+   * answer inside the budget we chose for it.
+   *
+   * Split out from `"unreachable"` on measured evidence (2026-09-19). The
+   * failover ladder bounds every attempt with `fallbackAttemptDeadlineMs()`
+   * (25s by default), and a `TimeoutError` from that composed signal reaches
+   * `classifyModelFailure`, whose status-absent fallback matches the word
+   * "timeout" and returns `"unreachable"`. Proven directly against the real
+   * SDK:
+   *
+   *   name        : TimeoutError
+   *   message     : "The operation was aborted due to timeout"
+   *   caller aborted?: false
+   *   classifyModelFailure -> "unreachable"
+   *
+   * The operator's seated Free Mode brain answers reliably at a 56–100s
+   * provider-side floor (measured 8/8, independent of prompt size). So it was
+   * being recorded as NETWORK-UNREACHABLE for missing a budget three times
+   * shorter than its own latency — twice per degraded turn, against a
+   * threshold of 3.
+   *
+   * It is still a failure: an endpoint that cannot answer inside the budget we
+   * give it is unusable FOR THAT CALL, and a genuinely dead endpoint hangs the
+   * same way, so the breaker must still be able to open (council review,
+   * 2026-09-14 Q2). What changes is that the reason is now accurate and
+   * separately tunable, instead of hiding inside a network-fault bucket that
+   * invites the wrong remediation.
+   */
+  | "deadline";
 
 export interface ModelHealthEntry {
   provider: string;
@@ -180,6 +210,21 @@ function failureThreshold(): number {
   return numericEnv("ORCHESTRA_MODEL_CIRCUIT_THRESHOLD", DEFAULT_THRESHOLD);
 }
 
+/**
+ * Threshold for `"deadline"`. Same default as the transient kinds, its OWN
+ * knob.
+ *
+ * Deliberately not a different number: inventing one would be guessing, and
+ * the honest reason to split the kind is accuracy plus separability, not a
+ * pre-judged policy change. The operator can now raise this alone — e.g. while
+ * running a slow free endpoint — without loosening the breaker for real 5xx
+ * and connection faults, which is exactly what tuning
+ * `ORCHESTRA_MODEL_CIRCUIT_THRESHOLD` used to force.
+ */
+function deadlineThreshold(): number {
+  return numericEnv("ORCHESTRA_MODEL_DEADLINE_THRESHOLD", DEFAULT_THRESHOLD);
+}
+
 function cooldownMs(): number {
   return numericEnv("ORCHESTRA_MODEL_CIRCUIT_COOLDOWN_MS", DEFAULT_COOLDOWN_MS);
 }
@@ -201,6 +246,9 @@ function policyFor(kind: ModelFailureKind): { threshold: number; cooldownMs: num
         DEFAULT_UNUSABLE_COOLDOWN_MS
       ),
     };
+  }
+  if (kind === "deadline") {
+    return { threshold: deadlineThreshold(), cooldownMs: cooldownMs() };
   }
   return { threshold: failureThreshold(), cooldownMs: cooldownMs() };
 }

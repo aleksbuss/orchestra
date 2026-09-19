@@ -18,6 +18,7 @@ import { createStreamWatchdog, turnDeadlineSignal } from "@/lib/agent/stream-wat
 import { publishOrchestratorFinished } from "@/lib/agent/agent-dag-events";
 import { handleStreamAbort, createPartialTextBuffer } from "@/lib/agent/agent-abort";
 import { recoverPrimaryStreamFailure } from "@/lib/agent/primary-stream-recovery";
+import { recordModelSuccess } from "@/lib/agent/model-health";
 import { foldTurnUsage } from "@/lib/cost/accumulator";
 import {
   buildSystemPrompt,
@@ -1148,6 +1149,37 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         });
         const continuationText = turnExtra.text;
         const continuationUsage = turnExtra.usage;
+
+        // ── The health ledger stops being failure-only ──────────────────────
+        //
+        // `recordModelSuccess` had THREE call sites — the swarm proposer path,
+        // the tool-capable retry, and the failover ladder — and none of them is
+        // the ordinary interactive turn. `grep model-health agent.ts` returned
+        // zero. So `consecutiveFailures` on the brain counted up and never
+        // down: a model could answer a hundred turns perfectly and still be
+        // quarantined by the next three failures, because nothing in between
+        // was ever recorded as evidence that it works.
+        //
+        // That is what makes a tripped circuit terminal for a Free Mode model.
+        // `isModelCircuitOpen` stays true until a SUCCESS is recorded, and every
+        // free-model dispatch site gates on it (`free-mode.ts` selection,
+        // `moa-proposers.ts`, `tool-capable-retry.ts`, the ladder) rather than
+        // asking `tryAcquireProbe` — which only `selectHealthyConfig` spends,
+        // and only when nothing healthy is left. Open ⇒ never dispatched ⇒
+        // never succeeds ⇒ never closes, and the snapshot persists to disk.
+        //
+        // Recorded at stream COMPLETION, not at the first token, and only for a
+        // DELIVERABLE answer. `turnHasDeliverableAnswer` is the judgment the
+        // turn already trusts and it rejects printed tool markup, so this
+        // honours the PM #134 rule that an endpoint must never be healed on
+        // output nobody judged. A turn rescued by the continuation or the
+        // ladder is deliberately excluded: that answer is some OTHER endpoint's
+        // work, and crediting the brain for it would launder the failure the
+        // ladder exists to record.
+        if (!continuationText && turnHasDeliverableAnswer(responseMessages)) {
+          recordModelSuccess(resolvedModelConfig.provider, resolvedModelConfig.model);
+        }
+
         if (turnExtra.uiNotice) {
           publishUiSyncEvent({
             topic: "chat",

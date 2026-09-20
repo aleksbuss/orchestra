@@ -408,6 +408,13 @@ interface AttemptOutcome {
    * cannot do better. Same class of evidence the `markup` flag exists for.
    */
   deadlineExpired?: true;
+  /**
+   * The budget that actually expired, in ms. Carried rather than recomputed by
+   * the caller: `attemptOnce` is the only place that knows whether the default
+   * or an override was in force, and PM #112's rule is that a message must
+   * never assert a number the code did not check.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -428,10 +435,8 @@ async function attemptOnce(
   // do it: `AbortSignal.timeout` rejects with a plain `TimeoutError` whose
   // message is "The operation was aborted due to timeout", which is
   // indistinguishable from an upstream read timeout.
-  const attemptDeadlineSignal = callDeadlineSignal(
-    args.abortSignal,
-    deadlineMs ?? fallbackAttemptDeadlineMs()
-  );
+  const effectiveDeadlineMs = deadlineMs ?? fallbackAttemptDeadlineMs();
+  const attemptDeadlineSignal = callDeadlineSignal(args.abortSignal, effectiveDeadlineMs);
   try {
     const result = await generateText({
       model,
@@ -543,7 +548,7 @@ async function attemptOnce(
     // because re-running the same endpoint under the same budget is a
     // guaranteed second expiry.
     if (kind === "deadline") {
-      return { text: "", deadlineExpired: true };
+      return { text: "", deadlineExpired: true, deadlineMs: effectiveDeadlineMs };
     }
     return null;
   }
@@ -689,7 +694,7 @@ export async function generateFinalAnswerWithFailover(
     else if (first?.deadlineExpired) {
       console.warn(
         `[Agent] Final answer — skipping the same-endpoint retry on ${endpointLabelFor(brainConfig)}: ` +
-          `attempt 1 ran out of OUR ${fallbackAttemptDeadlineMs()}ms attempt budget rather than failing, ` +
+          `attempt 1 ran out of OUR ${first.deadlineMs ?? fallbackAttemptDeadlineMs()}ms attempt budget rather than failing, ` +
           `and the retry would hand it the same budget. Going straight to a substitute model.`
       );
       say("brain_retry_skipped_deadline", { endpoint: brainConfig });

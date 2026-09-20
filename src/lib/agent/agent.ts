@@ -1176,8 +1176,24 @@ Total MoA latency: ${moaResult.totalLatencyMs}ms (proposers: ${moaResult.drafts.
         // ladder is deliberately excluded: that answer is some OTHER endpoint's
         // work, and crediting the brain for it would launder the failure the
         // ladder exists to record.
+        //
+        // GUARDED, and the guard is not ceremony. This sits ABOVE the
+        // `updateChat` that persists the assistant turn and above
+        // `mcpCleanup`, inside `onFinish`'s one big `try`. A throw here would
+        // be caught by that outer `catch`, which finalizes the DAG as an error
+        // and returns — so the user would lose an answer the model had already
+        // produced, and the MCP transports would leak, because a health
+        // counter failed to increment. `store()` reaches sync disk I/O on its
+        // first access per process (`hydrateFromDiskSync`), which is exactly
+        // the kind of call that is fine 999 times and throws on the 1000th.
+        // Same rule `agent-activity.ts` already states for the activity feed:
+        // telemetry must never break the thing it is reporting on.
         if (!continuationText && turnHasDeliverableAnswer(responseMessages)) {
-          recordModelSuccess(resolvedModelConfig.provider, resolvedModelConfig.model);
+          try {
+            recordModelSuccess(resolvedModelConfig.provider, resolvedModelConfig.model);
+          } catch (healthErr) {
+            console.warn("[Agent] failed to record model success (non-fatal):", healthErr);
+          }
         }
 
         if (turnExtra.uiNotice) {

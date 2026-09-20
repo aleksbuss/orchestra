@@ -525,6 +525,57 @@ describe("agent integration — runAgent streamText path persists onFinish (mock
     expect(entry?.consecutiveFailures, "and it invalidates the failure run").toBe(0);
   });
 
+  /**
+   * The success record is TELEMETRY, and telemetry must never cost an answer.
+   *
+   * The call sits above the `updateChat` that persists the assistant turn and
+   * above `mcpCleanup`, inside `onFinish`'s single `try`. Unguarded, a throw
+   * there is caught by the outer `catch`, the DAG is finalized as an error,
+   * and a turn the model already produced is lost — because a counter failed
+   * to increment. `store()` reaches sync disk I/O on first access per process.
+   */
+  it("a throwing health ledger never costs the user their answer", async () => {
+    modelOut.text = "SURVIVES_TELEMETRY_FAILURE";
+    const chatId = `integ-health-throw-${Date.now()}`;
+    const { runAgent } = await import("./agent");
+    const { createChat, getChat } = await import("@/lib/storage/chat-store");
+    const health = await import("./model-health");
+
+    const spy = vi
+      .spyOn(health, "recordModelSuccess")
+      .mockImplementation(() => {
+        throw new Error("scripted health-ledger failure");
+      });
+
+    try {
+      await createChat(chatId, "integ-health-throw");
+      const result = await runAgent({ chatId, userMessage: "ping", swarmEnabled: false });
+      for await (const _chunk of result.textStream) {
+        void _chunk;
+      }
+
+      let persisted = false;
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const chat = await getChat(chatId);
+        if (
+          chat?.messages.some(
+            (m) => m.role === "assistant" && m.content.includes("SURVIVES_TELEMETRY_FAILURE")
+          )
+        ) {
+          persisted = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      expect(spy, "the guard must not skip the call").toHaveBeenCalled();
+      expect(persisted, "the answer must persist even though telemetry threw").toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("PM #81: a streamed hallucinated tool call is SUPPRESSED and re-issued (onFinish wiring)", async () => {
     // The stream emits a printed-as-text tool call (the degradation). The
     // onFinish self-heal must: detect it, drop the markup so it never persists,

@@ -220,6 +220,8 @@ These are tree-wide scans, not file lists, so new files are covered automaticall
 | [`agent-preflight-gate.test.ts`](src/lib/agent/agent-preflight-gate.test.ts) | No `src/lib/agent` module imports `getSettings` directly (Privacy-Mode chokepoint) |
 | [`no-raw-process-env.test.ts`](src/lib/security/no-raw-process-env.test.ts) | No `...process.env` / `env: process.env` — **only under `src/lib/tools` and `src/lib/providers`**; spawns elsewhere are unguarded |
 | [`frontend-invariants.test.ts`](src/components/frontend-invariants.test.ts) | No `new EventSource` outside `use-background-sync.ts`; no no-arg `useAppStore()` |
+| [`env-example-contract.test.ts`](src/lib/security/env-example-contract.test.ts) | An uncommented credential-shaped line in `.env.example` must be empty — a placeholder reads as a real key, a default token is public (PM #140) |
+| [`bind-address-contract.test.ts`](src/lib/security/bind-address-contract.test.ts) | `npm run start` binds 127.0.0.1 unless `ORCHESTRA_BIND_HOST` opts in; the container image sets it to `0.0.0.0` (PM #140) |
 | [`tool-support.test.ts`](src/lib/providers/tool-support.test.ts) | Cross-provider tool-capability detection stays consistent |
 | [`tool.test.ts`](src/lib/tools/tool.test.ts) | Full tool inventory + each availability gate's exact delta |
 | [`claude-md-drift.test.ts`](src/claude-md-drift.test.ts) | This file's size budget + the LOC claims in the decomposition reference |

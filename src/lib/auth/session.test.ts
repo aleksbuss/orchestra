@@ -79,6 +79,25 @@ describe("session secret production guard (PM #12)", () => {
       }
     });
 
+    it("throws on an unexpanded shell substitution — env files never run commands (PM #140)", async () => {
+      // The pre-fix README told operators to write
+      // `ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)` into `.env`. The env
+      // loader keeps that literal text, so production would have signed every
+      // session with a string anyone can read in the README.
+      vi.stubEnv("NODE_ENV", "production");
+      for (const literal of [
+        "$(openssl rand -base64 48)",
+        "${ORCHESTRA_AUTH_SECRET}",
+        "`openssl rand -hex 32`",
+        "prefix-$(date +%s)-suffix",
+      ]) {
+        vi.stubEnv("ORCHESTRA_AUTH_SECRET", literal);
+        await expect(createSessionToken("admin", false)).rejects.toThrow(
+          /env files do not run commands/
+        );
+      }
+    });
+
     it("throws on verifySessionToken too — covers the middleware path", async () => {
       vi.stubEnv("ORCHESTRA_AUTH_SECRET", "");
       vi.stubEnv("NODE_ENV", "production");
@@ -101,6 +120,18 @@ describe("session secret production guard (PM #12)", () => {
       const verified = await verifySessionToken(token);
       expect(verified?.username).toBe("admin");
     });
+
+    it("accepts what `openssl rand -base64 48` produces, including + and / (PM #140)", async () => {
+      // Guards the substitution check against false positives: a real generated
+      // secret must never be rejected.
+      vi.stubEnv(
+        "ORCHESTRA_AUTH_SECRET",
+        "aB3+dE6/gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6kL9nP2rS5uV8xA1cD4fG7iM0o"
+      );
+      vi.stubEnv("NODE_ENV", "production");
+      const token = await createSessionToken("admin", false);
+      expect((await verifySessionToken(token))?.username).toBe("admin");
+    });
   });
 
   describe("development falls back gracefully", () => {
@@ -119,6 +150,14 @@ describe("session secret production guard (PM #12)", () => {
       vi.stubEnv("NODE_ENV", "development");
       const token = await createSessionToken("admin", false);
       expect(typeof token).toBe("string");
+    });
+
+    it("uses the dev fallback, loudly, when the secret is an unexpanded substitution (PM #140)", async () => {
+      vi.stubEnv("ORCHESTRA_AUTH_SECRET", "$(openssl rand -base64 48)");
+      vi.stubEnv("NODE_ENV", "development");
+      const token = await createSessionToken("admin", false);
+      expect(typeof token).toBe("string");
+      expect(warnSpy).toHaveBeenCalled();
     });
 
     it("test environment behaves like development (loud but not fatal)", async () => {

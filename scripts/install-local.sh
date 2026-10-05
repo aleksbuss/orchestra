@@ -22,8 +22,9 @@ check_node_version() {
   local version major
   version="$(node -p "process.versions.node")"
   major="${version%%.*}"
-  if [[ "$major" -lt 20 ]]; then
-    echo "Node.js 20+ is required (found $version)." >&2
+  # Keep in step with package.json "engines", .nvmrc and the Dockerfile base image.
+  if [[ "$major" -lt 22 ]]; then
+    echo "Node.js 22+ is required (found $version)." >&2
     exit 1
   fi
 }
@@ -193,3 +194,7 @@ echo "  npm run start"
 echo ""
 echo "App URL:"
 echo "  http://127.0.0.1:3000"
+echo ""
+echo "The server listens on 127.0.0.1 only. To expose it (LAN, VPS), set"
+echo "ORCHESTRA_BIND_HOST=0.0.0.0 in the process environment (not in .env) and"
+echo "read SECURITY.md first."

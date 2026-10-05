@@ -23,6 +23,11 @@ ENV TMPDIR=/app/data/tmp
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/data/ms-playwright
 ENV npm_config_cache=/app/data/npm-cache
 ENV XDG_CACHE_HOME=/app/data/.cache
+# `npm run start` binds 127.0.0.1 unless told otherwise (PM #140). Inside the
+# container it must listen on every interface for the published port to reach
+# it; host-side exposure is still decided by APP_BIND_HOST in docker-compose.yml
+# (default 127.0.0.1).
+ENV ORCHESTRA_BIND_HOST=0.0.0.0
 
 RUN mkdir -p "${TMPDIR}" "${PLAYWRIGHT_BROWSERS_PATH}" "${npm_config_cache}" "${XDG_CACHE_HOME}"
 

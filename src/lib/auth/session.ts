@@ -55,9 +55,22 @@ const KNOWN_INSECURE_SECRETS = new Set<string>([
   "default",
 ]);
 
+/**
+ * Shell / dotenv substitution syntax that was never expanded. Env files do not
+ * run commands, so `ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48)` stores
+ * that literal text — which is printed in a README, i.e. a PUBLIC secret that
+ * the deny-list above cannot enumerate. Generated secrets (base64 / hex) never
+ * contain these characters.
+ */
+const UNEXPANDED_SUBSTITUTION = /\$\(|\$\{|`/;
+
+function isInsecureSecret(raw: string): boolean {
+  return KNOWN_INSECURE_SECRETS.has(raw) || UNEXPANDED_SUBSTITUTION.test(raw);
+}
+
 function getSessionSecret(): string {
   const raw = process.env.ORCHESTRA_AUTH_SECRET?.trim() ?? "";
-  const isInsecure = KNOWN_INSECURE_SECRETS.has(raw);
+  const isInsecure = isInsecureSecret(raw);
 
   if (process.env.NODE_ENV === "production") {
     if (isInsecure) {
@@ -70,7 +83,10 @@ function getSessionSecret(): string {
           "with read access to the Orchestra source code can forge valid " +
           "sessions against this deployment. Generate a long random secret " +
           "(e.g. `openssl rand -base64 48`), set it via ORCHESTRA_AUTH_SECRET " +
-          "in your environment, and restart the server."
+          "in your environment, and restart the server. If you wrote " +
+          "ORCHESTRA_AUTH_SECRET=$(openssl rand -base64 48) in an env file: " +
+          "env files do not run commands, so that literal text was stored as " +
+          "the secret — run the command in a shell and paste its output."
       );
     }
     return raw;

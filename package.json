@@ -22,7 +22,7 @@
     "build": "node scripts/build-with-data-guard.mjs",
     "build:raw": "next build --turbopack --no-lint",
     "test:build-guard": "node --test scripts/build-with-data-guard.nodetest.mjs",
-    "start": "next start",
+    "start": "next start -H ${ORCHESTRA_BIND_HOST:-127.0.0.1}",
     "lint": "eslint",
     "lint:strict": "eslint --max-warnings 0",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",

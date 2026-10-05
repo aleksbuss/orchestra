@@ -3,17 +3,19 @@
 This file documents the licensing of components in this repository that are
 **not** covered by the top-level [`LICENSE`](./LICENSE) (MIT). Orchestra ships
 with a bundled-skills collection in [`bundled-skills/`](./bundled-skills/) for
-out-of-the-box experience; some of those skills retain their original
-licensing and are redistributed here under their own terms.
+out-of-the-box experience; most of those skills are third-party works that
+keep their upstream licenses and are redistributed here under those terms.
 
 ## Origin — upstream attribution (Eggent)
 
 Orchestra is a **hard fork of [Eggent](https://github.com/eggent-ai/eggent)**
-(© 2026 Eggent contributors), used here under its MIT License. The original
-Eggent codebase was imported as the starting point: Orchestra inherits Eggent's
-**workspace scaffold** — the JSON-on-disk storage model, the projects / memory /
-knowledge / MCP / cron / Telegram subsystems, the Next.js application shell, and
-the base single-agent loop.
+(© 2026 Eggent contributors), used here under its MIT License. An early version
+of the Eggent codebase was imported as the starting point (upstream has since
+changed substantially and Orchestra does not track it, so everything in this
+section describes that early snapshot, not Eggent as it is today): Orchestra
+inherits Eggent's **workspace scaffold** — the JSON-on-disk storage model, the
+projects / memory / knowledge / MCP / cron / Telegram subsystems, the Next.js
+application shell, and the base single-agent loop.
 
 Built on top of that scaffold, and **original to Orchestra (not present in
 Eggent)**, is the **Mixture-of-Agents (MoA) ensemble** — parallel proposers,
@@ -35,64 +37,54 @@ released under the MIT License — see [`LICENSE`](./LICENSE). Code inherited fr
 Eggent remains under Eggent's MIT grant (see "Origin" above); the two MIT grants
 are compatible and both copyright lines are preserved in `LICENSE`.
 
+## Adapted third-party material
+
+- **Aggregator prompt.** [`src/lib/agent/moa-prompts.ts`](./src/lib/agent/moa-prompts.ts)
+  adapts the synthesis prompt from Together AI's
+  [`togethercomputer/MoA`](https://github.com/togethercomputer/MoA) reference
+  implementation (`prompts.py`), which is licensed under the
+  [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). The prompt
+  was modified for Orchestra; the changes are listed in the comment at the top
+  of that file. No endorsement by Together AI is implied.
+
 ## Bundled-skills licensing
 
-The `bundled-skills/` directory contains independent "Agent Skills" — small,
-self-contained capability modules. Each subdirectory is governed by the
-license declared inside it (a `LICENSE` / `LICENSE.txt` file, or a `license:`
-field in its `SKILL.md` frontmatter), NOT by the top-level MIT license of
-Orchestra.
+The `bundled-skills/` directory contains "Agent Skills" — small, self-contained
+capability modules. Almost all of them are **third-party works that keep the
+license of the project they were copied from**; the MIT license of Orchestra does
+**not** extend to them. The notices those licenses require are reproduced in
+[`bundled-skills/THIRD-PARTY-LICENSES.md`](./bundled-skills/THIRD-PARTY-LICENSES.md),
+which travels with the directory (including inside the Docker image).
 
-The MIT grant of Orchestra does **not** extend to these bundled skills.
-Operators redistributing or modifying Orchestra together with `bundled-skills/`
-must comply with each skill's individual terms.
+Sources were established in an October 2026 audit by comparing each `SKILL.md`
+line by line with the upstream file as it stood around the copy date
+(February–May 2026). A skill is attributed to an upstream only when the two
+match — typically 90–100 % of lines; the OpenClaw set matches that project's
+2026-02-27 state exactly.
 
-### Skills with their own LICENSE file
-
-| Skill | License | Source |
+| Upstream | License | Skills |
 | --- | --- | --- |
-| [`bundled-skills/autoresearch/`](./bundled-skills/autoresearch/) | MIT (© 2026 Andrej Karpathy) | See [`autoresearch/LICENSE`](./bundled-skills/autoresearch/LICENSE) |
-| [`bundled-skills/docx/`](./bundled-skills/docx/) | **Proprietary** (© 2025 Anthropic, PBC. All rights reserved.) | See [`docx/LICENSE.txt`](./bundled-skills/docx/LICENSE.txt) |
-| [`bundled-skills/xlsx/`](./bundled-skills/xlsx/) | **Proprietary** (© 2025 Anthropic, PBC. All rights reserved.) | See [`xlsx/LICENSE.txt`](./bundled-skills/xlsx/LICENSE.txt) |
+| [OpenClaw](https://github.com/openclaw/openclaw) | MIT, © 2025 Peter Steinberger | 21 skills — `bear-notes`, `discord`, `gemini`, `gh-issues`, `github`, `healthcheck`, `nano-pdf`, `notion`, `obsidian`, `openai-image-gen`, `openai-whisper`, `openai-whisper-api`, `session-logs`, `skill-creator`, `slack`, `things-mac`, `tmux`, `trello`, `video-frames`, `voice-call`, `weather` |
+| [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) | MIT, © 2025 Addy Osmani | 24 engineering-workflow skills (`api-and-interface-design` … `using-agent-skills`) |
+| [mvanhorn/last30days-skill](https://github.com/mvanhorn/last30days-skill) | MIT, © 2026 Matt Van Horn | `last30days` |
+| [vercel-labs/agent-browser](https://github.com/vercel-labs/agent-browser) | Apache-2.0, © 2025 Vercel Inc. | `agent-browser` |
+| [microsoft/playwright-cli](https://github.com/microsoft/playwright-cli) | Apache-2.0, © Microsoft Corporation | `playwright-cli` |
 
-### Skills declaring "Proprietary" in their SKILL.md frontmatter
+Skills not covered by that table:
 
-| Skill | Note |
+| Skill | Status |
 | --- | --- |
-| [`bundled-skills/coding-agent/`](./bundled-skills/coding-agent/) | `license: Proprietary` declared in `SKILL.md` frontmatter; no separate LICENSE file is bundled. The original terms apply. |
+| `autoresearch` | MIT, © 2026 Andrej Karpathy — license file inside the directory. |
+| `graphify` | Written for Orchestra (added to this repository on 2026-08-15) — MIT, Orchestra contributors. |
+| `architect-agent`, `visual-verifier`, `frontend-expert` | No public upstream was found and they are not in the Eggent snapshot; treated as original to Orchestra (MIT). If you recognise one as your work, please open an issue. |
+| `excalidraw` | Inherited with the Eggent snapshot. Compared against ten public Excalidraw skills; none matched. Treated as part of the Eggent-derived code (MIT, © 2026 Eggent contributors) unless shown otherwise. |
+| `remotion` | Copied from [remotion-dev/skills](https://github.com/remotion-dev/skills), which publishes **no license file**, so the upstream grants no redistribution right. **Under review — expected to be removed**; install it from the original source instead. |
 
-### Skills without explicit license declaration
-
-The remaining skills under `bundled-skills/` do not currently carry an
-explicit license file. They are bundled here in good faith from public Agent
-Skill catalogues (e.g., the Anthropic Skills repository and community
-contributions). If you are the author of one of these skills and would like
-either (a) clearer attribution or (b) removal from this distribution, please
-open an issue. Until each skill's origin is independently verified, treat
-them as "license unknown — use at your own risk and do not redistribute as
-MIT."
-
-The following skills fall into this category:
-
-```
-agent-browser, architect-agent, bear-notes, discord, excalidraw, frontend-expert,
-gemini, gh-issues, github, healthcheck, last30days, nano-pdf, notion, obsidian,
-openai-image-gen, openai-whisper, openai-whisper-api, playwright-cli, remotion,
-session-logs, skill-creator, slack, things-mac, tmux, trello, video-frames,
-visual-verifier, voice-call, weather
-```
-
-If you intend to redistribute Orchestra commercially or under a stricter
-license-audit regime, the safest path is to remove `bundled-skills/` entirely
-and let operators install skills from their original sources at runtime.
-
-## Embedded XML schemas
-
-[`bundled-skills/xlsx/scripts/office/schemas/`](./bundled-skills/xlsx/scripts/office/schemas/)
-contains Office Open XML (OOXML) schema files from ISO/IEC 29500-4:2016 and
-Microsoft. These schemas are redistributed under their own licensing terms,
-not under MIT. See [Microsoft Open Specifications](https://docs.microsoft.com/en-us/openspecs/)
-for the canonical licensing reference.
+If you are the author of a skill listed here and want the attribution corrected
+or the skill removed, please open an issue. If you intend to redistribute
+Orchestra commercially or under a stricter license-audit regime, the safest path
+is still to delete `bundled-skills/` and let operators install skills from their
+original sources at runtime.
 
 ## Vendored dependencies
 

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Removed
+- Bundled skills `docx`, `xlsx` and `coding-agent`: proprietary, not redistributable. Install them from their original sources if you need them. Also removed the unused upstream (Eggent) banner image.
+
+### Security
+- `.env.example` no longer ships a credential. `EXTERNAL_API_TOKEN` is empty (the installers generate one; while it is empty `/api/external/message` is disabled), and the provider keys are commented out because a placeholder such as `sk-...` counts as a real key (PM #140).
+- The session-secret production guard rejects an unexpanded shell expression such as `$(openssl rand -base64 48)` (PM #140).
+- `npm run start` listens on `127.0.0.1` unless `ORCHESTRA_BIND_HOST` says otherwise (the Docker image sets `0.0.0.0` inside the container; `npm run dev` is unchanged). A fresh install accepts `admin`/`admin` until its first login, so it must not listen on every interface by default (PM #140). **Existing installs:** an `.env` created from the old `.env.example` still carries the public `EXTERNAL_API_TOKEN` — replace it with a random value.
+
+### Documentation
+- README restructured: install commands first, Docker path added, factual fixes, origin credit moved to a Credits section.
+- `NOTICE.md` gained the Together AI MoA attribution and a verified provenance table for the bundled skills; `bundled-skills/THIRD-PARTY-LICENSES.md` carries the upstream license notices.
+
 ## [0.9.0] - 2026-06-12
 
 ### Added

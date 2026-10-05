@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Removed
-- Bundled skills `docx`, `xlsx` and `coding-agent`: proprietary, not redistributable. Install them from their original sources if you need them. Also removed the unused upstream (Eggent) banner image.
+- Bundled skills `docx`, `xlsx` and `coding-agent` (proprietary) and `remotion` (its upstream publishes no license): not redistributable. Install them from their original sources if you need them. Also removed the unused upstream (Eggent) banner image.
 
 ### Security
 - `.env.example` no longer ships a credential. `EXTERNAL_API_TOKEN` is empty (the installers generate one; while it is empty `/api/external/message` is disabled), and the provider keys are commented out because a placeholder such as `sk-...` counts as a real key (PM #140).

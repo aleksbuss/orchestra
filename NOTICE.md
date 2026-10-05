@@ -74,11 +74,10 @@ Skills not covered by that table:
 
 | Skill | Status |
 | --- | --- |
-| `autoresearch` | MIT, © 2026 Andrej Karpathy — license file inside the directory. |
+| `autoresearch` | Instructions that drive Andrej Karpathy's [autoresearch](https://github.com/karpathy/autoresearch); none of its code is included, and neither `SKILL.md` nor `setup-macos.sh` matches a file of that project or of its MLX port (about 6 % shared lines). The directory carries a `LICENSE` naming Karpathy (MIT); note that the upstream repository itself publishes no license file. |
 | `graphify` | Written for Orchestra (added to this repository on 2026-08-15) — MIT, Orchestra contributors. |
-| `architect-agent`, `visual-verifier`, `frontend-expert` | No public upstream was found and they are not in the Eggent snapshot; treated as original to Orchestra (MIT). If you recognise one as your work, please open an issue. |
-| `excalidraw` | Inherited with the Eggent snapshot. Compared against ten public Excalidraw skills; none matched. Treated as part of the Eggent-derived code (MIT, © 2026 Eggent contributors) unless shown otherwise. |
-| `remotion` | Copied from [remotion-dev/skills](https://github.com/remotion-dev/skills), which publishes **no license file**, so the upstream grants no redistribution right. **Under review — expected to be removed**; install it from the original source instead. |
+| `architect-agent`, `visual-verifier`, `frontend-expert` | Present since Orchestra's first commit. Path-based history lookups found no commit touching them in Eggent or OpenClaw, two of them carry the `orchestra` metadata key (so they were written after the rename), and no public copy was found. Treated as original to Orchestra (MIT). If you recognise one as your work, please open an issue. |
+| `excalidraw` | Added to Eggent on 2026-02-25 ("new skills", ilya-bov) and inherited with the Eggent snapshot. Its own upstream could not be identified (compared with ten public Excalidraw skills; none matched). Covered by Eggent's MIT (© 2026 Eggent contributors) to the extent Eggent's contributors wrote it. |
 
 If you are the author of a skill listed here and want the attribution corrected
 or the skill removed, please open an issue. If you intend to redistribute

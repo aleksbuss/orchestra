@@ -184,7 +184,7 @@ If you add another runtime-invariant escape hatch, document it here in the same 
 
 ### Dependency advisories — why `audit:gate` stops at `critical` (audited 2026-08-07)
 
-`npm run audit:gate` is `npm audit --audit-level=critical --omit=dev`. It is **not** a claim that there are no `high` advisories — there are. Audit of `main` at `2087e43`:
+`npm run audit:gate` is `npm audit --audit-level=critical --omit=dev`. It is **not** a claim that there are no `high` advisories — there are. Audit of `main` at `9271b40`:
 
 - **12 advisories in PRODUCTION dependencies (1 low, 2 moderate, 9 high)**; 16 including dev. Zero `critical`, which is why the gate is green.
 - **Zero are first-party.** All reach the tree through four roots: `agent-browser` (→ `webdriverio` → `undici`, `shell-quote`, part of `ip-address`), `@modelcontextprotocol/sdk` (→ `hono`, `fast-uri`, part of `ip-address`), `next` (→ `sharp`, `postcss`), `archiver` (→ `brace-expansion`).

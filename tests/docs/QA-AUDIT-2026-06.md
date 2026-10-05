@@ -319,7 +319,7 @@ Severity per skill rubric: **P0** blocker/data-loss/security · **P1** critical 
 - **Fix:** happy-dom render tests for the top-5 components asserting the documented invariants (narrow store subscription, history refetch on tick bump, no `new EventSource` in components).
 
 ### F-04 · P2 · Documentation freshness drift — test count
-- **Where:** `README.md:9` badge `tests-2606`, `:28`, `:191` ("currently 2,606 tests"), `:417`. Actual total is **2,609** (2,608 stable). Commit `107bb5e` "sync body test count to 2,606" already re-drifted.
+- **Where:** `README.md:9` badge `tests-2606`, `:28`, `:191` ("currently 2,606 tests"), `:417`. Actual total is **2,609** (2,608 stable). Commit `fcda58a` "sync body test count to 2,606" already re-drifted.
 - **Impact:** Violates the `CLAUDE.md §7` doc-as-code contract (a drifted doc "actively misleads every future LLM-assisted change"). Low user impact, but it's the canary for the contract the repo prides itself on.
 - **Fix:** Derive the badge from `vitest` output in CI rather than hand-syncing (a `vitest --reporter=json | jq` step), or stop quoting an exact count in 4 places. Pick a single source of truth.
 - **DONE (2026-06-14):** both halves shipped. The 3 prose mentions are now number-free, so they never drift; the count lives ONLY in the badge, updated by [`scripts/sync-test-badge.mjs`](../../scripts/sync-test-badge.mjs) (`npm run badge:sync`) which reads vitest's own `numTotalTests` instead of a human counting `it(` blocks. `-- --check` is a CI-friendly stale-detector. Meta-tested: a deliberately-wrong badge (`1`) was auto-corrected to `2623`. This ended the treadmill that bumped the count manually 6× during this audit.

@@ -7,7 +7,7 @@
 
 ## 🧵 Context-Management Track (Sprints A1–A4) — Status & Handoff
 
-A 2026-06 track that fixed **silent context-window overflow** (especially local/Ollama models) and the brittle model-name-regex window guess. New modules: [`context-window.ts`](../../src/lib/providers/context-window.ts), [`token-governor.ts`](../../src/lib/agent/token-governor.ts), [`tool-guard.ts`](../../src/lib/agent/tool-guard.ts). Commits: `e4b30f0` (A1–A3), `8a20839` (MoA loop-guard extraction).
+A 2026-06 track that fixed **silent context-window overflow** (especially local/Ollama models) and the brittle model-name-regex window guess. New modules: [`context-window.ts`](../../src/lib/providers/context-window.ts), [`token-governor.ts`](../../src/lib/agent/token-governor.ts), [`tool-guard.ts`](../../src/lib/agent/tool-guard.ts). Commits: `90653b1` (A1–A3), `886b64c` (MoA loop-guard extraction).
 
 ### ✅ Contracts now in force (DONE — do not regress)
 
